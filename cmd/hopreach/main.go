@@ -41,6 +41,16 @@ func main() {
 		return
 	}
 
+	// Excludes concurrent runs from whichever combination of the container's
+	// initial background run, the daily cron job, and an on-demand
+	// /admin/recompute trigger happens to overlap — see lock.go.
+	lock, err := acquireLock()
+	if err != nil {
+		log.Printf("hopreach: %v, skipping this run", err)
+		return
+	}
+	defer lock.Close()
+
 	cfg := toAppConfig(yc)
 	cfg.forceRecompute = *force
 	if err := run(cfg); err != nil {

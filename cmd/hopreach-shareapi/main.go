@@ -218,6 +218,7 @@ func main() {
 	addr := cfg.Share.ListenAddr
 	http.HandleFunc("/api/plans", handlePlans)
 	http.HandleFunc("/api/plans/", handlePlans)
+	http.HandleFunc("/admin/recompute", handleRecompute)
 
 	// Remote GPU worker support is entirely opt-in: refuse to expose
 	// /gpu-worker at all unless a real token is configured, rather than
