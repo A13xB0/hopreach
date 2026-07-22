@@ -1,0 +1,638 @@
+:root {
+  --accent: #0077b6;
+  --nav-bg: #03045e;
+  --nav-bg-2: #023e8a;
+  --bg: #0a1929;
+  --text: #e0e7ef;
+  --text-muted: #8eafc4;
+  --card-bg: #0d2137;
+  --border: #1e3a5f;
+  --status-active: #4ade80;
+  --status-degraded: #facc15;
+  --status-silent: #64748b;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+header {
+  background: linear-gradient(90deg, var(--nav-bg), var(--nav-bg-2));
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  z-index: 1000;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+header .subtitle {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-left: 0.5rem;
+}
+
+#stats {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#stats .stat { display: flex; align-items: center; gap: 0.35rem; }
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot.active { background: var(--status-active); }
+.dot.degraded { background: var(--status-degraded); }
+.dot.silent { background: var(--status-silent); }
+
+#map-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+/* Plan panel spans the full right edge — shift Leaflet's own right-side
+   controls (basemap/layers up top, legend down below) left by the panel's
+   width so they stay reachable instead of disappearing underneath it. */
+#map-wrap.plan-open .leaflet-top.leaflet-right,
+#map-wrap.plan-open .leaflet-bottom.leaflet-right {
+  right: 320px;
+  transition: right 0.15s ease;
+}
+@media (max-width: 500px) {
+  #map-wrap.plan-open .leaflet-top.leaflet-right,
+  #map-wrap.plan-open .leaflet-bottom.leaflet-right {
+    right: 90vw;
+  }
+}
+
+.leaflet-popup-content-wrapper {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.leaflet-popup-tip { background: var(--card-bg); }
+
+.popup-title {
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 0.25rem;
+}
+.popup-row {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.popup-hint {
+  margin-top: 0.35rem;
+  font-size: 0.68rem;
+  font-style: italic;
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+.popup-neighbors {
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+.popup-neighbors-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+.popup-neighbors ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 0.72rem;
+}
+.popup-neighbors li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.popup-status {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-bottom: 0.4rem;
+}
+.popup-status.active { background: rgba(74,222,128,0.15); color: var(--status-active); }
+.popup-status.degraded { background: rgba(250,204,21,0.15); color: var(--status-degraded); }
+.popup-status.silent { background: rgba(100,116,139,0.2); color: var(--status-silent); }
+
+.legend {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.75rem;
+  max-width: 220px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.legend-title { font-weight: 600; margin-bottom: 0.4rem; }
+.legend-bar {
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #f97316, #22c55e);
+  margin-bottom: 0.25rem;
+}
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.legend-note {
+  margin-top: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  line-height: 1.3;
+}
+
+.legend-opacity {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+.legend-opacity input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.scope-filter-control {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.scope-filter-title {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+}
+.scope-filter-control label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+.scope-filter-control input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.position-mode-control {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.position-mode-title {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+}
+.position-mode-control select {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.75rem;
+}
+
+.leaflet-control-layers {
+  background: var(--card-bg) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+}
+
+/* Precision/Calibrated Precision coverage overlay: nearest-neighbour
+   scaling instead of the browser's default smooth (bilinear) upscaling,
+   so zooming in reveals the raster's real per-pixel detail as crisp
+   squares rather than blurring it into a soft gradient. */
+.coverage-crisp {
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+.leaflet-control-layers-expanded { padding: 0.5rem 0.75rem !important; }
+
+#error-banner {
+  display: none;
+  background: #7f1d1d;
+  color: #fecaca;
+  padding: 0.5rem 1.25rem;
+  font-size: 0.85rem;
+}
+
+#progress-banner {
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+#progress-banner.hidden { display: none; }
+#progress-text {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.progress-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+#progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #f97316, #22c55e);
+  transition: width 0.4s ease;
+}
+
+/* --- planning tools --- */
+
+#map-tools {
+  position: absolute;
+  bottom: 0.75rem;
+  left: 0.75rem;
+  /* Leaflet's own control corners sit at z-index:1000, and the layers
+     control (top-right, expanded) can overlap the panel's top edge since
+     the panel spans the full right side — this must stay above that. */
+  z-index: 1100;
+  display: flex;
+  gap: 0.5rem;
+}
+#map-tools button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  white-space: nowrap;
+}
+#map-tools button:hover { filter: brightness(1.1); }
+#companion-pin-toggle.active {
+  background: #f97316;
+}
+#companion-pin-hint {
+  position: absolute;
+  bottom: 3.5rem;
+  left: 0.75rem;
+  z-index: 1100;
+  max-width: 280px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+
+#plan-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  max-width: 90vw;
+  background: var(--card-bg);
+  border-left: 1px solid var(--border);
+  z-index: 1100;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.75rem;
+  box-shadow: -4px 0 16px rgba(0,0,0,0.4);
+}
+#plan-panel.hidden { display: none; }
+
+.plan-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  margin-bottom: 0.75rem;
+}
+.plan-panel-header button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.plan-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+.plan-row select, .plan-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.neighbor-window-control {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.72rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.neighbor-window-control label {
+  color: var(--text-muted);
+  flex: 1 1 auto;
+}
+.neighbor-window-control select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.72rem;
+}
+
+#plan-panel button, #plan-panel select, #plan-panel input[type="text"] {
+  background: var(--surface1, #0a1929);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#plan-panel input[type="text"] { cursor: text; }
+#plan-panel button:hover { border-color: var(--accent); }
+
+.plan-mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+.plan-mode-btn { flex: 1 1 30%; }
+.plan-mode-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.plan-full-width-btn {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+.plan-full-width-btn.active {
+  background: #a855f7;
+  border-color: #a855f7;
+  color: #fff;
+}
+
+.plan-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.05);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.plan-hint.hidden { display: none; }
+
+.plan-section-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin: 0.6rem 0 0.3rem;
+}
+
+.plan-list { display: flex; flex-direction: column; gap: 0.3rem; }
+.plan-empty { font-size: 0.75rem; color: var(--text-muted); font-style: italic; }
+
+.plan-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255,255,255,0.04);
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+}
+.plan-item-label { font-weight: 600; }
+.plan-item-sub { color: var(--text-muted); font-size: 0.68rem; flex: 1; }
+.plan-item-actions { display: flex; gap: 0.2rem; }
+.plan-item-actions button {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+}
+
+.plan-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.plan-field-row input[type="number"] {
+  width: 4rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.75rem;
+}
+
+.plan-connect-option {
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.plan-connect-option:hover {
+  background: rgba(255,255,255,0.08);
+}
+.plan-connect-option.selected {
+  border-color: #4ade80;
+  background: rgba(74,222,128,0.12);
+}
+.plan-connect-option .plan-item-actions button {
+  background: #4ade80;
+  border-color: #4ade80;
+  color: #0b1220;
+  font-weight: 600;
+}
+
+.plan-hop-result {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 0.15rem 0.6rem;
+}
+
+#plan-share-result {
+  font-size: 0.72rem;
+  background: rgba(255,255,255,0.05);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.6rem;
+  word-break: break-all;
+}
+#plan-share-result a { color: var(--accent); }
+#plan-share-result.hidden { display: none; }
+
+.planned-marker-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #a855f7;
+  border: 2px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+.companion-pin-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: #f97316;
+  border: 2px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+/* A personal, local-only repositioning of a real repeater — distinct from
+   both the purple "new planned site" dot and the orange companion pin, so
+   all three read as different things at a glance. Never replaces the real
+   repeater's own marker; see the dashed connector below. */
+.override-marker-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #f59e0b;
+  border: 2px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+/* --- neighbours --- */
+
+.plan-item-neighbors {
+  cursor: default;
+}
+
+.leaflet-tooltip.neighbor-tooltip-wrap {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+.leaflet-tooltip.neighbor-tooltip-wrap::before {
+  display: none;
+}
+
+.neighbor-tooltip {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.72rem;
+  max-width: 240px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+.neighbor-tooltip-title { font-weight: 700; margin-bottom: 0.1rem; }
+.neighbor-tooltip-sub { color: var(--text-muted); font-size: 0.68rem; margin-bottom: 0.35rem; }
+.neighbor-tooltip ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.neighbor-tooltip li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nb-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.nb-dot.nb-strong { background: #4ade80; }
+.nb-dot.nb-marginal { background: #facc15; }
+.nb-dot.nb-weak { background: #f87171; }

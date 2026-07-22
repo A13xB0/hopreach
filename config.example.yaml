@@ -1,0 +1,256 @@
+# HopReach configuration — copy this file to config.yaml and edit as
+# needed. Every value shown here is the built-in default (see
+# internal/config.Default); a config.yaml only needs to set the values you
+# actually want to change, everything else keeps its default.
+#
+# Resolved from (in order): the -config flag, the HOPREACH_CONFIG
+# environment variable, or ./config.yaml. In Docker, the image already
+# ships a container-appropriate config.yaml (see docker/config.docker.yaml)
+# with the paths below adjusted for the container's filesystem — mount your
+# own file over /config/config.yaml (see docker-compose.yml) to override it.
+
+# Where repeaters.geojson, meta.json, progress.json, and the coverage tile
+# PNGs are written.
+output_dir: public/data
+
+site:
+  name: HopReach Coverage
+  subtitle: MeshCore repeater map, refreshed daily
+  # A repeater is "active" if last heard within this many hours, "degraded"
+  # if within degraded_hours, otherwise "silent".
+  active_hours: 6
+  degraded_hours: 24
+  # Scope-filter checkboxes shown on the map (top-right, below the basemap
+  # switcher) — lets a viewer narrow the displayed repeaters to one or more
+  # CoreScope region scopes, purely client-side (doesn't affect what the
+  # nightly job fetches/stores). Add any scope code used by your CoreScope
+  # instance. The special value "unscoped" matches repeaters with no
+  # default_scope set at all, rather than a literal region.
+  scope_filters: [sco, ioi, unscoped]
+
+map:
+  center_lat: 56.8
+  center_lon: -4.2
+  zoom: 6
+
+region:
+  # Cosmetic label shown in meta.json's "boundary" field. Empty (default)
+  # describes the built-in Scotland boundary; set this when you also set
+  # boundary_path/boundary_url below so the frontend/API describe your own
+  # region instead of saying "Scotland".
+  name: ""
+  # HopReach isn't hard-wired to Scotland — point this at a local GeoJSON
+  # file (Feature, FeatureCollection, or bare Polygon/MultiPolygon
+  # geometry) to filter repeaters to any other area instead. Takes priority
+  # over boundary_url if both are set. Both empty (default): use the
+  # embedded Scotland boundary.
+  boundary_path: ""
+  # Alternative to boundary_path: download a boundary GeoJSON from a URL
+  # instead (cached under terrain.dem_cache_dir/boundary after the first
+  # successful download, so it's not re-fetched every run). geoBoundaries.org
+  # publishes a `gjDownloadURL` for most countries/administrative regions —
+  # e.g. https://www.geoboundaries.org/api/current/gbOpen/USA/ADM1/ (or any
+  # other GeoJSON boundary source).
+  boundary_url: ""
+  # Optionally also require repeaters' CoreScope default_scope to match this
+  # region (compared without the leading '#') on top of the geographic
+  # check. Empty (default) keeps every repeater inside the region boundary
+  # regardless of scope — set to e.g. "sco" to additionally require that
+  # scope tag if your CoreScope instance's operators use it consistently.
+  required_scope: ""
+
+corescope:
+  # CoreScope instance to pull repeater nodes and reach data from.
+  api_url: https://scotmesh-corescope.mm7roq.compute.oarc.uk
+  request_timeout_seconds: 30
+
+terrain:
+  # Elevation tiles (Mapzen/AWS "terrarium" format, global coverage, no API
+  # key) are downloaded once per area and cached — terrain doesn't change,
+  # so this isn't repeated on every scheduled run. Zoom 11 is roughly
+  # 40m/pixel resolution over Scotland; higher = more accurate but more
+  # tiles to download and slower to compute.
+  dem_zoom: 11
+  dem_cache_dir: dem-cache
+  dem_tile_url_base: https://s3.amazonaws.com/elevation-tiles-prod/terrarium
+
+# Terrain-aware estimated coverage model: free-space path loss +
+# single-knife-edge diffraction over real elevation data (earth curvature
+# included via the standard k=4/3 refracted-earth correction). Does NOT
+# model foliage or buildings, and assumes one dominant obstruction per path
+# (not a full multi-edge/Bullington or statistical Longley-Rice model). See
+# README for detail.
+propagation:
+  frequency_mhz: 868
+  # 22dBm (158mW) is ScotMesh's own documented "UK narrow" preset TX power —
+  # sourced from their actual config, not a guess, and well under the
+  # 500mW/27dBm ETSI ceiling for the 869.4-869.65MHz sub-band that preset's
+  # frequency falls in. Keep this in sync with reality rather than tuning it
+  # to make the map "look right" — use fade_margin_db for that instead.
+  tx_power_dbm: 22
+  tx_antenna_gain_dbi: 3
+  rx_antenna_gain_dbi: 0
+  # Realistic SF8/BW62.5kHz chip sensitivity with implementation margin.
+  rx_sensitivity_dbm: -124
+  # The only stand-in for everything the model doesn't simulate (foliage,
+  # buildings, other clutter). Raise further if real field reports show the
+  # map is still too generous; lower if it's now too conservative versus
+  # what people actually observe.
+  fade_margin_db: 20
+  # Assumed repeater antenna height above local ground level. Most repeaters
+  # are not on proper masts — window/balcony/eye-level mounting is typical —
+  # so this defaults to ~1m rather than a tall-mast figure. This has a much
+  # bigger effect on realism than the link-budget numbers above, since it
+  # changes the actual line-of-sight geometry on every path, not just the
+  # loss budget.
+  antenna_height_m: 1
+  # Assumed receiving station's antenna height above ground level.
+  rx_height_m: 2
+  # Hard cap on search radius per repeater regardless of link budget (keeps
+  # runtime bounded even with very optimistic power/sensitivity settings).
+  max_range_km: 100
+  # Signal margin (dB above sensitivity+fade margin) at which colour reaches
+  # full green; 0 dB margin (just barely covered) renders as orange.
+  margin_green_db: 15
+
+coverage:
+  # Raster width in pixels (height follows the region's aspect ratio).
+  # Higher = sharper but much slower — compute scales roughly with width^2.
+  # Coverage computation is parallelized across all CPU cores, so this can
+  # be pushed higher than it could be single-threaded; it only runs once a
+  # day (or on restart) anyway.
+  image_width: 2000
+  # A second, much higher-resolution pass ("Precision" / "Calibrated
+  # Precision" in the map's "Map detail" dropdown), always computed
+  # alongside the standard/calibrated ones above. Cost scales roughly with
+  # width^2:
+  #   4000  ~4x one standard pass  — noticeably sharper
+  #   6000  ~9x one standard pass  — the default
+  #   8000+ ~16x one standard pass — maximum detail, longest runtime
+  # See also gpu.mode below if you have Vulkan-capable hardware and want
+  # this to run much faster.
+  precision_width: 6000
+  # A wide raster alone can't show more real detail than the elevation data
+  # it's sampling — terrain.dem_zoom's default (11, ~42m/px over Scotland)
+  # is already coarser than the Precision raster's pixel size, so Precision
+  # passes load their own finer elevation grid at this zoom instead of
+  # reusing terrain.dem_zoom's. 13 is ~10.5m/px — a genuine resolution
+  # increase, not just interpolation of the same coarse data. Reference
+  # points for first-run tile counts (cached afterwards): ~5,700 tiles at
+  # 12, ~22,700 at 13, ~90,000+ at 14, for all of Scotland.
+  precision_dem_zoom: 13
+  # Margins are computed at precision_width*precision_supersample
+  # resolution and box-downsampled back down before colouring — genuine
+  # extra detail from finer terrain sampling, shown as proper
+  # anti-aliasing rather than a bigger PNG shipped to browsers.
+  precision_supersample: 2
+  # Max alpha (0-255) of the coverage overlay.
+  max_alpha: 190
+  # The whole fetch+compute pipeline is skipped entirely (logged, not an
+  # error) if the last successful run finished less than this many hours
+  # ago — checked against the existing meta.json's generated_at. This
+  # guards against redundant recomputation on every container restart
+  # (e.g. during iterative debugging) re-running a multi-minute job that
+  # only just finished. The real schedule (schedule.cron) is unaffected: 24h
+  # between runs is always well past this window by default, so it never
+  # blocks the actual scheduled refresh. Pass -force for a single run to
+  # bypass this and recompute immediately regardless of how recent the last
+  # run was (e.g. after changing propagation/scope config and wanting to
+  # see it reflected right away).
+  min_recompute_interval_hours: 6
+  # Per-tier GPU gating: skip a tier entirely (log a clear message, tier
+  # just absent from meta.json — same as an always-optional tier like
+  # Calibrated) rather than run it on CPU, if no GPU (local or a connected
+  # remote worker) is available at all. All default false — nothing changes
+  # unless you opt in. Precision/Calibrated Precision are the tiers actually
+  # worth gating on a GPU-less VPS; CPU-computing them at full resolution
+  # can take a very long time.
+  standard_requires_gpu: false
+  calibrated_requires_gpu: false
+  precision_requires_gpu: false
+  calibrated_precision_requires_gpu: false
+
+# CoreScope's /api/nodes/:pubkey/reach endpoint reports real observed relay
+# links between repeaters — ground truth about what's actually reachable, as
+# opposed to the terrain model's prediction from a repeater's self-reported
+# GPS position (which is sometimes off by tens to hundreds of metres, or
+# just wrong). Every repeater with enough observed links is scored against
+# its reported position, and repeaters that score badly (the model can't
+# explain links that were genuinely heard) are nudged, within a bounded
+# radius, toward a nearby position that fits the evidence better. This
+# always runs alongside the standard pass, producing a second coverage map;
+# the frontend shows a Standard/Calibrated dropdown. See
+# internal/calibration for the full scoring model.
+calibration:
+  # Skip calibration entirely for repeaters with fewer observed links than
+  # this — not enough evidence to act on.
+  min_links: 2
+  # Only bother searching for a better position if the reported position's
+  # score exceeds this ("individual coverage for the ones scored really
+  # inaccurate", not everyone).
+  needs_score: 5
+  # Candidate positions are never more than this far (metres) from the
+  # reported position — keeps a repeater from being moved somewhere
+  # implausible on thin evidence.
+  max_offset_m: 300
+  # Only adopt a candidate position if it improves the score by at least
+  # this percentage — avoids jittering a repeater whose reported position
+  # is already a reasonable fit.
+  min_improvement_pct: 20
+  # Lookback window (days) for the reach-data fetch used for calibration —
+  # deliberately wider than the frontend's neighbour-window default, to
+  # gather as much evidence as possible for the once-a-day scoring pass.
+  reach_days: 14
+
+gpu:
+  # Coverage computation can run on a GPU via WebGPU/Vulkan instead of CPU —
+  # same physics, same output (verified against the CPU path at startup
+  # before ever being trusted), just much faster for the Precision passes.
+  # "auto" tries it and silently falls back to CPU if no compatible
+  # GPU/driver is found (the default, safe on any machine). "cpu" skips the
+  # probe entirely. "gpu" forces it: a hard error instead of a silent
+  # fallback if it's unavailable, useful when you specifically want to
+  # confirm it's working. Requires a Vulkan-capable GPU on the host and
+  # passing it through to the container — see the commented-out `devices:`
+  # block in docker-compose.yml; without that, "auto" is a no-op.
+  mode: auto
+  remote:
+    # If the machine actually running this stack has no GPU of its own
+    # (e.g. a low-powered VPS), a separate machine that does can run as a
+    # remote compute worker instead — see docker-compose.gpuworker.yml and
+    # README.md's "Remote GPU worker" section. Empty (default): the whole
+    # feature is off, coverage compute just uses local GPU-or-CPU. Normally
+    # "127.0.0.1:8081" once remote_worker.token (below) is set — that's
+    # cmd/hopreach-shareapi's own listen address, the same always-on
+    # process just handling a different route, not a separate service.
+    broker_addr: ""
+
+schedule:
+  # Standard 5-field cron expression for the daily refresh job (Docker only
+  # — see docker/entrypoint.sh). The terrain computation can take several
+  # minutes to tens of minutes depending on coverage.image_width/
+  # propagation.max_range_km, so don't schedule this too tightly.
+  cron: "0 3 * * *"
+
+share:
+  # Days before a shared plan link (the planning tools' "Share" button) is
+  # deleted by the daily prune job. Shared plans have no auth — anyone with
+  # the link can view — and store only repeater positions/labels/hop
+  # chains, never a rendered coverage image.
+  ttl_days: 7
+  store_dir: shared-plans
+  listen_addr: 127.0.0.1:8081
+
+remote_worker:
+  # A real trust boundary, not a formality — the WebSocket endpoint a
+  # worker connects to is reachable from the public internet (nginx proxies
+  # it), and whoever holds this token can feed data into the live public
+  # map. Generate a real secret (e.g. `openssl rand -hex 32`), never leave
+  # it as a placeholder. Leaving it unset disables the endpoint entirely
+  # rather than defaulting to open.
+  token: ""
+  # How long to wait for a submitted job's result before giving up and
+  # falling back to CPU. Generous by default (30 min) — a large
+  # Precision-tier job on a worker with a cold DEM tile cache can spend
+  # several minutes just fetching tiles before GPU compute even starts.
+  job_timeout_seconds: 1800

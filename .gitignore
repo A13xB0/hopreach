@@ -1,0 +1,12 @@
+public/data/
+dem-cache/
+config.yaml
+docker-compose.override.yml
+public/hopreach.wasm
+public/wasm_exec.js
+
+# Stray build artifacts from running `go build` (rather than `make wasm` or
+# the Docker build) at the repo root or inside a cmd/ dir.
+/hopreach
+/hopreach-shareapi
+/hopreach-gpuworker

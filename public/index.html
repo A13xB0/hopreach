@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScotMesh Repeater Coverage</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div>
+      <h1 id="site-title">ScotMesh Repeater Coverage</h1>
+      <span class="subtitle" id="site-subtitle">MeshCore repeater map, refreshed daily</span>
+    </div>
+    <div id="stats">
+      <span class="stat"><span class="dot active"></span><span id="count-active">–</span> active</span>
+      <span class="stat"><span class="dot degraded"></span><span id="count-degraded">–</span> degraded</span>
+      <span class="stat"><span class="dot silent"></span><span id="count-silent">–</span> silent</span>
+      <span class="stat" id="last-updated">Last updated: –</span>
+    </div>
+  </header>
+  <div id="error-banner"></div>
+  <div id="progress-banner" class="hidden">
+    <div id="progress-text">Computing coverage…</div>
+    <div class="progress-track"><div id="progress-fill"></div></div>
+  </div>
+  <div id="map-wrap">
+    <div id="map"></div>
+
+    <div id="map-tools">
+      <button id="plan-toggle" title="Planning tools">Plan</button>
+      <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
+    </div>
+    <div id="companion-pin-hint" class="plan-hint hidden">Click the map to drop a pin. Drag it to move. Click the button again to remove it. Search is capped to ~35km for speed.</div>
+    <div id="plan-panel" class="hidden">
+      <div class="plan-panel-header">
+        <span>Planning tools</span>
+        <button id="plan-panel-close" aria-label="Close">×</button>
+      </div>
+
+      <div class="plan-row">
+        <select id="plan-select"></select>
+        <button id="plan-new" title="New plan">New</button>
+      </div>
+      <div class="plan-row" id="plan-name-row">
+        <input type="text" id="plan-name" placeholder="Plan name">
+        <button id="plan-save" title="Save">Save</button>
+        <button id="plan-delete" title="Delete this plan">Delete</button>
+      </div>
+      <div class="plan-row">
+        <button id="plan-export">Export .json</button>
+        <button id="plan-import-btn">Import .json</button>
+        <button id="plan-export-kml" title="Export placemarks + coverage overlay for Google Earth">Export .kml</button>
+        <input type="file" id="plan-import-file" accept="application/json" class="hidden">
+        <button id="plan-share">Share link</button>
+      </div>
+      <div id="plan-share-result" class="hidden"></div>
+
+      <div class="plan-mode-buttons">
+        <button data-mode="add-repeater" class="plan-mode-btn">+ Add repeater</button>
+        <button data-mode="adjust-repeater" class="plan-mode-btn">✎ Adjust repeater</button>
+        <button data-mode="los" class="plan-mode-btn">Check line of sight</button>
+        <button data-mode="connect-repeaters" class="plan-mode-btn">🔗 Connect repeaters</button>
+        <button data-mode="area-coverage" class="plan-mode-btn">▱ Cover an area</button>
+      </div>
+      <div id="plan-mode-hint" class="plan-hint hidden"></div>
+
+      <div id="plan-repeater-section">
+        <div class="plan-section-title">Planned repeaters</div>
+        <div id="plan-repeater-list" class="plan-list"></div>
+        <button id="plan-show-all-neighbors" class="plan-full-width-btn">Show all neighbours</button>
+      </div>
+
+      <div id="plan-override-section">
+        <div class="plan-section-title">Adjusted repeaters</div>
+        <div id="plan-override-list" class="plan-list"></div>
+      </div>
+
+      <div id="plan-los-section" class="hidden">
+        <div class="plan-section-title">Line-of-sight hops</div>
+        <div id="plan-los-list" class="plan-list"></div>
+        <button id="plan-los-clear">Clear chain</button>
+      </div>
+
+      <div id="plan-connect-section" class="hidden">
+        <div class="plan-section-title">Connect repeaters</div>
+        <div class="plan-field-row">
+          <label for="plan-connect-max-new">Max new repeaters</label>
+          <input type="number" id="plan-connect-max-new" min="1" max="20" value="6" />
+        </div>
+        <div id="plan-connect-status" class="plan-hint hidden"></div>
+        <div id="plan-connect-options" class="plan-list"></div>
+        <div id="plan-connect-list" class="plan-list"></div>
+        <button id="plan-connect-clear">Clear</button>
+      </div>
+
+      <div id="plan-area-section" class="hidden">
+        <div class="plan-section-title">Cover an area</div>
+        <div class="plan-field-row">
+          <label for="plan-area-max-new">Max new repeaters</label>
+          <input type="number" id="plan-area-max-new" min="1" max="20" value="6" />
+        </div>
+        <div id="plan-area-status" class="plan-hint hidden"></div>
+        <div id="plan-area-list" class="plan-list"></div>
+        <div class="plan-row">
+          <button id="plan-area-finish" disabled>Finish shape</button>
+          <button id="plan-area-clear">Clear</button>
+        </div>
+      </div>
+
+      <div id="plan-coverage-status" class="plan-hint hidden"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="config.js"></script>
+<script src="wasm_exec.js"></script>
+<script src="wasm-bridge.js"></script>
+<script src="terrain.js"></script>
+<script src="propagation.js"></script>
+<script src="app.js"></script>
+<script src="planner.js"></script>
+</body>
+</html>

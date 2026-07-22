@@ -1,0 +1,13 @@
+.git
+config.yaml
+docker-compose.override.yml
+docker-compose.override.yml.example
+public/data
+dem-cache
+public/hopreach.wasm
+public/wasm_exec.js
+/hopreach
+/hopreach-shareapi
+/hopreach-gpuworker
+*.md
+.github

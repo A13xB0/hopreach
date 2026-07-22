@@ -1,0 +1,35 @@
+services:
+  hopreach:
+    build: .
+    image: hopreach:latest
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - hopreach-data:/usr/share/nginx/html/data
+      # Elevation tiles are large (~100MB+) and terrain never changes, so
+      # they're cached separately from the daily-refreshed map data.
+      - hopreach-dem-cache:/data/dem-cache
+      - hopreach-shared-plans:/data/shared-plans
+      # Uncomment (and copy config.example.yaml to ./config.yaml first) to
+      # override the image's built-in defaults — see config.example.yaml
+      # for every available setting, all fully documented.
+      # - ./config.yaml:/config/config.yaml:ro
+      # If your config.yaml sets region.boundary_path to filter to a region
+      # other than the built-in Scotland default, mount that GeoJSON file
+      # too (region.boundary_url needs no mount — it's downloaded instead):
+      # - ./my-region.geojson:/config/my-region.geojson:ro
+    # Uncomment to let the coverage compute (gpu.mode: auto by default)
+    # actually find and use a GPU — without this, it always falls back to
+    # CPU, which is perfectly fine, just slower for the Precision passes.
+    # AMD/Intel via Mesa's Vulkan driver (already installed in the image)
+    # just needs the render device passed through:
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # NVIDIA needs the nvidia-container-toolkit runtime instead (not
+    # covered here) — see https://github.com/NVIDIA/nvidia-container-toolkit
+
+volumes:
+  hopreach-data:
+  hopreach-dem-cache:
+  hopreach-shared-plans:

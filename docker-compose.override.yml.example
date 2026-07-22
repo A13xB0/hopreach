@@ -1,0 +1,16 @@
+# Docker Compose automatically merges docker-compose.override.yml if
+# present — no -f flag needed. Copy this file to docker-compose.override.yml
+# (gitignored, personal/host-specific — see docker-compose.yml's own
+# commented-out devices: block for the same option inline, if you'd rather
+# not use a separate file) to enable GPU passthrough for this host:
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# AMD/Intel via Mesa's Vulkan driver (already installed in the image) just
+# needs the render device passed through. NVIDIA needs the
+# nvidia-container-toolkit runtime instead (not covered here) — see
+# https://github.com/NVIDIA/nvidia-container-toolkit
+services:
+  hopreach:
+    devices:
+      - /dev/dri:/dev/dri

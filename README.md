@@ -26,10 +26,11 @@ area.
 > assistance rather than fully by hand. The core physics (propagation
 > model, terrain grid) is cross-checked between the server and the
 > WebAssembly build it shares with the browser — see
-> [WASM shared core](#wasm-shared-core) — and it's been exercised against
-> real data, but it hasn't had independent human code review. Read the
-> source yourself before relying on it for anything safety-critical or in a
-> professional context.
+> [WASM shared core](#wasm-shared-core) — it's been exercised against real
+> data, and human review has been endeavoured throughout, but it hasn't had
+> independent, dedicated code review from someone who wasn't also steering
+> the AI. Read the source yourself before relying on it for anything
+> safety-critical or in a professional context.
 
 ![HopReach map view, showing estimated coverage over central Scotland](docs/screenshot-mainpage.png)
 

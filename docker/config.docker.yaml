@@ -1,0 +1,85 @@
+# Baked into the Docker image as its default config.yaml (see Dockerfile,
+# which COPYs this to /config/config.yaml and sets HOPREACH_CONFIG to that
+# path). Identical to ../config.example.yaml's values except the three
+# paths below, which point at the container's actual data volumes instead
+# of relative local-dev paths — see docker-compose.yml's volumes: block.
+#
+# Mount your own file over /config/config.yaml (docker-compose.yml has a
+# commented-out example) to override any of this. See config.example.yaml
+# at the repo root for full documentation of every field.
+output_dir: /usr/share/nginx/html/data
+
+site:
+  name: HopReach Coverage
+  subtitle: MeshCore repeater map, refreshed daily
+  active_hours: 6
+  degraded_hours: 24
+  scope_filters: [sco, ioi, unscoped]
+
+map:
+  center_lat: 56.8
+  center_lon: -4.2
+  zoom: 6
+
+region:
+  name: ""
+  boundary_path: ""
+  boundary_url: ""
+  required_scope: ""
+
+corescope:
+  api_url: https://scotmesh-corescope.mm7roq.compute.oarc.uk
+  request_timeout_seconds: 30
+
+terrain:
+  dem_zoom: 11
+  dem_cache_dir: /data/dem-cache
+  dem_tile_url_base: https://s3.amazonaws.com/elevation-tiles-prod/terrarium
+
+propagation:
+  frequency_mhz: 868
+  tx_power_dbm: 22
+  tx_antenna_gain_dbi: 3
+  rx_antenna_gain_dbi: 0
+  rx_sensitivity_dbm: -124
+  fade_margin_db: 20
+  antenna_height_m: 1
+  rx_height_m: 2
+  max_range_km: 100
+  margin_green_db: 15
+
+coverage:
+  image_width: 2000
+  precision_width: 6000
+  precision_dem_zoom: 13
+  precision_supersample: 2
+  max_alpha: 190
+  min_recompute_interval_hours: 6
+  standard_requires_gpu: false
+  calibrated_requires_gpu: false
+  precision_requires_gpu: false
+  calibrated_precision_requires_gpu: false
+
+calibration:
+  min_links: 2
+  needs_score: 5
+  max_offset_m: 300
+  min_improvement_pct: 20
+  reach_days: 14
+
+gpu:
+  mode: auto
+  remote:
+    broker_addr: ""
+
+schedule:
+  cron: "0 3 * * *"
+
+share:
+  ttl_days: 7
+  store_dir: /data/shared-plans
+  listen_addr: 127.0.0.1:8081
+
+remote_worker:
+  token: ""
+  job_timeout_seconds: 1800

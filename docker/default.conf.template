@@ -1,0 +1,80 @@
+# Replaces nginx:alpine's stock default.conf. Serves the static map site
+# and proxies elevation tiles same-origin (the client-side planning tools
+# fetch these directly and read pixels via canvas, which requires either
+# CORS headers from the upstream host — untested/unreliable to depend on —
+# or a same-origin proxy like this one, which sidesteps the question
+# entirely and adds free caching since the upstream sets no Cache-Control).
+proxy_cache_path /var/cache/nginx/dem-tiles levels=1:2 keys_zone=dem_tiles:10m max_size=500m inactive=30d use_temp_path=off;
+
+server {
+    listen       80;
+    server_name  localhost;
+
+    # gzip the static assets that benefit most: hopreach.wasm (a few MB
+    # uncompressed) and the JS bundle, plus the JSON data files. Explicit
+    # rather than relying on a default — the stock nginx.conf ships with
+    # gzip off.
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types application/wasm application/javascript text/javascript application/json;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+    }
+
+    # application/wasm predates some nginx builds' bundled mime.types —
+    # set it explicitly so the browser's WebAssembly.instantiateStreaming
+    # (which validates Content-Type) doesn't have to fall back to the
+    # slower arrayBuffer path.
+    location ~ \.wasm$ {
+        root         /usr/share/nginx/html;
+        default_type application/wasm;
+    }
+
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+        root   /usr/share/nginx/html;
+    }
+
+    location /dem-tiles/ {
+        proxy_cache dem_tiles;
+        proxy_cache_valid 200 30d;
+        proxy_cache_key $uri;
+        proxy_set_header Host s3.amazonaws.com;
+        proxy_pass https://s3.amazonaws.com/elevation-tiles-prod/terrarium/;
+        proxy_ssl_server_name on;
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+
+    # cmd/hopreach-shareapi — always-on, localhost-only Go process for plan sharing.
+    location /api/plans {
+        proxy_pass http://127.0.0.1:8081;
+    }
+
+    # Remote GPU worker WebSocket endpoint (cmd/hopreach-shareapi's
+    # gpubroker routes) — the one part of that process that genuinely
+    # needs to be reachable from outside this host, since the worker runs
+    # on a separate machine behind its own NAT and connects in. Real auth
+    # (remote_worker.token, a bearer token) happens inside shareapi itself;
+    # this is just the WebSocket upgrade plumbing. shareapi refuses to
+    # even register this route if no token is configured, so an
+    # unconfigured deployment just 404s here.
+    location /gpu-worker {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+    }
+
+    # Same-origin proxy to the configured CoreScope instance, so the
+    # planning tools can fetch real observed neighbour data
+    # (/api/nodes/:pubkey/reach) from the browser without hitting CORS —
+    # CoreScope sends no Access-Control-Allow-Origin header.
+    location /corescope-api/ {
+        proxy_pass {{.CoreScopeAPIURL}}/;
+        proxy_set_header Host $proxy_host;
+        proxy_ssl_server_name on;
+    }
+}

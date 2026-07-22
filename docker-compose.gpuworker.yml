@@ -1,0 +1,29 @@
+# Remote GPU worker — run this on the machine that actually has a GPU (not
+# the VPS running the main stack). See README.md's "Remote GPU worker"
+# section. Point GPU_BROKER_WS_URL at the VPS's public address; the token
+# must match GPU_WORKER_TOKEN configured on the VPS side (docker-compose.yml).
+#
+# Usage: docker compose -f docker-compose.gpuworker.yml up -d --build
+services:
+  gpuworker:
+    build:
+      context: .
+      dockerfile: docker/gpuworker.Dockerfile
+    image: hopreach-gpuworker:latest
+    restart: unless-stopped
+    environment:
+      GPU_BROKER_WS_URL: "${GPU_BROKER_WS_URL:?set this to wss://your-vps-host/gpu-worker}"
+      GPU_WORKER_TOKEN: "${GPU_WORKER_TOKEN:?set this to the same secret configured on the VPS}"
+      DEM_TILE_URL_BASE: "${DEM_TILE_URL_BASE:-https://s3.amazonaws.com/elevation-tiles-prod/terrarium}"
+      GPU_WORKER_RECONNECT_SECONDS: "${GPU_WORKER_RECONNECT_SECONDS:-10}"
+    volumes:
+      # Its own DEM tile cache — separate from the VPS's, since this
+      # machine fetches/caches tiles independently rather than the VPS
+      # shipping grid data over the wire (see the "Remote GPU worker"
+      # README section for why).
+      - hopreach-gpuworker-dem-cache:/data/dem-cache
+    devices:
+      - /dev/dri:/dev/dri
+
+volumes:
+  hopreach-gpuworker-dem-cache:

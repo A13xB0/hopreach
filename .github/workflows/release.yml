@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go build ./...
+      - run: go test ./...
+      - run: GOOS=js GOARCH=wasm go build ./wasm
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image name
+        id: image
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # The main site image — hopreach + hopreach-shareapi + the WASM
+      # planning tools + nginx. Runs on the VPS (or wherever the map itself
+      # is hosted); see README.md's Quick start.
+      - name: Build and push main image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image.outputs.name }}:${{ github.ref_name }}
+            ghcr.io/${{ steps.image.outputs.name }}:latest
+
+      # The remote GPU worker — a separate, optional deployment on whatever
+      # machine actually has a GPU, not the VPS. See README.md's "Remote GPU
+      # worker" section.
+      - name: Build and push GPU worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/gpuworker.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image.outputs.name }}-gpuworker:${{ github.ref_name }}
+            ghcr.io/${{ steps.image.outputs.name }}-gpuworker:latest
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
