@@ -153,6 +153,22 @@ func sitesNear(sites []propagation.Site, bounds propagation.Bounds, rangeKm floa
 	return out
 }
 
+// stubGrid is a cheap 1x1-DEM-tile grid (all sea level) carrying only a
+// real Zoom, for the case where a tile's actual terrain is known to never
+// be read locally — see its call site in MarginsChunked. Deliberately not
+// a genuinely-empty/zero-value Grid: if a connected-at-the-time-of-check
+// remote worker disconnects mid-call and Margins falls through to the CPU
+// path, that path *does* dereference the grid via At(), and a zero-value
+// Grid's Width/Height of 0 would index out of range and panic. A real
+// (if degenerate) 1x1-tile grid instead just degrades that one unlucky
+// tile to flat sea-level terrain — wrong, but safe, matching how a failed
+// individual DEM tile fetch elsewhere in this codebase already degrades to
+// the same fallback rather than failing the whole pass.
+func stubGrid(zoom int) *demgrid.Grid {
+	g, _ := demgrid.NewFromElev(zoom, 0, 0, 1, 1, make([]float32, 256*256))
+	return g
+}
+
 func clampF(v, lo, hi float64) float64 {
 	if v < lo {
 		return lo
@@ -198,10 +214,27 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 			continue
 		}
 
-		loadBounds := demgrid.Bounds{South: tl.loadBounds.South, North: tl.loadBounds.North, West: tl.loadBounds.West, East: tl.loadBounds.East}
-		grid, err := demgrid.Load(loadBounds, zoom, cacheDir, tileURLBase, client, nil)
-		if err != nil {
-			return nil, fmt.Errorf("chunked margins: tile %d/%d terrain: %w", i+1, len(tiles), err)
+		// A connected remote worker never reads this grid's contents (only
+		// its Zoom, to set the job's DemZoom — see marginsRemote) since it
+		// loads its own copy from DemBounds. Skipping the load here when
+		// remote is the path that will actually serve this tile matters:
+		// this process (the batch job, often the same modest box that also
+		// runs the website) would otherwise pay real memory for a grid
+		// nothing here ever looks at, on top of the full-raster margins
+		// buffer (out, above) it's already holding for the whole pass —
+		// together enough to OOM a 2GB box. If local GPU is configured
+		// (e.localBE != nil), the real grid is still needed, since that
+		// path *does* read it directly.
+		var grid *demgrid.Grid
+		if e.localBE == nil && e.remoteAvailable() {
+			grid = stubGrid(zoom)
+		} else {
+			loadBounds := demgrid.Bounds{South: tl.loadBounds.South, North: tl.loadBounds.North, West: tl.loadBounds.West, East: tl.loadBounds.East}
+			var err error
+			grid, err = demgrid.Load(loadBounds, zoom, cacheDir, tileURLBase, client, nil)
+			if err != nil {
+				return nil, fmt.Errorf("chunked margins: tile %d/%d terrain: %w", i+1, len(tiles), err)
+			}
 		}
 
 		base := donePixels

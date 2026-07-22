@@ -2,15 +2,19 @@ package compute
 
 import (
 	"bytes"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"hopreach/internal/demgrid"
+	"hopreach/internal/gpujob"
 	"hopreach/internal/propagation"
 )
 
@@ -172,5 +176,76 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 	}
 	if mismatches > 0 {
 		t.Errorf("%d/%d pixels differ between chunked and unchunked passes over identical flat terrain", mismatches, len(want))
+	}
+}
+
+// TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable is the regression
+// test for the production incident this covers: the website box running
+// the batch job only has 2GB RAM, and MarginsChunked was loading a real
+// (if budget-bounded) local elevation grid for every non-empty tile even
+// though a connected remote worker never reads that grid's contents —
+// only its Zoom. That redundant local grid, held alongside the full-raster
+// margins buffer MarginsChunked already keeps for the whole pass, was
+// enough to OOM the process. This asserts the local DEM tile server is
+// never actually hit once a remote worker is connected.
+func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
+	oldBudget := chunkGridBudgetBytes
+	chunkGridBudgetBytes = 10 * demTileBytes
+	defer func() { chunkGridBudgetBytes = oldBudget }()
+
+	var localTileHits int32
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&localTileHits, 1)
+		http.Error(w, "local terrain should never be fetched when a remote worker is connected", http.StatusInternalServerError)
+	}))
+	defer localSrv.Close()
+
+	bounds := propagation.Bounds{South: 56.0, North: 57.0, West: -5.0, East: -4.0}
+	const zoom = 12
+	const imageWidth, imageHeight = 60, 60
+	p := propagation.Params{
+		FrequencyMHz: 868, TxPowerDBm: 22, TxAntennaGainDB: 3, RxAntennaGainDB: 0,
+		RxSensitivityDB: -124, FadeMarginDB: 20, AntennaHeightM: 1.6, RxHeightM: 2,
+		MaxRangeKm: 40, MarginGreenDB: 15,
+	}
+	rangeKm := propagation.LinkBudgetMaxRangeKm(p)
+	sites := []propagation.Site{
+		{Lat: 56.15, Lon: -4.7, GroundM: 100, TxHeightM: 101.6},
+		{Lat: 56.25, Lon: -4.4, GroundM: 100, TxHeightM: 101.6},
+	}
+
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
+	if len(tiles) < 3 {
+		t.Fatalf("test setup: expected several tiles, got %d", len(tiles))
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gpu/status", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]bool{"worker_connected": true})
+	})
+	mux.HandleFunc("/gpu/progress", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]int{"done": 0, "total": 0})
+	})
+	mux.HandleFunc("/gpu/submit", func(w http.ResponseWriter, r *http.Request) {
+		var job gpujob.Job
+		if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(gpujob.Float32ToBytesLE(make([]float32, job.ImageWidth*job.ImageHeight)))
+	})
+	broker := httptest.NewServer(mux)
+	defer broker.Close()
+
+	e := New()
+	e.SetRemote(strings.TrimPrefix(broker.URL, "http://"), localSrv.URL)
+
+	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), localSrv.URL, &http.Client{}, sites, imageWidth, imageHeight, rangeKm, p, nil)
+	if err != nil {
+		t.Fatalf("MarginsChunked: %v", err)
+	}
+	if hits := atomic.LoadInt32(&localTileHits); hits != 0 {
+		t.Errorf("local DEM tile server was hit %d times; want 0 (remote worker was connected throughout)", hits)
 	}
 }
