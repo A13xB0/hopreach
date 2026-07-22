@@ -37,14 +37,20 @@ type gpuJobResult struct {
 	err     string
 }
 
+type jobProgress struct{ done, total int }
+
 type gpuBroker struct {
-	mu      sync.Mutex
-	conn    *websocket.Conn
-	writeMu sync.Mutex // serializes writes to conn, separate from mu so a slow write doesn't block status/pending bookkeeping
-	pending map[string]chan gpuJobResult
+	mu       sync.Mutex
+	conn     *websocket.Conn
+	writeMu  sync.Mutex // serializes writes to conn, separate from mu so a slow write doesn't block status/pending bookkeeping
+	pending  map[string]chan gpuJobResult
+	progress map[string]jobProgress // updated as Progress frames arrive, read by /gpu/progress; cleared once a job is delivered
 }
 
-var broker = &gpuBroker{pending: make(map[string]chan gpuJobResult)}
+var broker = &gpuBroker{
+	pending:  make(map[string]chan gpuJobResult),
+	progress: make(map[string]jobProgress),
+}
 
 // Default is generous (30 min), not a few seconds' safety margin: a large
 // Precision-tier job on a worker with a cold DEM tile cache can spend
@@ -85,6 +91,7 @@ func (b *gpuBroker) failAllPending(reason string) {
 	for id, ch := range b.pending {
 		ch <- gpuJobResult{err: reason}
 		delete(b.pending, id)
+		delete(b.progress, id)
 	}
 }
 
@@ -94,10 +101,33 @@ func (b *gpuBroker) deliver(id string, margins []byte, errMsg string) {
 	if ok {
 		delete(b.pending, id)
 	}
+	delete(b.progress, id)
 	b.mu.Unlock()
 	if ok {
 		ch <- gpuJobResult{margins: margins, err: errMsg}
 	}
+}
+
+// setProgress records the latest (done, total) reported for an in-flight
+// job — see handleGPUProgress, polled by internal/compute's remote-dispatch
+// path while it waits on /gpu/submit.
+func (b *gpuBroker) setProgress(id string, done, total int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Only meaningful for a job this broker actually still considers
+	// in-flight — a stray/late Progress frame for an already-delivered (or
+	// never-submitted) job ID shouldn't resurrect a map entry nothing will
+	// ever clean up.
+	if _, ok := b.pending[id]; ok {
+		b.progress[id] = jobProgress{done: done, total: total}
+	}
+}
+
+func (b *gpuBroker) getProgress(id string) (done, total int, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, ok := b.progress[id]
+	return p.done, p.total, ok
 }
 
 // submit sends job to the connected worker and blocks until a result
@@ -146,11 +176,12 @@ func (b *gpuBroker) submit(job gpujob.Job, timeout time.Duration) ([]byte, error
 	}
 }
 
-// readLoop owns one worker connection for its lifetime: every completed
-// job arrives as a JSON Result text frame, immediately followed (only if
-// Result.Error is empty) by one binary frame of raw little-endian float32
-// margins. Strict ordering is safe here specifically because only one job
-// is ever in flight at a time (see the package comment).
+// readLoop owns one worker connection for its lifetime. Two kinds of JSON
+// text frame arrive: zero or more Progress frames while a job is still
+// computing, then exactly one terminal Result frame, immediately followed
+// (only if Result.Error is empty) by one binary frame of raw little-endian
+// float32 margins. Strict ordering is safe here specifically because only
+// one job is ever in flight at a time (see the package comment).
 func (b *gpuBroker) readLoop(conn *websocket.Conn) {
 	defer conn.Close()
 	for {
@@ -165,6 +196,25 @@ func (b *gpuBroker) readLoop(conn *websocket.Conn) {
 		if msgType != websocket.TextMessage {
 			continue
 		}
+
+		var head struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(data, &head); err != nil {
+			log.Printf("gpubroker: malformed message from worker: %v", err)
+			continue
+		}
+
+		if head.Kind == gpujob.KindProgress {
+			var p gpujob.Progress
+			if err := json.Unmarshal(data, &p); err != nil {
+				log.Printf("gpubroker: malformed progress frame from worker: %v", err)
+				continue
+			}
+			b.setProgress(p.ID, p.Done, p.Total)
+			continue
+		}
+
 		var result gpujob.Result
 		if err := json.Unmarshal(data, &result); err != nil {
 			log.Printf("gpubroker: malformed result from worker: %v", err)
@@ -241,6 +291,21 @@ func handleGPUSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(margins)
+}
+
+// handleGPUProgress reports the latest (done, total) reported for an
+// in-flight job — local-only in practice, same as handleGPUSubmit, polled
+// by internal/compute's remote-dispatch path while its one blocking
+// /gpu/submit call for the same job ID is still outstanding. Not an error
+// if nothing's tracked yet (a job that hasn't reported any progress frames
+// yet, or one that already finished) — just reports zeros, same as the
+// "haven't started" state every other compute path already reports before
+// its first real sample.
+func handleGPUProgress(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	done, total, _ := broker.getProgress(id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"done": done, "total": total})
 }
 
 // handleGPUStatus reports whether a worker is currently connected — used

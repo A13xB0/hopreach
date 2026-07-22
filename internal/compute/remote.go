@@ -49,19 +49,33 @@ func (e *Engine) nextJobID() string {
 	return fmt.Sprintf("job-%d-%d", time.Now().UnixNano(), e.jobSeq)
 }
 
+// remoteProgressPollInterval is how often marginsRemote polls
+// /gpu/progress while its one /gpu/submit call is still outstanding —
+// frequent enough to feel live in the UI, infrequent enough that polling
+// itself is never a meaningful cost next to an actual coverage pass.
+const remoteProgressPollInterval = 500 * time.Millisecond
+
 // marginsRemote submits one whole coverage pass to the broker and blocks
 // until the result arrives (or the broker's own job timeout fires and it
-// responds with an error) — same "whole pass, one round trip" granularity as
-// a local GPU pass, just over a network hop instead of a function call. The
-// elevation grid itself is never sent — only bounds, sites, and propagation
-// parameters; the worker fetches/caches its own DEM tiles from
-// e.demTileURLBase, since a low-powered VPS likely also means a modest-
-// bandwidth link not worth spending on shipping a multi-GB grid.
+// responds with an error). The elevation grid itself is never sent — only
+// bounds, sites, and propagation parameters; the worker fetches/caches its
+// own DEM tiles from e.demTileURLBase, since a low-powered VPS likely also
+// means a modest-bandwidth link not worth spending on shipping a multi-GB
+// grid.
+//
+// The actual submit call still only completes once, in one HTTP round
+// trip — but while it's outstanding, this polls the broker's separately
+// tracked per-job progress (fed by Progress frames the worker sends over
+// its WebSocket connection as gpucompute.ComputeMargins' own dispatch loop
+// reports rows done) so progressFn sees real incremental updates instead
+// of just an opening 0/total and a closing total/total either side of one
+// long silent wait.
 func (e *Engine) marginsRemote(grid *demgrid.Grid, sites []propagation.Site, bounds propagation.Bounds, imageWidth, imageHeight int, rangeKm float64, p propagation.Params, progressFn func(done, total int)) ([]float32, error) {
 	job := gpujob.Job{
 		ID:             e.nextJobID(),
 		Sites:          sites,
 		Bounds:         bounds,
+		DemBounds:      padBounds(bounds, rangeKm),
 		ImageWidth:     imageWidth,
 		ImageHeight:    imageHeight,
 		RangeKm:        rangeKm,
@@ -77,6 +91,45 @@ func (e *Engine) marginsRemote(grid *demgrid.Grid, sites []propagation.Site, bou
 	if progressFn != nil {
 		progressFn(0, imageHeight)
 	}
+
+	type submitOutcome struct {
+		data []byte
+		err  error
+	}
+	outcomeCh := make(chan submitOutcome, 1)
+	go func() {
+		data, err := e.submitRemoteJob(body, imageWidth, imageHeight)
+		outcomeCh <- submitOutcome{data: data, err: err}
+	}()
+
+	ticker := time.NewTicker(remoteProgressPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case outcome := <-outcomeCh:
+			if outcome.err != nil {
+				return nil, outcome.err
+			}
+			margins := gpujob.BytesToFloat32LE(outcome.data)
+			if progressFn != nil {
+				progressFn(imageHeight, imageHeight)
+			}
+			return margins, nil
+		case <-ticker.C:
+			if progressFn == nil {
+				continue
+			}
+			if done, total := e.pollRemoteProgress(job.ID); total > 0 {
+				progressFn(done, total)
+			}
+		}
+	}
+}
+
+// submitRemoteJob does the actual blocking POST /gpu/submit call —
+// factored out of marginsRemote so that function can run it in a goroutine
+// and poll progress concurrently while it's outstanding.
+func (e *Engine) submitRemoteJob(body []byte, imageWidth, imageHeight int) ([]byte, error) {
 	resp, err := http.Post(fmt.Sprintf("http://%s/gpu/submit", e.brokerAddr), "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("remote GPU: submitting job: %w", err)
@@ -99,9 +152,22 @@ func (e *Engine) marginsRemote(grid *demgrid.Grid, sites []propagation.Site, bou
 	if len(data) != imageWidth*imageHeight*4 {
 		return nil, fmt.Errorf("remote GPU: result size %d doesn't match expected %d", len(data), imageWidth*imageHeight*4)
 	}
-	margins := gpujob.BytesToFloat32LE(data)
-	if progressFn != nil {
-		progressFn(imageHeight, imageHeight)
+	return data, nil
+}
+
+// pollRemoteProgress is a best-effort read of the broker's tracked
+// progress for jobID — any failure (network hiccup, broker briefly
+// unreachable) just means this poll contributes no update, never an error
+// that could disrupt the real submit/result flow above.
+func (e *Engine) pollRemoteProgress(jobID string) (done, total int) {
+	resp, err := http.Get(fmt.Sprintf("http://%s/gpu/progress?id=%s", e.brokerAddr, jobID))
+	if err != nil {
+		return 0, 0
 	}
-	return margins, nil
+	defer resp.Body.Close()
+	var p struct{ Done, Total int }
+	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+		return 0, 0
+	}
+	return p.Done, p.Total
 }

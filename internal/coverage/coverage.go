@@ -13,6 +13,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -183,6 +184,30 @@ func RasterSupersampled(engine *compute.Engine, grid *demgrid.Grid, sites []prop
 	margins := engine.Margins(grid, sites, bounds, computeW, computeH, rangeKm, p, progress)
 	margins, _, _ = downsampleMargins(margins, computeW, computeH, supersample)
 	return marginsToImage(margins, servedW, servedH, p, maxAlpha)
+}
+
+// RasterSupersampledChunked is RasterSupersampled for regions too large to
+// load as a single elevation grid (see compute.Engine.MarginsChunked) —
+// used for the Precision tier, where a whole-region grid at a high DEM zoom
+// can run into several GB. Takes what MarginsChunked needs to load its own
+// per-band grids instead of one already-loaded *demgrid.Grid.
+func RasterSupersampledChunked(engine *compute.Engine, bounds propagation.Bounds, zoom int, cacheDir, tileURLBase string, client *http.Client, sites []propagation.Site, servedWidth, supersample int, p propagation.Params, maxAlpha uint8, progress func(done, total int)) (*image.NRGBA, error) {
+	servedW, servedH := dimensions(bounds, servedWidth)
+	if servedW == 0 {
+		return nil, nil
+	}
+	if supersample < 1 {
+		supersample = 1
+	}
+	computeW, computeH := servedW*supersample, servedH*supersample
+
+	rangeKm := propagation.LinkBudgetMaxRangeKm(p)
+	margins, err := engine.MarginsChunked(bounds, zoom, cacheDir, tileURLBase, client, sites, computeW, computeH, rangeKm, p, progress)
+	if err != nil {
+		return nil, err
+	}
+	margins, _, _ = downsampleMargins(margins, computeW, computeH, supersample)
+	return marginsToImage(margins, servedW, servedH, p, maxAlpha), nil
 }
 
 // Tile is one piece of a coverage raster split for efficient browser

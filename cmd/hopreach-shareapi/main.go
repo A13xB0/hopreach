@@ -228,6 +228,7 @@ func main() {
 		http.HandleFunc("/gpu-worker", handleGPUWorkerConnect(cfg.RemoteWorker.Token))
 		http.HandleFunc("/gpu/submit", handleGPUSubmit)
 		http.HandleFunc("/gpu/status", handleGPUStatus)
+		http.HandleFunc("/gpu/progress", handleGPUProgress)
 		log.Printf("shareapi: remote GPU worker support enabled")
 	} else {
 		log.Printf("shareapi: remote_worker.token not set, remote GPU worker support disabled")

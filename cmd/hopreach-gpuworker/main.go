@@ -24,6 +24,7 @@ import (
 	"hopreach/internal/demgrid"
 	"hopreach/internal/gpucompute"
 	"hopreach/internal/gpujob"
+	"hopreach/internal/propagation"
 )
 
 func getEnv(key, fallback string) string {
@@ -46,8 +47,24 @@ func getEnvFloat(key string, fallback float64) float64 {
 	return f
 }
 
-func processJob(be *gpucompute.Backend, cacheDir string, httpClient *http.Client, job gpujob.Job) (margins []byte, err error) {
-	bounds := demgrid.Bounds{South: job.Bounds.South, North: job.Bounds.North, West: job.Bounds.West, East: job.Bounds.East}
+// progressSendInterval throttles how often a Progress frame goes out over
+// the WebSocket while ComputeMargins' own dispatch loop reports rows done —
+// that loop can report far more often than is useful to relay over the
+// network, and every dropped frame here just costs one fewer UI update,
+// never correctness (the final Result always arrives regardless). Same
+// rationale/value as internal/progress.Writer's own minSampleInterval.
+const progressSendInterval = 500 * time.Millisecond
+
+func processJob(be *gpucompute.Backend, cacheDir string, httpClient *http.Client, job gpujob.Job, conn *websocket.Conn) (margins []byte, err error) {
+	// DemBounds (padded by the job's range so a site/path near the edge of
+	// Bounds still sees real terrain beyond it) is what this worker should
+	// actually fetch — see the field comment on gpujob.Job. Falls back to
+	// the exact output Bounds for any submitter that predates the field.
+	demBounds := job.DemBounds
+	if demBounds == (propagation.Bounds{}) {
+		demBounds = job.Bounds
+	}
+	bounds := demgrid.Bounds{South: demBounds.South, North: demBounds.North, West: demBounds.West, East: demBounds.East}
 	grid, err := demgrid.Load(bounds, job.DemZoom, cacheDir, job.DemTileURLBase, httpClient, func(done, total int) {
 		if done == total {
 			log.Printf("gpuworker: job %s: terrain loaded (%d tiles)", job.ID, total)
@@ -58,7 +75,24 @@ func processJob(be *gpucompute.Backend, cacheDir string, httpClient *http.Client
 	}
 	defer grid.Close()
 
-	out, err := gpucompute.ComputeMargins(be, grid, job.Sites, job.Bounds, job.ImageWidth, job.ImageHeight, job.RangeKm, job.Propagation, nil)
+	var lastSent time.Time
+	out, err := gpucompute.ComputeMargins(be, grid, job.Sites, job.Bounds, job.ImageWidth, job.ImageHeight, job.RangeKm, job.Propagation, func(done, total int) {
+		now := time.Now()
+		if done < total && now.Sub(lastSent) < progressSendInterval {
+			return
+		}
+		lastSent = now
+		body, merr := json.Marshal(gpujob.Progress{Kind: gpujob.KindProgress, ID: job.ID, Done: done, Total: total})
+		if merr != nil {
+			return
+		}
+		// Best-effort: this connection is only ever used by this one
+		// goroutine (one job at a time, no concurrent writer), but a
+		// failed write here just means one missed progress update, not a
+		// failed job — the caller's own conn.ReadMessage loop is what
+		// actually detects a genuinely dead connection.
+		_ = conn.WriteMessage(websocket.TextMessage, body)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -90,17 +124,17 @@ func runConnection(wsURL, token, cacheDir string, be *gpucompute.Backend, httpCl
 		}
 		log.Printf("gpuworker: job %s: %dx%d, %d sites, DEM zoom %d", job.ID, job.ImageWidth, job.ImageHeight, len(job.Sites), job.DemZoom)
 
-		margins, jobErr := processJob(be, cacheDir, httpClient, job)
+		margins, jobErr := processJob(be, cacheDir, httpClient, job, conn)
 		if jobErr != nil {
 			log.Printf("gpuworker: job %s failed: %v", job.ID, jobErr)
-			resultBody, _ := json.Marshal(gpujob.Result{ID: job.ID, Error: jobErr.Error()})
+			resultBody, _ := json.Marshal(gpujob.Result{Kind: gpujob.KindResult, ID: job.ID, Error: jobErr.Error()})
 			if err := conn.WriteMessage(websocket.TextMessage, resultBody); err != nil {
 				return err
 			}
 			continue
 		}
 
-		resultBody, _ := json.Marshal(gpujob.Result{ID: job.ID})
+		resultBody, _ := json.Marshal(gpujob.Result{Kind: gpujob.KindResult, ID: job.ID})
 		if err := conn.WriteMessage(websocket.TextMessage, resultBody); err != nil {
 			return err
 		}

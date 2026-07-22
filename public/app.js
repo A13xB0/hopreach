@@ -404,6 +404,14 @@
     loadMeta();
   }
 
+  // Tracks progress.json's own `stage` so each transition (not just the
+  // final done/error) triggers a data reload — the backend now writes
+  // meta.json incrementally, one coverage tier at a time (see
+  // cmd/hopreach/run.go's writeTier), specifically so a tier that's
+  // already finished shows up here without waiting for the whole run
+  // (every remaining tier included) to complete first.
+  let lastProgressStage = null;
+
   function pollProgress() {
     fetch(`data/progress.json?t=${Date.now()}`)
       .then((r) => (r.ok ? r.json() : null))
@@ -416,7 +424,16 @@
             // A generation just finished (or failed) — refresh the map data.
             loadData();
           }
+          lastProgressStage = null;
           return;
+        }
+        if (progress.stage !== lastProgressStage) {
+          lastProgressStage = progress.stage;
+          // Reaching a new stage means whichever stage came before it (if
+          // any produced a coverage tier) just finished and wrote its own
+          // update to meta.json — pick that up now rather than waiting for
+          // "done".
+          loadData();
         }
         banner.classList.remove("hidden");
         const eta = formatEta(progress.eta_seconds);
