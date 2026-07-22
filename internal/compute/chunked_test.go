@@ -53,17 +53,20 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 		t.Fatalf("tiles cover %d pixels total, want %d", totalPixels, imageWidth*imageHeight)
 	}
 
-	// Each tile's *padded* load footprint should stay within a small
-	// multiple of the budget (some slack for the "never finer than one DEM
-	// tile" floor and rounding) — this is the actual point of the feature.
-	tilesPerDeg := math.Exp2(13) / 360.0
+	// Each tile's *padded* load footprint — measured with the real
+	// projection (tileFootprint), not a uniform-degrees approximation, since
+	// that approximation alone is what silently let tiles run ~2x over
+	// budget in production before this was caught (Scotland's latitude
+	// packs roughly secant(latitude) more real tiles per degree than a
+	// uniform estimate assumes) — should stay close to budget. Some slack
+	// for the "never finer than one DEM tile" floor and the fact this
+	// verifies against every real constructed tile, not just the one the
+	// sizing loop itself converged against.
 	budgetTiles := chunkGridBudgetBytes / demTileBytes
 	for i, tl := range tiles {
-		heightTiles := (tl.loadBounds.North - tl.loadBounds.South) * tilesPerDeg
-		widthTiles := (tl.loadBounds.East - tl.loadBounds.West) * tilesPerDeg
-		got := heightTiles * widthTiles
-		if got > budgetTiles*1.5 {
-			t.Errorf("tile %d: padded footprint ~%.0f DEM tiles, more than 1.5x the %.0f-tile budget", i, got, budgetTiles)
+		got := tileFootprint(tl.loadBounds, 13)
+		if got > budgetTiles*1.1 {
+			t.Errorf("tile %d: padded footprint ~%.0f DEM tiles, more than 1.1x the %.0f-tile budget", i, got, budgetTiles)
 		}
 	}
 }
@@ -111,7 +114,7 @@ func flatTerrainServer(t *testing.T, elevM float64) *httptest.Server {
 // Precision tier's zoom/region would size in production.
 func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 	oldBudget := chunkGridBudgetBytes
-	chunkGridBudgetBytes = 10 * demTileBytes // force many small bands over a tiny region
+	chunkGridBudgetBytes = 250 * demTileBytes // force several small tiles over a tiny region, without exploding into hundreds given real padding math
 	defer func() { chunkGridBudgetBytes = oldBudget }()
 
 	srv := flatTerrainServer(t, 100)

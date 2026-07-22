@@ -11,36 +11,91 @@ import (
 
 // chunkGridBudgetBytes bounds how much elevation grid memory a single
 // geographic tile's demgrid.Load call is allowed to need — see
-// MarginsChunked. 500MB comfortably fits alongside everything else sharing
-// RAM on the smallest boxes this project actually runs on (a 2GB website
-// VPS, a 4GB GPU worker LXC): a whole-Scotland grid at the Precision tier's
-// DEM zoom runs into several GB loaded all at once, which is what
-// OOM-killed the remote GPU worker in production before this existed. A
-// var, not a const, so tests can shrink it to exercise multi-tile behaviour
-// against a small synthetic region instead of a real whole-Scotland fetch.
-var chunkGridBudgetBytes float64 = 500_000_000
+// MarginsChunked. A whole-Scotland grid at the Precision tier's DEM zoom
+// runs into several GB loaded all at once, which is what OOM-killed the
+// remote GPU worker in production before this existed.
+//
+// 500MB was the original target, but at Scotland's latitude and a
+// realistic ~78km link-budget range, the *padding* a single tile needs
+// around its own edges (see padBounds) — required for correctness near any
+// tile boundary, not a tunable safety margin — already costs ~1.1GB on its
+// own at zoom 13, before any real tile content: no amount of splitting can
+// get a tile smaller than that floor. 1.4GB budget leaves some genuine
+// core area beyond that floor while still fitting the GPU worker's box
+// (raised to 7GB specifically to give this room; a real Precision-tier
+// tile was observed to actually need roughly 3x its nominal decoded size —
+// the mmap'd grid, a CPU-side upload copy, and the integrated GPU's own
+// driver-side buffer all count separately against the same system RAM).
+// A var, not a const, so tests can shrink it to exercise multi-tile
+// behaviour against a small synthetic region instead of a real
+// whole-Scotland fetch.
+var chunkGridBudgetBytes float64 = 1_400_000_000
 
 // demTileBytes is one decoded 256x256 terrarium tile's footprint in the
 // in-memory grid (float32 per pixel) — used only to estimate how many
 // tiles a region needs, not for anything load-bearing.
 const demTileBytes = 256 * 256 * 4
 
-// kmPerDegLat approximates km per degree of latitude — used throughout this
-// file as a deliberately-conservative conversion (applying it to longitude
-// padding too over-estimates the km covered there away from the equator,
-// which only means fetching a little extra terrain, never too little).
+// kmPerDegLat is km per degree of latitude — constant everywhere, unlike
+// longitude (see kmPerDegLon).
 const kmPerDegLat = 110.574
 
-// padBounds expands b by rangeKm in every direction. Needed wherever a
-// chunk boundary runs through the middle of a live region (tile edges in
+// kmPerDegLon is km per degree of longitude at latDeg — shrinks toward the
+// poles (111.320*cos(lat) at the equator's own per-degree distance).
+// Needed because a flat rangeKm-to-degrees conversion using kmPerDegLat for
+// *both* axes (an earlier version of this file did that, on the theory
+// that over-padding longitude was merely conservative) is actually
+// backwards: at Scotland's ~55-61°N, kmPerDegLon is only about half
+// kmPerDegLat, so reusing kmPerDegLat under-pads east/west by roughly 2x —
+// a real correctness gap, not a safety margin, since a site's westward or
+// eastward path could then run past the loaded grid's edge and clamp to
+// the wrong terrain instead of seeing the real thing.
+func kmPerDegLon(latDeg float64) float64 {
+	return 111.320 * math.Cos(latDeg*math.Pi/180)
+}
+
+// padBounds expands b by rangeKm in every direction, using the real
+// per-axis km-per-degree at b's own latitude. Needed wherever a chunk
+// boundary runs through the middle of a live region (tile edges in
 // MarginsChunked) so a site or path near that edge still sees real terrain
 // beyond it instead of the grid clamping at the chunk's own boundary.
 func padBounds(b propagation.Bounds, rangeKm float64) propagation.Bounds {
-	padDeg := rangeKm / kmPerDegLat
+	latPadDeg := rangeKm / kmPerDegLat
+	lonPadDeg := rangeKm / kmPerDegLon((b.South+b.North)/2)
 	return propagation.Bounds{
-		South: b.South - padDeg, North: b.North + padDeg,
-		West: b.West - padDeg, East: b.East + padDeg,
+		South: b.South - latPadDeg, North: b.North + latPadDeg,
+		West: b.West - lonPadDeg, East: b.East + lonPadDeg,
 	}
+}
+
+// tileXAt/tileYAt mirror demgrid's own (unexported) tile-index math
+// exactly — duplicated here rather than plumbed through an export because
+// sizing tiles against the *real* projection, not a uniform
+// degrees-per-tile approximation, is the whole point: latToTileY's
+// Mercator projection packs roughly secant(latitude) more tiles into the
+// same degree span at higher latitude than a naive uniform estimate
+// assumes (secant(61°) ≈ 2.05, matching almost exactly the ~2x
+// per-tile-budget overshoot that OOM-killed the GPU worker in production
+// on a real Scotland-latitude tile before this was corrected). Getting
+// this right requires measuring against the same math demgrid.Load will
+// actually use, not an approximation of it.
+func tileXAt(lon float64, zoom int) float64 {
+	n := math.Exp2(float64(zoom))
+	return (lon + 180.0) / 360.0 * n
+}
+
+func tileYAt(lat float64, zoom int) float64 {
+	n := math.Exp2(float64(zoom))
+	latRad := lat * math.Pi / 180
+	return (1 - math.Asinh(math.Tan(latRad))/math.Pi) / 2 * n
+}
+
+// tileFootprint returns the real number of DEM tiles bounds b spans at
+// zoom, using the exact same projection demgrid.Load itself uses.
+func tileFootprint(b propagation.Bounds, zoom int) float64 {
+	width := math.Abs(tileXAt(b.East, zoom) - tileXAt(b.West, zoom))
+	height := math.Abs(tileYAt(b.South, zoom) - tileYAt(b.North, zoom))
+	return width * height
 }
 
 // tile is one geographic rectangle of a coverage pass: rows
@@ -69,25 +124,65 @@ type tile struct {
 // short they are. Splitting columns too keeps a tile's *padded* footprint,
 // not just its raw output slice, bounded by the budget.
 func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64) []tile {
-	tilesPerDeg := math.Exp2(float64(zoom)) / 360.0
 	tilesPerChunkBudget := chunkGridBudgetBytes / demTileBytes
-	rangeDeg := rangeKm / kmPerDegLat
-
-	// Side length (degrees, applied to both axes — see padBounds for why
-	// using the latitude conversion for longitude too is a safe,
-	// conservative over-estimate) of a square output tile whose *padded*
-	// footprint holds exactly tilesPerChunkBudget tiles.
-	sideDeg := math.Sqrt(tilesPerChunkBudget)/tilesPerDeg - 2*rangeDeg
-	minSideDeg := 1.0 / tilesPerDeg // never finer than one DEM tile per side
-	if sideDeg < minSideDeg {
-		sideDeg = minSideDeg
-	}
-
 	totalHeightDeg := bounds.North - bounds.South
 	totalWidthDeg := bounds.East - bounds.West
 
+	// Rough starting guess (uniform tiles-per-degree, i.e. treating
+	// longitude's own — always-uniform — tile density as if it applied to
+	// latitude too) — fast, but not trustworthy on its own; see
+	// tileXAt/tileYAt for why. Corrected against the real projection below.
+	lonTilesPerDeg := math.Exp2(float64(zoom)) / 360.0
+	rangeDeg := rangeKm / kmPerDegLat
+	sideDeg := math.Sqrt(tilesPerChunkBudget)/lonTilesPerDeg - 2*rangeDeg
+	minSideDeg := 1.0 / lonTilesPerDeg // never finer than one DEM tile per side
+	if sideDeg < minSideDeg {
+		sideDeg = minSideDeg
+	}
 	numRowTiles := clampTileCount(int(math.Ceil(totalHeightDeg/sideDeg)), imageHeight)
 	numColTiles := clampTileCount(int(math.Ceil(totalWidthDeg/sideDeg)), imageWidth)
+
+	// Verify against the real (Mercator) tile math and grow both axes
+	// together by whatever factor the worst *actual* tile is still over
+	// budget by — bounded iteration since each step only ever increases
+	// tile counts. Deliberately measures every real constructed tile's
+	// footprint here, not a single representative "worst case" sample: an
+	// earlier version sampled the tile touching the region's own north and
+	// west edges on the theory that Mercator compression makes the
+	// northernmost row worst — true for latitude alone, but that same
+	// sample tile also has its padding *clipped* on those two edges (see
+	// the West/East/North/South clamp below), which more than cancels the
+	// effect out. The actual worst tile in practice is an interior one,
+	// unclipped on all four sides, which no single hand-picked sample
+	// reliably represents.
+	for iter := 0; iter < 8; iter++ {
+		candidates := buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles)
+		maxFootprint := 0.0
+		for _, c := range candidates {
+			if fp := tileFootprint(c.loadBounds, zoom); fp > maxFootprint {
+				maxFootprint = fp
+			}
+		}
+		if maxFootprint <= tilesPerChunkBudget {
+			return candidates
+		}
+		if numRowTiles >= imageHeight && numColTiles >= imageWidth {
+			return candidates // can't split any finer than one output row/column per tile
+		}
+		growth := math.Sqrt(maxFootprint / tilesPerChunkBudget)
+		numRowTiles = clampTileCount(int(math.Ceil(float64(numRowTiles)*growth)), imageHeight)
+		numColTiles = clampTileCount(int(math.Ceil(float64(numColTiles)*growth)), imageWidth)
+	}
+	return buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles)
+}
+
+// buildTiles constructs the numRowTiles x numColTiles grid of tile
+// rectangles covering bounds — factored out of planTiles so its sizing
+// loop can measure real candidate tiles' footprints before committing to a
+// division.
+func buildTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64, numRowTiles, numColTiles int) []tile {
+	totalHeightDeg := bounds.North - bounds.South
+	totalWidthDeg := bounds.East - bounds.West
 
 	tiles := make([]tile, 0, numRowTiles*numColTiles)
 	for r := 0; r < numRowTiles; r++ {
