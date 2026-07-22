@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/hopreach-logo.png" alt="HopReach" width="220">
+  <img src="docs/hopreach-logo.png" alt="HopReach" width="420">
 </p>
 
 # HopReach
