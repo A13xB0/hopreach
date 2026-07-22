@@ -21,7 +21,7 @@ jobs:
 
       - run: go build ./...
       - run: go test ./...
-      - run: GOOS=js GOARCH=wasm go build ./wasm
+      - run: GOOS=js GOARCH=wasm go build -o /tmp/hopreach.wasm ./wasm
 
   release:
     needs: test

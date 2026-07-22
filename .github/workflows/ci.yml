@@ -41,7 +41,7 @@ jobs:
         run: go build ./...
 
       - name: go build (wasm)
-        run: GOOS=js GOARCH=wasm go build ./wasm
+        run: GOOS=js GOARCH=wasm go build -o /tmp/hopreach.wasm ./wasm
 
   frontend:
     runs-on: ubuntu-latest
