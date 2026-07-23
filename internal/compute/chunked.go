@@ -581,6 +581,22 @@ func (e *Engine) computeTileLocal(tl tile, tileSites []propagation.Site, zoom in
 	subTiles := planTiles(tl.outputBounds, zoom, tl.colCount, tl.rowCount, rangeKm, localBudgetBytes, supersample)
 	outWidth, outHeight := tl.colCount/supersample, tl.rowCount/supersample
 	out := make([]float32, outWidth*outHeight)
+	// donePixels tracks progress across sub-tiles at their own (compute-
+	// resolution) pixel count, converted to the (done-rows, total-rows)
+	// contract the caller (and everything above it, up to MarginsChunked's
+	// own doneWork/totalWork) expects — sub-tiles don't each get their own
+	// nested progressFn (see the nil below), so without this, a tile large
+	// enough to need re-splitting would report no progress at all until
+	// *every* one of its sub-tiles finished, potentially several minutes of
+	// an apparently frozen progress bar for real, ongoing work — confirmed
+	// in production, indistinguishable from a genuine crash from the
+	// frontend's own stale-progress detection.
+	donePixels := 0
+	reportSubProgress := func() {
+		if progressFn != nil {
+			progressFn(donePixels/tl.colCount, tl.rowCount)
+		}
+	}
 	for _, sub := range subTiles {
 		subRowOffset, subColOffset := sub.rowOffset/supersample, sub.colOffset/supersample
 		subSites := sitesNear(tileSites, sub.outputBounds, rangeKm)
@@ -591,6 +607,8 @@ func (e *Engine) computeTileLocal(tl tile, tileSites []propagation.Site, zoom in
 					out[dstStart+col] = float32(math.NaN())
 				}
 			}
+			donePixels += sub.rowCount * sub.colCount
+			reportSubProgress()
 			continue
 		}
 		subOut, subW, subH, err := e.computeTile(sub, subSites, zoom, cacheDir, tileURLBase, client, rangeKm, p, supersample, localBudgetBytes, nil)
@@ -602,6 +620,8 @@ func (e *Engine) computeTileLocal(tl tile, tileSites []propagation.Site, zoom in
 			dstStart := (subRowOffset+row)*outWidth + subColOffset
 			copy(out[dstStart:dstStart+subW], subOut[srcStart:srcStart+subW])
 		}
+		donePixels += sub.rowCount * sub.colCount
+		reportSubProgress()
 	}
 	return out, outWidth, outHeight, nil
 }
