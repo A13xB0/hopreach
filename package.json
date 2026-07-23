@@ -1,0 +1,11 @@
+{
+  "name": "hopreach-e2e",
+  "private": true,
+  "description": "Playwright end-to-end tests for the HopReach frontend (see tests/, playwright.config.js). Not a published package — just a home for the one JS-side dev dependency this repo has.",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

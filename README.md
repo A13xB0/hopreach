@@ -621,6 +621,29 @@ Docker image builds its own copy in a separate build stage, so this step is
 Docker-only-deployment-irrelevant; it's purely for running the site locally
 without a container.
 
+### End-to-end tests
+
+`tests/*.spec.js` ([Playwright](https://playwright.dev/)) drive a real
+Chromium browser against a real running container — the planning tools,
+the [simulator](#lora-flood-simulator), and basic page health — the same
+way a user actually hits them, not mocks. CI runs this on every push (see
+`.github/workflows/ci.yml`'s `e2e` job); to run it locally:
+
+```bash
+npm install
+npx playwright install --with-deps chromium   # first time only
+npx playwright test                            # reuses an already-running `docker compose up`, or starts one
+```
+
+Deliberately doesn't wait for a full coverage compute pass to finish
+(minutes to hours depending on GPU/CPU and region size) — only that
+`repeaters.geojson` has loaded (a fast CoreScope fetch), which is all the
+client-side tools these tests exercise need. Coverage math correctness is
+covered by `internal/propagation`/`internal/compute`/`internal/coverage`'s
+own Go tests instead, plus the [WASM shared core](#wasm-shared-core)'s
+structural guarantee that the browser and server run the exact same
+compiled code.
+
 ## License
 
 [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html) plus the

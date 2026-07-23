@@ -56,3 +56,39 @@ jobs:
             echo "checking $f"
             node --check "$f"
           done
+
+  # End-to-end tests (tests/*.spec.js, see playwright.config.js) against a
+  # real running container — the same image users actually deploy, not a
+  # dev-only shortcut. Deliberately doesn't wait for a full coverage
+  # compute pass (see playwright.config.js's own comment); repeaters.geojson
+  # populating from the real CoreScope fetch is enough for the client-side
+  # tools (planning, simulator) these tests exercise.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build hopreach:latest
+        run: docker compose build
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: npx playwright test
+        env:
+          CI: true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14

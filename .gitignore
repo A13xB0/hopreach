@@ -5,6 +5,12 @@ docker-compose.override.yml
 public/hopreach.wasm
 public/wasm_exec.js
 
+# Playwright e2e tests (tests/*.spec.js, playwright.config.js) — npm deps
+# and generated run artifacts, not source.
+node_modules/
+playwright-report/
+test-results/
+
 # Stray build artifacts from running `go build` (rather than `make wasm` or
 # the Docker build) at the repo root or inside a cmd/ dir.
 /hopreach

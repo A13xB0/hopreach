@@ -11,3 +11,10 @@ public/wasm_exec.js
 /hopreach-gpuworker
 *.md
 .github
+node_modules
+playwright-report
+test-results
+tests
+playwright.config.js
+package.json
+package-lock.json
