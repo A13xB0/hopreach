@@ -511,6 +511,14 @@ override that auto-sizing if it ever picks a value your setup doesn't like.
 `coverage.precision_dem_zoom` there also has reference points for
 lighter/heavier zoom settings.
 
+If this container runs on a host whose own real memory ceiling isn't a
+constant the container can see for itself (e.g. Docker inside a VM/LXC with
+a smaller RAM allocation than the physical machine), set an explicit
+`mem_limit` on the service in `docker-compose.yml` — auto-sizing checks the
+container's own cgroup memory accounting first and only falls back to
+`/proc/meminfo` if no real limit is configured, so a set `mem_limit` is what
+makes that accounting meaningful in a nested setup like that.
+
 ## Configuration
 
 Everything lives in one YAML file — see **`config.example.yaml`** for the

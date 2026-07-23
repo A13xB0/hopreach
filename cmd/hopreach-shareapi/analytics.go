@@ -32,6 +32,29 @@ func analyticsDir() string {
 // that months of samples stay a small file (see analytics.MaxLinesDefault).
 const memorySampleInterval = 5 * time.Minute
 
+// recordWebsiteHardwareOnce records this box's static specs (CPU model,
+// total RAM) once at shareapi startup — this process is always-on for the
+// lifetime of the deployment, unlike cmd/hopreach's own recordLocalHardwareInfo
+// (cmd/hopreach/run.go), which only runs as part of a full coverage pass and
+// so leaves the analytics page's hardware panel showing nothing for this box
+// until the first recompute after a fresh deploy. Doesn't know about a local
+// GPU (only cmd/hopreach's own compute.Engine does), so a run's own record —
+// which does include GPUAdapter when relevant — still wins on write order
+// once one actually happens, since both write to the same maxLines=1 file.
+func recordWebsiteHardwareOnce() {
+	info := analytics.HardwareInfo{Box: "website"}
+	if v, err := sysinfo.CPUModel(); err == nil {
+		info.CPUModel = v
+	}
+	if v, err := sysinfo.TotalMemoryBytes(); err == nil {
+		info.TotalBytes = v
+	}
+	path := filepath.Join(analyticsDir(), "hardware_website.jsonl")
+	if err := analytics.Append(path, info, 1); err != nil {
+		log.Printf("analytics: could not record website hardware info: %v", err)
+	}
+}
+
 // startMemorySampling runs for the lifetime of the process, appending one
 // MemorySample for this box (and, if a worker is connected, one more for it)
 // every memorySampleInterval. Called once from main(); never returns.

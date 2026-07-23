@@ -230,6 +230,7 @@ func main() {
 	http.HandleFunc("/api/analytics", handleAnalytics)
 	http.HandleFunc("/admin/recompute", handleRecompute)
 
+	recordWebsiteHardwareOnce()
 	go startMemorySampling()
 
 	// Remote GPU worker support is entirely opt-in: refuse to expose

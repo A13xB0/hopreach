@@ -28,6 +28,15 @@ services:
     #   - /dev/dri:/dev/dri
     # NVIDIA needs the nvidia-container-toolkit runtime instead (not
     # covered here) — see https://github.com/NVIDIA/nvidia-container-toolkit
+    # Recommended if this host's own real available memory isn't otherwise
+    # visible to the container (e.g. Docker running inside an LXC/VM whose
+    # actual RAM ceiling doesn't show up in the container's own
+    # /proc/meminfo — confirmed in production: a 2GB LXC's Docker container
+    # saw a nested host's ~65GB instead). Setting an explicit limit here
+    # makes it show up correctly in the container's own cgroup accounting,
+    # which coverage.precision_chunk_budget_mb's auto-sizing (see
+    # internal/sysinfo) checks before ever falling back to /proc/meminfo.
+    # mem_limit: "1800m"
 
 volumes:
   hopreach-data:
