@@ -336,6 +336,42 @@ const ElevChunkBudgetBytes = elevChunkBudgetBytes
 // full submit/sync/readback overhead for almost no compute each time.
 const targetPixelsPerDispatch = 200_000
 
+// baselineSitesPerDispatch is the site count targetPixelsPerDispatch was
+// implicitly tuned against — see dispatchPixelBudget.
+const baselineSitesPerDispatch = 15
+
+// dispatchSafetyFactor is extra headroom on top of the linear pixels÷sites
+// scaling in dispatchPixelBudget. Without it, the fix would only just barely
+// clear the specific failure it was measured against (45 sites dispatched
+// fine, 48 didn't — a thin margin, and per-chunk GPU time isn't perfectly
+// uniform: chunks covering rows with more sites actually in range of more
+// pixels cost more than the average chunk). 1.5x means a dense tile's
+// dispatches target roughly a third of the timeout instead of grazing it.
+const dispatchSafetyFactor = 1.5
+
+// dispatchPixelBudget scales targetPixelsPerDispatch down for a dense site
+// list. The shader loops over every site for every pixel (params.num_sites
+// — see the WGSL main() below), so a dispatch's total work is really
+// pixels × sites, not just pixels: targetPixelsPerDispatch alone assumes
+// something like baselineSitesPerDispatch sites, which holds for a
+// low-resolution whole-region pass (many sites, but any given pixel is
+// only in range of a few of them) but not for a Precision-tier tile sized
+// around a dense repeater cluster, where most of the tile's sites can be
+// in range of most of its pixels. Confirmed in production: a 923x1865
+// tile with 45 sites in a dense cluster dispatched normally, but the same
+// size tile with 48 sites reliably blew the 5-second dispatchWaitTimeout
+// watchdog on its very first chunk and fell back to CPU — turning a
+// sub-minute tile into roughly an hour. Dividing the pixel budget by
+// sites/baselineSitesPerDispatch, times dispatchSafetyFactor (and never
+// scaling *up* for a sparse list), keeps each dispatch's total work well
+// under what tripped the watchdog instead of merely at its edge.
+func dispatchPixelBudget(numSites int) int {
+	if numSites <= baselineSitesPerDispatch {
+		return targetPixelsPerDispatch
+	}
+	return int(float64(targetPixelsPerDispatch) * float64(baselineSitesPerDispatch) / (float64(numSites) * dispatchSafetyFactor))
+}
+
 // ComputeMargins renders one whole coverage pass on the GPU, dispatched in
 // row-chunks (see targetPixelsPerDispatch) with the elevation grid uploaded
 // across up to MaxElevChunks buffer bindings (see the Backend.maxBufferSize
@@ -449,7 +485,7 @@ func ComputeMargins(be *Backend, grid *demgrid.Grid, sites []propagation.Site, b
 	// always correct, even if that single row alone exceeds the pixel
 	// budget — a giant single-row dispatch is still far cheaper than the
 	// entire raster in one go.
-	chunkRows := targetPixelsPerDispatch / imageWidth
+	chunkRows := dispatchPixelBudget(len(sites)) / imageWidth
 	if chunkRows < 1 {
 		chunkRows = 1
 	}
