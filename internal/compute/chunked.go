@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"runtime"
 
 	"hopreach/internal/demgrid"
 	"hopreach/internal/propagation"
@@ -291,6 +292,20 @@ func clampF(v, lo, hi float64) float64 {
 func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, tileURLBase string, client *http.Client, sites []propagation.Site, imageWidth, imageHeight int, rangeKm float64, p propagation.Params, progress func(done, total int)) ([]float32, error) {
 	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
 
+	// out is the one genuinely large, whole-pass-lifetime allocation this
+	// function makes (imageWidth*imageHeight float32s — order of a
+	// gigabyte for a real Precision-tier raster). On a memory-constrained
+	// box (the website VPS this batch job usually runs on has 2GB, no
+	// swap) that's tight enough on its own; back-to-back tiers (Precision
+	// then Calibrated Precision) each allocate their own such buffer, and
+	// without forcing a collection here, the *previous* tier's buffer can
+	// still be sitting around uncollected — Go's GC has no reason to run
+	// early — right as this tier allocates its own, doubling the peak for
+	// no real reason. Confirmed in production: a run survived Precision's
+	// own memory peak but was OOM-killed moments into Calibrated
+	// Precision, immediately after Precision's tiles had already been
+	// written — consistent with exactly this overlap.
+	runtime.GC()
 	out := make([]float32, imageWidth*imageHeight)
 	for i := range out {
 		out[i] = float32(math.NaN())
