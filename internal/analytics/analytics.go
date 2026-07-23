@@ -17,7 +17,9 @@ package analytics
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -80,14 +82,19 @@ type HardwareInfo struct {
 // their own smaller cap instead.
 const MaxLinesDefault = 20_000
 
-// Append adds v as one JSON line to path, creating it if needed, then
-// trims the file to at most maxLines entries (oldest first discarded) if
-// it now exceeds that. Every call is a full read-modify-write — fine at
-// this project's scale (at most tens of thousands of small JSON lines,
-// appended at most every few minutes, never in a request hot path), and
-// keeps the trimming logic simple and obviously correct rather than
-// optimizing for a write volume this was never going to see.
+// Append adds v as one JSON line to path, creating it (and its parent
+// directory — callers pass a path under a sibling "analytics" directory
+// that's never explicitly created anywhere else) if needed, then trims the
+// file to at most maxLines entries (oldest first discarded) if it now
+// exceeds that. Every call is a full read-modify-write — fine at this
+// project's scale (at most tens of thousands of small JSON lines, appended
+// at most every few minutes, never in a request hot path), and keeps the
+// trimming logic simple and obviously correct rather than optimizing for a
+// write volume this was never going to see.
 func Append(path string, v any, maxLines int) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("analytics: creating %s: %w", filepath.Dir(path), err)
+	}
 	existing, err := readLines(path)
 	if err != nil {
 		return err

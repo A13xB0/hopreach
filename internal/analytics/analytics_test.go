@@ -32,6 +32,26 @@ func TestAppendAndReadAllRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAppendCreatesParentDirectory is the regression test for a real
+// production bug: every caller passes a path under a sibling "analytics"
+// directory (next to output_dir) that's never explicitly created anywhere
+// else, and the first deploy of this feature silently failed every single
+// write with "no such file or directory" because Append assumed the
+// directory already existed.
+func TestAppendCreatesParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "analytics", "runs.jsonl")
+	if err := Append(path, RunRecord{Success: true}, 0); err != nil {
+		t.Fatalf("Append into a non-existent parent directory: %v", err)
+	}
+	got, err := ReadAll[RunRecord](path)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 1 || !got[0].Success {
+		t.Errorf("ReadAll = %+v, want one successful record", got)
+	}
+}
+
 func TestReadAllMissingFileIsEmptyNotError(t *testing.T) {
 	got, err := ReadAll[RunRecord](filepath.Join(t.TempDir(), "does-not-exist.jsonl"))
 	if err != nil {
