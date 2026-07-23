@@ -21,16 +21,25 @@ import (
 // around its own edges (see padBounds) — required for correctness near any
 // tile boundary, not a tunable safety margin — already costs ~1.1GB on its
 // own at zoom 13, before any real tile content: no amount of splitting can
-// get a tile smaller than that floor. 1.4GB budget leaves some genuine
-// core area beyond that floor while still fitting the GPU worker's box
-// (raised to 7GB specifically to give this room; a real Precision-tier
-// tile was observed to actually need roughly 3x its nominal decoded size —
-// the mmap'd grid, a CPU-side upload copy, and the integrated GPU's own
-// driver-side buffer all count separately against the same system RAM).
+// get a tile smaller than that floor.
+//
+// 1.4GB (leaving some genuine core area beyond that floor) was the first
+// value that fit safely, but it produces ~420 tiles for a real Precision
+// pass — each one its own broker round trip, worker-side terrain
+// fetch/cache-lookup, and GPU dispatch — and that per-tile overhead,
+// multiplied by hundreds of tiles, is what made a real run take well over
+// an hour per tier instead of the roughly a minute a single whole-raster
+// job used to take before per-tile chunking existed. Raised to 2.5GB:
+// empirically, real peak RSS at the 1.4GB budget only ever reached
+// ~2.5-2.8GB (not the far more conservative ~3x-of-nominal ceiling this
+// comment originally assumed), so 2.5GB-nominal tiles (~4.8GB real, by
+// that same ratio) still leave comfortable headroom under the GPU worker's
+// 7.3GB — while cutting a real Precision pass to ~49 tiles, roughly an
+// 8.6x reduction in per-tile overhead.
 // A var, not a const, so tests can shrink it to exercise multi-tile
 // behaviour against a small synthetic region instead of a real
 // whole-Scotland fetch.
-var chunkGridBudgetBytes float64 = 1_400_000_000
+var chunkGridBudgetBytes float64 = 2_500_000_000
 
 // demTileBytes is one decoded 256x256 terrarium tile's footprint in the
 // in-memory grid (float32 per pixel) — used only to estimate how many
