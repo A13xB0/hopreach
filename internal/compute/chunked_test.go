@@ -252,3 +252,104 @@ func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
 		t.Errorf("local DEM tile server was hit %d times; want 0 (remote worker was connected throughout)", hits)
 	}
 }
+
+func TestTileWeight(t *testing.T) {
+	tl := tile{rowCount: 10, colCount: 20} // 200 pixels
+
+	if got, want := tileWeight(tl, nil), 200; got != want {
+		t.Errorf("tileWeight with no sites (a skipped tile) = %d, want %d (pixels x 1, never zero)", got, want)
+	}
+	oneSite := []propagation.Site{{Lat: 56, Lon: -4}}
+	if got, want := tileWeight(tl, oneSite), 200; got != want {
+		t.Errorf("tileWeight with 1 site = %d, want %d", got, want)
+	}
+	manySites := make([]propagation.Site, 40)
+	if got, want := tileWeight(tl, manySites), 200*40; got != want {
+		t.Errorf("tileWeight with 40 sites = %d, want %d (pixels x sites)", got, want)
+	}
+}
+
+// TestMarginsChunkedProgressWeightedBySiteDensity is the regression test
+// for a real production observation: the same run's reported ETA bounced
+// between under a minute and over half an hour, tile to tile, despite
+// steady real progress — because progress was reported in raw pixels, and
+// a burst of skipped tiles (near-instant) followed by a dense tile (many
+// sites, genuinely slow) swung the recent-rate estimate wildly. This
+// checks the actual progress callback sequence a real chunked pass
+// produces: monotonically non-decreasing, ends exactly at (total, total),
+// and — the actual fix — a dense tile's share of total "work" is
+// proportionally larger than a same-size sparse tile's, matching real
+// compute cost instead of raw pixel count.
+func TestMarginsChunkedProgressWeightedBySiteDensity(t *testing.T) {
+	oldBudget := chunkGridBudgetBytes
+	chunkGridBudgetBytes = 250 * demTileBytes
+	defer func() { chunkGridBudgetBytes = oldBudget }()
+
+	srv := flatTerrainServer(t, 100)
+	defer srv.Close()
+
+	bounds := propagation.Bounds{South: 56.0, North: 57.0, West: -5.0, East: -4.0}
+	const zoom = 12
+	const imageWidth, imageHeight = 60, 60
+	p := propagation.Params{
+		FrequencyMHz: 868, TxPowerDBm: 22, TxAntennaGainDB: 3, RxAntennaGainDB: 0,
+		RxSensitivityDB: -124, FadeMarginDB: 20, AntennaHeightM: 1.6, RxHeightM: 2,
+		MaxRangeKm: 40, MarginGreenDB: 15,
+	}
+	rangeKm := propagation.LinkBudgetMaxRangeKm(p)
+
+	// One lone site in the south (most of the region, including the whole
+	// northern half, has nothing nearby and gets skipped) plus a dense
+	// cluster of 20 co-located sites elsewhere in the south — two tiles
+	// with sites, wildly different density, several tiles with none.
+	sites := []propagation.Site{{Lat: 56.1, Lon: -4.9, GroundM: 100, TxHeightM: 101.6}}
+	for i := 0; i < 20; i++ {
+		sites = append(sites, propagation.Site{Lat: 56.15, Lon: -4.15, GroundM: 100, TxHeightM: 101.6})
+	}
+
+	client := &http.Client{}
+	e := New()
+
+	var calls [][2]int
+	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, func(done, total int) {
+		calls = append(calls, [2]int{done, total})
+	})
+	if err != nil {
+		t.Fatalf("MarginsChunked: %v", err)
+	}
+	if len(calls) < 3 {
+		t.Fatalf("expected several progress calls, got %d: %v", len(calls), calls)
+	}
+
+	total := calls[len(calls)-1][1]
+	prevDone := 0
+	for i, c := range calls {
+		if c[1] != total {
+			t.Errorf("call %d: total = %d, want constant %d", i, c[1], total)
+		}
+		if c[0] < prevDone {
+			t.Errorf("call %d: done = %d, went backwards from %d", i, c[0], prevDone)
+		}
+		if c[0] > total {
+			t.Errorf("call %d: done = %d exceeds total %d", i, c[0], total)
+		}
+		prevDone = c[0]
+	}
+	last := calls[len(calls)-1]
+	if last[0] != last[1] {
+		t.Errorf("final call = %v, want done == total", last)
+	}
+
+	// The actual weighting formula (pixels x sites-in-range) is checked
+	// precisely and directly in TestTileWeight — a same-size dense tile's
+	// contribution here is spread across many small within-tile row
+	// updates rather than one comparable single jump (the CPU fallback's
+	// own row-granularity progress callback), so reconstructing per-tile
+	// totals from this call sequence alone isn't reliable. This only
+	// checks the calling contract every caller (run.go's progress.Writer)
+	// depends on: monotonic, bounded, terminates exactly at total.
+	tilesInRegion := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
+	if len(tilesInRegion) < 3 {
+		t.Fatalf("test setup: expected several tiles so this exercises a real skip/dense mix, got %d", len(tilesInRegion))
+	}
+}

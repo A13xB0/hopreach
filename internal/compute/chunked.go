@@ -275,6 +275,29 @@ func clampF(v, lo, hi float64) float64 {
 	return v
 }
 
+// weightedTile pairs a tile with the sites relevant to it and an estimated
+// compute-cost weight — see the "Progress is weighted..." comment in
+// MarginsChunked for why this exists.
+type weightedTile struct {
+	tl     tile
+	sites  []propagation.Site
+	weight int
+}
+
+// tileWeight estimates a tile's relative compute cost as pixels ×
+// sites-in-range (never below 1 site's worth, so a skipped tile still gets
+// a small but non-zero weight rather than vanishing from the total
+// entirely). This mirrors the real cost driver: both the GPU shader and
+// propagation.ComputeMarginsCPU loop over every site for every pixel, so
+// wall-clock cost scales with both dimensions, not pixel count alone.
+func tileWeight(tl tile, tileSites []propagation.Site) int {
+	sitesForWeight := len(tileSites)
+	if sitesForWeight < 1 {
+		sitesForWeight = 1
+	}
+	return tl.rowCount * tl.colCount * sitesForWeight
+}
+
 // MarginsChunked computes one whole coverage pass the same way Margins
 // does, but never asks demgrid.Load for the whole region's elevation grid
 // at once. It splits bounds into a 2D grid of geographic tiles (see
@@ -286,9 +309,7 @@ func clampF(v, lo, hi float64) float64 {
 // website box's own 2GB if a pass ever fell back to local/CPU.
 //
 // This is the entry point Precision-tier rendering uses instead of
-// Margins; the caller no longer loads a grid up front at all. progress is
-// reported in output pixels (not rows) completed out of the full raster,
-// since a tile only ever covers part of a row.
+// Margins; the caller no longer loads a grid up front at all.
 func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, tileURLBase string, client *http.Client, sites []propagation.Site, imageWidth, imageHeight int, rangeKm float64, p propagation.Params, progress func(done, total int)) ([]float32, error) {
 	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
 
@@ -311,15 +332,36 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 		out[i] = float32(math.NaN())
 	}
 
-	totalPixels := imageWidth * imageHeight
-	donePixels := 0
+	// Progress is weighted by estimated compute cost (pixels x
+	// sites-in-range), not raw pixel count: a skipped tile (no sites)
+	// completes near-instantly regardless of its pixel count, while a
+	// dense tile (many nearby sites — a real repeater cluster) can take
+	// well over a minute for the same pixel count, since both the GPU
+	// shader and the CPU fallback loop over every site for every pixel.
+	// Reporting raw pixels made the ETA (internal/progress's exponential
+	// rate estimate) swing wildly depending on the local mix of skipped
+	// vs. dense tiles in the most recent sampling window — confirmed in
+	// production: the same run's reported ETA bounced between under a
+	// minute and over half an hour, tile to tile, despite steady real
+	// progress underneath. Sites are looked up once here (not repeated
+	// per-tile below) since this pre-pass already needs them to compute
+	// each tile's weight.
+	weighted := make([]weightedTile, len(tiles))
+	totalWork := 0
 	for i, tl := range tiles {
 		tileSites := sitesNear(sites, tl.outputBounds, rangeKm)
-		tilePixels := tl.rowCount * tl.colCount
+		weighted[i] = weightedTile{tl: tl, sites: tileSites, weight: tileWeight(tl, tileSites)}
+		totalWork += weighted[i].weight
+	}
+
+	doneWork := 0
+	for i, wt := range weighted {
+		tl := wt.tl
+		tileSites := wt.sites
 		if len(tileSites) == 0 {
-			donePixels += tilePixels
+			doneWork += wt.weight
 			if progress != nil {
-				progress(donePixels, totalPixels)
+				progress(doneWork, totalWork)
 			}
 			continue
 		}
@@ -347,14 +389,16 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 			}
 		}
 
-		base := donePixels
+		base := doneWork
 		colCount := tl.colCount
+		sitesForWeight := wt.weight / (tl.rowCount * colCount) // == max(1, len(tileSites)), recovered rather than recomputed
 		tileMargins := e.Margins(grid, tileSites, tl.outputBounds, colCount, tl.rowCount, rangeKm, p, func(done, total int) {
 			if progress != nil {
-				// done/total from Margins are rows within this tile; scale
-				// to pixels so progress stays monotonic and comparable
-				// across tiles of different sizes.
-				progress(base+done*colCount, totalPixels)
+				// done/total from Margins are rows within this tile;
+				// scale by the same per-pixel weight used for this tile's
+				// total so intermediate progress lines up with it exactly
+				// once done reaches rowCount.
+				progress(base+done*colCount*sitesForWeight, totalWork)
 			}
 		})
 		grid.Close()
@@ -365,14 +409,14 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 			copy(out[dstStart:dstStart+colCount], tileMargins[srcStart:srcStart+colCount])
 		}
 
-		donePixels += tilePixels
+		doneWork += wt.weight
 		if progress != nil {
-			progress(donePixels, totalPixels)
+			progress(doneWork, totalWork)
 		}
 	}
 
 	if progress != nil {
-		progress(totalPixels, totalPixels)
+		progress(totalWork, totalWork)
 	}
 	return out, nil
 }
