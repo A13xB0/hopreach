@@ -55,9 +55,10 @@ type featureCollection struct {
 // by calibration.Position) and adds calibrated_lat/lon plus offset/score
 // properties for the frontend's Standard/Calibrated dropdown; nil (the
 // default, calibration disabled) omits those properties entirely.
-// inferredScopes (pubkey, lowercase -> channel name), if non-nil, adds
-// inferred_scope wherever a repeater has one — see inferRepeaterScopes.
-func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, inferredScopes map[string]string, cfg appConfig) []feature {
+// inferredScopes (pubkey, lowercase -> every region with a confirmed
+// observation), if non-nil, adds inferred_scopes wherever a repeater has
+// any — see inferRepeaterScopes.
+func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, inferredScopes map[string][]string, cfg appConfig) []feature {
 	features := make([]feature, 0, len(nodes))
 	for i, n := range nodes {
 		name := "Unnamed repeater"
@@ -84,14 +85,17 @@ func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults 
 			// unless REQUIRED_SCOPE is also set.
 			"default_scope": n.DefaultScope,
 		}
-		if scope, ok := inferredScopes[strings.ToLower(n.PublicKey)]; ok {
-			// Which channel this repeater actually relays most, observed
-			// from real traffic — see corescope.ScopeInference. Distinct
-			// from default_scope (self-reported, sparse in practice) —
-			// shown alongside it in the frontend popup, not merged, since
-			// they can legitimately disagree and that's itself useful
+		if scopes, ok := inferredScopes[strings.ToLower(n.PublicKey)]; ok {
+			// Every region this repeater has been observed relaying —
+			// decoded from real packets' own cryptographic transport
+			// codes, see corescope.ScopeInference. A repeater can
+			// genuinely have more than one region enabled at once, so
+			// this is a list, not a single value. Distinct from
+			// default_scope (self-reported, sparse in practice) — shown
+			// alongside it in the frontend popup, not merged, since they
+			// can legitimately disagree and that's itself useful
 			// information.
-			props["inferred_scope"] = scope
+			props["inferred_scopes"] = scopes
 		}
 		if calResults != nil {
 			cr := calResults[i]

@@ -136,44 +136,207 @@
   }
 
   // Scope-filter checkboxes: purely client-side, re-filters whatever was
-  // already fetched — doesn't touch the server. Unchecked (the default) =
-  // no restriction, show everything. Configurable via MAP_SCOPE_FILTERS so
-  // new region scopes can be added without a code change; "unscoped" is a
-  // special case matching repeaters with no default_scope set at all,
-  // rather than a literal region value.
+  // already fetched — doesn't touch the server for the marker filtering
+  // itself. The scope *list* does come from the server side, though: real,
+  // currently-active region names straight from CoreScope's own analytics
+  // (GET /api/scope-stats — the same "byRegion" list corescope.
+  // scope_inference itself now uses), not a fixed config list, so a region
+  // appearing/disappearing on the real mesh shows up here automatically.
+  // "unscoped" is a synthetic option matching repeaters with neither a
+  // reported nor an observed scope at all, not a literal region value.
   const scopeFilterState = {};
-  for (const code of cfg.mapScopeFilters || []) scopeFilterState[code] = false;
+
+  // A repeater's real scope(s) for filtering/coverage purposes — a real
+  // MeshCore repeater can have more than one region enabled at once, so
+  // this is a set, not a single value. inferred_scopes (decoded from real
+  // packets' own cryptographic transport codes — see
+  // corescope.scope_inference) is the reliable signal; default_scope
+  // (self-reported, sparse) is folded in too in case it names a region
+  // inferred_scopes' own packet window happened to miss. Empty array
+  // means no scope is known at all.
+  function repeaterScopesOf(props) {
+    const scopes = new Set(props.inferred_scopes || []);
+    if (props.default_scope) scopes.add(props.default_scope);
+    return Array.from(scopes);
+  }
 
   function matchesScopeFilter(props) {
     const checked = Object.keys(scopeFilterState).filter((k) => scopeFilterState[k]);
     if (checked.length === 0) return true;
-    const scope = props.default_scope ? props.default_scope.replace(/^#/, "") : null;
-    return checked.some((code) => (code === "unscoped" ? scope === null : scope === code));
+    const scopes = repeaterScopesOf(props);
+    return checked.some((code) => (code === "unscoped" ? scopes.length === 0 : scopes.includes(code)));
   }
 
-  if (cfg.mapScopeFilters && cfg.mapScopeFilters.length > 0) {
+  // --- per-scope coverage overlays ----------------------------------
+  //
+  // Beyond filtering which markers show, each *checked* scope also gets
+  // its own coverage-raster overlay — computed client-side (the same WASM
+  // propagation model the planning tools use, via a dedicated Worker so
+  // it never janks the map), restricted to only the repeaters believed to
+  // actually be in that scope. Checking multiple scopes at once overlays
+  // their (semi-transparent, distinctly coloured) coverage together, so
+  // real per-region coverage can be visually compared, not just the
+  // marker set.
+  const SCOPE_COLORS = ["#38bdf8", "#f472b6", "#facc15", "#4ade80", "#a78bfa", "#fb923c", "#22d3ee", "#f87171"];
+  let scopeCoverageWorker = null;
+  let scopeCoverageGeneration = 0;
+  const scopeOverlays = new Map(); // scope name -> L.imageOverlay
+  let knownRegionNames = [];
+
+  function ensureScopeCoverageWorker() {
+    if (!scopeCoverageWorker) scopeCoverageWorker = new Worker("planner-worker.js");
+    return scopeCoverageWorker;
+  }
+
+  function colorForScope(name) {
+    const idx = Math.max(0, knownRegionNames.indexOf(name));
+    return SCOPE_COLORS[idx % SCOPE_COLORS.length];
+  }
+
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function clearScopeOverlay(name) {
+    const overlay = scopeOverlays.get(name);
+    if (overlay) {
+      map.removeLayer(overlay);
+      layersControl.removeLayer(overlay);
+      scopeOverlays.delete(name);
+    }
+  }
+
+  function renderScopeOverlay(name, msg) {
+    const { bounds, imageWidth, imageHeight, marginGreenDb } = msg;
+    const margins = new Float32Array(msg.margins);
+    const canvas = document.createElement("canvas");
+    canvas.width = imageWidth;
+    canvas.height = imageHeight;
+    const ctx = canvas.getContext("2d");
+    const imgData = ctx.createImageData(imageWidth, imageHeight);
+
+    const rgb = hexToRgb(colorForScope(name));
+    for (let i = 0; i < margins.length; i++) {
+      const m = margins[i];
+      const p = i * 4;
+      if (Number.isNaN(m)) {
+        imgData.data[p + 3] = 0;
+        continue;
+      }
+      let t = m / marginGreenDb;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      imgData.data[p] = rgb[0];
+      imgData.data[p + 1] = rgb[1];
+      imgData.data[p + 2] = rgb[2];
+      // Even marginal coverage (t near 0) stays visibly tinted rather than
+      // fading to near-nothing — comparing *which* scope reaches an area
+      // at all matters here more than the fine margin gradient a single
+      // scope's own preview cares about.
+      imgData.data[p + 3] = Math.round(70 + 90 * t);
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    const llBounds = [
+      [bounds.south, bounds.west],
+      [bounds.north, bounds.east],
+    ];
+    const overlay = L.imageOverlay(canvas.toDataURL("image/png"), llBounds, { interactive: false }).addTo(map);
+    layersControl.addOverlay(overlay, `Scope coverage: ${name}`);
+    scopeOverlays.set(name, overlay);
+  }
+
+  function computeScopeCoverage(name) {
+    clearScopeOverlay(name);
+    if (!currentGeojson) return;
+    const sites = currentGeojson.features
+      .filter((f) => repeaterScopesOf(f.properties).includes(name))
+      .map((f) => ({ lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
+    if (sites.length === 0) return;
+
+    const generation = ++scopeCoverageGeneration;
+    const worker = ensureScopeCoverageWorker();
+
+    function onMessage(e) {
+      const msg = e.data;
+      if (msg.scopeId !== name || msg.generation !== generation) return;
+      if (msg.type === "scope-result") {
+        worker.removeEventListener("message", onMessage);
+        if (!msg.empty) renderScopeOverlay(name, msg);
+      } else if (msg.type === "scope-error") {
+        worker.removeEventListener("message", onMessage);
+        console.error(`scope coverage (${name}):`, msg.message);
+      }
+    }
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({
+      kind: "scope-coverage",
+      generation,
+      scopeId: name,
+      sites,
+      config: { demTileURLBase: cfg.demTileURLBase, demZoom: cfg.demZoom, propagation: cfg.propagation },
+      // Deliberately coarser than the planning preview's own 320px-ish
+      // scale would suggest for a single site — a scope's repeaters can
+      // span a whole region, and the raster loop is O(pixels × sites), so
+      // a smaller image keeps that tractable for potentially dozens of
+      // sites. This is a rough per-region overview, not a precise map.
+      imageWidth: 400,
+    });
+  }
+
+  async function initScopeFilterControl() {
+    let regionNames = [];
+    try {
+      // window is one of CoreScope's own fixed enum values ("1h"/"24h"/
+      // "7d"), not an arbitrary hour count — "7d" (its longest) gives this
+      // the best chance of finding a region that's gone quiet recently,
+      // since this call's only job is discovering which real regions
+      // exist at all, not tallying anything within a specific window.
+      const resp = await fetch("/corescope-api/api/scope-stats?window=7d");
+      if (resp.ok) {
+        const data = await resp.json();
+        regionNames = (data.byRegion || []).map((r) => r.name).filter(Boolean);
+      }
+    } catch {
+      // CoreScope unreachable — fall through to the local-data fallback below.
+    }
+    if (regionNames.length === 0 && currentGeojson) {
+      const seen = new Set();
+      for (const f of currentGeojson.features) {
+        for (const s of repeaterScopesOf(f.properties)) seen.add(s);
+      }
+      regionNames = Array.from(seen).sort();
+    }
+    if (regionNames.length === 0) return; // nothing to filter by yet, on this instance
+
+    knownRegionNames = regionNames;
+    for (const name of regionNames) scopeFilterState[name] = false;
+    scopeFilterState["unscoped"] = false;
+
     const scopeFilterControl = L.control({ position: "topright" });
     scopeFilterControl.onAdd = function () {
       const div = L.DomUtil.create("div", "scope-filter-control");
-      const rows = cfg.mapScopeFilters
-        .map(
-          (code) => `
-        <label><input type="checkbox" data-scope="${escapeHtml(code)}"> ${code === "unscoped" ? "Unscoped" : `#${escapeHtml(code)}`}</label>
-      `
-        )
-        .join("");
+      const rows =
+        regionNames.map((name) => `<label><input type="checkbox" data-scope="${escapeHtml(name)}"> ${escapeHtml(name)}</label>`).join("") +
+        `<label><input type="checkbox" data-scope="unscoped"> Unscoped</label>`;
       div.innerHTML = `<div class="scope-filter-title">Filter by region scope</div>${rows}`;
       L.DomEvent.disableClickPropagation(div);
       div.querySelectorAll("input[type=checkbox]").forEach((input) => {
         input.addEventListener("change", (e) => {
-          scopeFilterState[e.target.dataset.scope] = e.target.checked;
+          const name = e.target.dataset.scope;
+          scopeFilterState[name] = e.target.checked;
           renderFilteredRepeaters();
+          if (name !== "unscoped") {
+            if (e.target.checked) computeScopeCoverage(name);
+            else clearScopeOverlay(name);
+          }
         });
       });
       return div;
     };
     scopeFilterControl.addTo(map);
   }
+  initScopeFilterControl();
 
   function relativeTime(iso) {
     if (!iso) return "never";
@@ -205,18 +368,23 @@
   }
 
   // default_scope (self-reported, often absent — see the map's own scope
-  // filter above) and inferred_scope (observed from real channel traffic
-  // — see corescope.scope_inference, off by default) are shown separately,
-  // not merged: they can legitimately disagree, and that disagreement is
-  // itself useful information, not noise to hide.
+  // filter above) and inferred_scopes (every region decoded from this
+  // repeater's own real packets' cryptographic transport codes —
+  // MeshCore's actual region-scoping mechanism, not a guess from channel
+  // names — see corescope.scope_inference, off by default) are shown
+  // separately, not merged: they can legitimately disagree, and that
+  // disagreement is itself useful information, not noise to hide.
+  // inferred_scopes can be more than one region — a real repeater can
+  // have several enabled at once.
   function scopeRowsHtml(props) {
-    if (!props.default_scope && !props.inferred_scope) return "";
+    const inferred = props.inferred_scopes || [];
+    if (!props.default_scope && inferred.length === 0) return "";
     const rows = [];
     if (props.default_scope) {
       rows.push(`<div class="popup-row"><span>Scope (reported)</span><span>${escapeHtml(props.default_scope)}</span></div>`);
     }
-    if (props.inferred_scope) {
-      rows.push(`<div class="popup-row"><span>Scope (observed)</span><span>${escapeHtml(props.inferred_scope)}</span></div>`);
+    if (inferred.length > 0) {
+      rows.push(`<div class="popup-row"><span>Scope${inferred.length > 1 ? "s" : ""} (observed)</span><span>${escapeHtml(inferred.join(", "))}</span></div>`);
     }
     return rows.join("");
   }

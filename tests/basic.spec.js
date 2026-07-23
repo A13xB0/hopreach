@@ -48,3 +48,33 @@ test("repeater stats eventually populate from real data", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#count-active")).not.toHaveText("–", { timeout: 120_000 });
 });
+
+// Also genuinely network-dependent (CoreScope's own GET /api/scope-stats,
+// fetched client-side — see app.js's initScopeFilterControl), kept
+// isolated the same way. Deliberately doesn't check a coverage overlay
+// here: computing one for a real, densely-populated scope can take on the
+// order of a minute (see planner-worker.js's handleScopeCoverage) — fine
+// for a manually-triggered interaction, too slow to be worth the CI time
+// for what the simulator's own packet-replay/CoreScope-links tests
+// already establish (that the client-side WASM coverage machinery
+// works). This only checks that the control itself renders with a real,
+// live region list and that toggling one filters markers.
+test("scope filter control renders real CoreScope regions and filters markers", async ({ page }) => {
+  test.slow();
+  await page.goto("/");
+  const control = page.locator(".scope-filter-control");
+  await expect(control).toBeVisible({ timeout: 60_000 });
+
+  const checkboxes = control.locator('input[type="checkbox"]');
+  await expect(checkboxes.first()).toBeAttached({ timeout: 60_000 });
+  const scopeCount = await checkboxes.count();
+  expect(scopeCount).toBeGreaterThan(0);
+
+  // Every option should be either a real "#..." region name (from
+  // CoreScope's own scope-stats) or the synthetic "unscoped" bucket —
+  // never empty/garbage.
+  const scopes = await checkboxes.evaluateAll((els) => els.map((el) => el.dataset.scope));
+  for (const s of scopes) {
+    expect(s === "unscoped" || /^#/.test(s), `unexpected scope option ${JSON.stringify(s)}`).toBeTruthy();
+  }
+});

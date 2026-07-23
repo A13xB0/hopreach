@@ -47,31 +47,42 @@ func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig)
 	return selected
 }
 
-// inferRepeaterScopes fetches CoreScope's full node directory and a real
-// window's worth of packet traffic, then resolves each of the given
-// repeaters' dominant channel (treated as its real scope) — see
-// internal/corescope's ScopeInference/FetchChannelParticipation doc
-// comments for why this observes real relay behavior instead of trusting
-// each node's own (frequently absent) self-reported default_scope. Errors
-// are logged and treated as "no scope data available" rather than fatal:
-// this is an enrichment nothing downstream depends on.
-func inferRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) map[string]string {
+// inferRepeaterScopes fetches CoreScope's full node directory, its list of
+// real known region names, and a real window's worth of packet traffic,
+// then resolves each of the given repeaters' real region(s) — see
+// internal/corescope's FetchKnownRegionNames/FetchRegionParticipation doc
+// comments for why this decodes each packet's own cryptographic transport
+// code (MeshCore's actual region-scoping mechanism) rather than trusting
+// each node's own (frequently absent) self-reported default_scope, or
+// (an earlier, incorrect version of this feature) a packet's channel name,
+// which is a related but distinct concept. A repeater can genuinely have
+// more than one region enabled at once, so this returns every region with
+// at least one confirmed observation, not just the single most-observed
+// one — see corescope.ObservedScopes. Errors are logged and treated as
+// "no scope data available" rather than fatal: this is an enrichment
+// nothing downstream depends on.
+func inferRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) map[string][]string {
 	allNodes, err := client.FetchAllNodes(ctx)
 	if err != nil {
 		log.Printf("scope inference: fetching node directory failed, skipping: %v", err)
 		return nil
 	}
-	since := time.Now().Add(-time.Duration(windowHours * float64(time.Hour)))
-	counts, err := client.FetchChannelParticipation(ctx, since, allNodes)
+	regionNames, err := client.FetchKnownRegionNames(ctx)
 	if err != nil {
-		log.Printf("scope inference: fetching channel participation failed, skipping: %v", err)
+		log.Printf("scope inference: fetching known region names failed, skipping: %v", err)
 		return nil
 	}
-	scopes := make(map[string]string, len(selected))
+	since := time.Now().Add(-time.Duration(windowHours * float64(time.Hour)))
+	counts, err := client.FetchRegionParticipation(ctx, since, allNodes, regionNames)
+	if err != nil {
+		log.Printf("scope inference: fetching region participation failed, skipping: %v", err)
+		return nil
+	}
+	scopes := make(map[string][]string, len(selected))
 	for _, n := range selected {
-		scope, _, ok := corescope.DominantScope(counts[strings.ToLower(n.PublicKey)])
-		if ok {
-			scopes[strings.ToLower(n.PublicKey)] = scope
+		observed := corescope.ObservedScopes(counts[strings.ToLower(n.PublicKey)])
+		if len(observed) > 0 {
+			scopes[strings.ToLower(n.PublicKey)] = observed
 		}
 	}
 	return scopes
@@ -367,19 +378,20 @@ func run(cfg appConfig) (err error) {
 		sites = make([]propagation.Site, len(selected))
 	}
 
-	// Optional: real per-repeater scope, inferred from which channel each
-	// one actually relays most (see internal/corescope's ScopeInference
-	// doc comment for why this exists instead of trusting each node's
-	// sparse self-reported default_scope). A failure here degrades
-	// gracefully — every repeater just goes without an inferred_scope
-	// property, same as if the feature were disabled — rather than
-	// failing the whole run over what's fundamentally an enrichment, not
-	// something anything downstream depends on.
-	var inferredScopes map[string]string
+	// Optional: real per-repeater region(s), decoded from each packet's own
+	// cryptographic transport code (see internal/corescope's
+	// FetchRegionParticipation/ObservedScopes doc comments) — a repeater
+	// can genuinely have more than one region enabled at once, so this is
+	// a set per repeater, not a single value. A failure here degrades
+	// gracefully — every repeater just goes without inferred_scopes, same
+	// as if the feature were disabled — rather than failing the whole run
+	// over what's fundamentally an enrichment, not something anything
+	// downstream depends on.
+	var inferredScopes map[string][]string
 	if cfg.scopeInferenceEnabled {
-		prog.Update("inferring_scopes", 0, 1, "Inferring repeater scopes from CoreScope channel traffic")
+		prog.Update("inferring_scopes", 0, 1, "Inferring repeater regions from CoreScope packet transport codes")
 		inferredScopes = inferRepeaterScopes(ctx, client, selected, cfg.scopeInferenceWindowHours)
-		prog.Update("inferring_scopes", 1, 1, fmt.Sprintf("Inferred scope for %d/%d repeaters", len(inferredScopes), len(selected)))
+		prog.Update("inferring_scopes", 1, 1, fmt.Sprintf("Inferred region(s) for %d/%d repeaters", len(inferredScopes), len(selected)))
 	}
 
 	features := buildFeatures(selected, sites, calResults, inferredScopes, cfg)

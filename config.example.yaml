@@ -20,13 +20,6 @@ site:
   # if within degraded_hours, otherwise "silent".
   active_hours: 6
   degraded_hours: 24
-  # Scope-filter checkboxes shown on the map (top-right, below the basemap
-  # switcher) — lets a viewer narrow the displayed repeaters to one or more
-  # CoreScope region scopes, purely client-side (doesn't affect what the
-  # nightly job fetches/stores). Add any scope code used by your CoreScope
-  # instance. The special value "unscoped" matches repeaters with no
-  # default_scope set at all, rather than a literal region.
-  scope_filters: [sco, ioi, unscoped]
 
 map:
   center_lat: 56.8
@@ -65,15 +58,17 @@ corescope:
   request_timeout_seconds: 30
 
   scope_inference:
-    # Tags each repeater with the channel it actually relays most
-    # (inferred_scope, shown in its map popup alongside the site's own
-    # default_scope) — real observed behaviour, not each node's own
+    # Tags each repeater with its real MeshCore region (inferred_scope,
+    # shown in its map popup alongside the site's own default_scope) —
+    # decoded from each packet's own cryptographic transport code (see
+    # README's "Inferring real scope from each packet's transport code"),
+    # not a guess from channel names, and not each node's own
     # self-reported default_scope, which in practice is unset for most
-    # repeaters. Off by default: it means fetching (and resolving) a real
-    # window's worth of raw packet traffic from CoreScope on every run —
-    # real extra load, worth opting into deliberately.
+    # repeaters. Off by default: it means fetching a real window's worth
+    # of raw packet traffic from CoreScope on every run — real extra load,
+    # worth opting into deliberately.
     enabled: false
-    # How far back to look when tallying channel participation.
+    # How far back to look when tallying region participation.
     # 168 = 7 days.
     window_hours: 168
 

@@ -918,15 +918,29 @@
       const allPubkeys = new Set();
       let originPubkey = null;
       for (const obs of observations) {
-        const chain = (obs.resolved_path || []).map((k) => k.toLowerCase());
-        if (chain.length === 0) continue;
-        if (originPubkey === null) originPubkey = chain[0];
+        // CoreScope's own resolved_path can be entirely null (path
+        // resolution failed for this whole observation) or, more subtly,
+        // a real array with individual null entries (some hops resolved,
+        // one didn't) — treated as a genuine gap, not a straight-through
+        // connection: a pair either side of a null hop is NOT a proven
+        // direct edge, since the real relay actually went through
+        // whichever node failed to resolve.
+        const rawChain = obs.resolved_path || [];
+        if (rawChain.length === 0) continue;
+        if (originPubkey === null && rawChain[0]) originPubkey = rawChain[0].toLowerCase();
         const tMs = Date.parse(obs.timestamp) || 0;
-        for (const k of chain) allPubkeys.add(k);
+        for (const k of rawChain) if (k) allPubkeys.add(k.toLowerCase());
         const observerKey = (obs.observer_id || "").toLowerCase();
         if (observerKey) allPubkeys.add(observerKey);
-        for (let i = 0; i < chain.length - 1; i++) addProvenEdge(provenEdges, chain[i], chain[i + 1], tMs);
-        if (observerKey) addProvenEdge(provenEdges, chain[chain.length - 1], observerKey, tMs);
+        for (let i = 0; i < rawChain.length - 1; i++) {
+          if (rawChain[i] && rawChain[i + 1]) {
+            addProvenEdge(provenEdges, rawChain[i].toLowerCase(), rawChain[i + 1].toLowerCase(), tMs);
+          }
+        }
+        const lastResolvedHop = [...rawChain].reverse().find((k) => k);
+        if (observerKey && lastResolvedHop) {
+          addProvenEdge(provenEdges, lastResolvedHop.toLowerCase(), observerKey, tMs);
+        }
       }
       if (originPubkey === null) throw new Error("Couldn't determine this packet's origin from CoreScope's data.");
 

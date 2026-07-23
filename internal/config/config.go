@@ -55,11 +55,10 @@ type Config struct {
 // SiteConfig controls the frontend's branding and the active/degraded/
 // silent status thresholds shown for each repeater.
 type SiteConfig struct {
-	Name          string   `yaml:"name"`
-	Subtitle      string   `yaml:"subtitle"`
-	ActiveHours   float64  `yaml:"active_hours"`
-	DegradedHours float64  `yaml:"degraded_hours"`
-	ScopeFilters  []string `yaml:"scope_filters"`
+	Name          string  `yaml:"name"`
+	Subtitle      string  `yaml:"subtitle"`
+	ActiveHours   float64 `yaml:"active_hours"`
+	DegradedHours float64 `yaml:"degraded_hours"`
 }
 
 // MapConfig is the frontend's initial map view.
@@ -249,7 +248,6 @@ func Default() Config {
 			Subtitle:      "MeshCore repeater map, refreshed daily",
 			ActiveHours:   6,
 			DegradedHours: 24,
-			ScopeFilters:  []string{"sco", "ioi", "unscoped"},
 		},
 		Map: MapConfig{
 			CenterLat: 56.8,

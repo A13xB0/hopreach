@@ -187,11 +187,30 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   const packetsResp = await request.get("/corescope-api/api/packets?limit=50");
   expect(packetsResp.ok()).toBeTruthy();
   const packetsData = await packetsResp.json();
-  const candidate = (packetsData.packets || []).find((p) => p.observation_count > 1);
-  test.skip(!candidate, "no multi-observation packet currently available from CoreScope to replay");
+  const multiObservation = (packetsData.packets || []).filter((p) => p.observation_count > 1);
+  test.skip(multiObservation.length === 0, "no multi-observation packet currently available from CoreScope to replay");
+
+  // observation_count > 1 alone isn't enough — CoreScope's own path
+  // resolution can legitimately fail for a given packet too
+  // (resolved_path comes back null), which the app itself handles
+  // gracefully (a clear error, not a crash) but isn't what this test is
+  // trying to exercise. Check the real detail endpoint for at least one
+  // resolvable observation before committing to a hash.
+  let candidateHash = null;
+  for (const p of multiObservation.slice(0, 10)) {
+    const detailResp = await request.get(`/corescope-api/api/packets/${p.hash}`);
+    if (!detailResp.ok()) continue;
+    const detail = await detailResp.json();
+    const hasResolvedPath = (detail.observations || []).some((o) => Array.isArray(o.resolved_path) && o.resolved_path.length > 0);
+    if (hasResolvedPath) {
+      candidateHash = p.hash;
+      break;
+    }
+  }
+  test.skip(!candidateHash, "no packet with resolvable path data currently available from CoreScope to replay");
 
   await page.click("#sim-toggle");
-  await page.fill("#sim-replay-hash-input", candidate.hash);
+  await page.fill("#sim-replay-hash-input", candidateHash);
   await page.click("#sim-replay-hash-go");
   await expect(page.locator("#sim-replay-hash-status")).toContainText("Loaded", { timeout: 60_000 });
 

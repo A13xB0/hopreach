@@ -14,7 +14,6 @@ site:
   subtitle: MeshCore repeater map, refreshed daily
   active_hours: 6
   degraded_hours: 24
-  scope_filters: [sco, ioi, unscoped]
 
 map:
   center_lat: 56.8

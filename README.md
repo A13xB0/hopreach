@@ -278,20 +278,36 @@ recently observed MeshCore hashtag scope) to match a given region tag —
 useful if a CoreScope instance's operators consistently self-tag, but off by
 default since not every repeater broadcasts one.
 
-### Inferring real scope from channel traffic
+### Inferring real scope from each packet's transport code
 
 `default_scope` is self-reported and, in practice, sparse — on a real
 production CoreScope instance, roughly three quarters of repeaters have
 none set at all. `corescope.scope_inference` (off by default) fills that
-gap by observing real behaviour instead: it walks a real window
-(`window_hours`, default 7 days) of CoreScope's own packet traffic, reads
-the plaintext channel name CoreScope decodes for any packet whose channel
-key it knows (`decoded_json.channel` — present for ordinary regional/
-community channels, not private ones), and tallies which channel each
-repeater relays most as a flood participant. The result — `inferred_scope`
-— is written alongside (not merged with) `default_scope` in
-`repeaters.geojson`, since the two can legitimately disagree, and shown in
-the map popup for both.
+gap by decoding real MeshCore region membership directly, rather than
+guessing from a packet's channel name (a related but genuinely different
+concept — a channel is a communication group like `#test` or `Public`;
+a region/scope like `#sco` or `#fif` is MeshCore's own separate
+network-segmentation mechanism).
+
+MeshCore regions work cryptographically: a `ROUTE_TYPE_TRANSPORT_FLOOD`/
+`ROUTE_TYPE_TRANSPORT_DIRECT` packet (see
+[the real packet format](https://github.com/meshcore-dev/MeshCore/blob/main/docs/packet_format.md))
+carries a 2-byte `transport_code`, an HMAC-SHA256 of the packet's payload
+keyed with `sha256(region_name)[:16]` — a "publicly-known hashtag region
+name" needs no secret to verify (see MeshCore's own
+`TransportKeyStore::calcTransportCode`/`getAutoKeyFor`). This walks a real
+window (`window_hours`, default 7 days) of CoreScope's own packet traffic
+(`raw_hex`, already exposed by its API), fetches the real, currently-active
+region name list from CoreScope's own analytics (`GET /api/scope-stats`
+— e.g. `#sco`, `#fif`, `#edi`), and for each transport-coded packet tries
+every candidate region's key until one's computed code matches the
+packet's own — deterministic, not a guess, and verified against a real
+captured packet before being relied on. The result — `inferred_scopes`,
+a **list**, since a real repeater can genuinely have more than one region
+enabled at once (confirmed against production: the majority of tagged
+repeaters have several) — is written alongside (not merged with)
+`default_scope` in `repeaters.geojson`, since the two can legitimately
+disagree, and shown in the map popup for both.
 
 Real relay-path hops are recorded as short public-key prefixes (MeshCore
 trims each hop to that node's own configured `hash_size`), resolved back
@@ -299,6 +315,27 @@ to a full key against CoreScope's complete node directory
 (`internal/corescope.FetchAllNodes`) — an ambiguous prefix (shared by more
 than one real node) is dropped rather than guessed, so a wrong attribution
 never silently happens.
+
+### Per-region coverage, and comparing regions
+
+The map's **Filter by region scope** control (top-right) pulls its list
+live from CoreScope's own `GET /api/scope-stats`, not a fixed config
+list — whichever regions are currently active show up automatically.
+Beyond filtering which repeater markers are shown, checking a region also
+computes and overlays its own coverage raster — client-side, via the same
+WASM propagation model the [planning tools](#planning-tools) use, run in
+a Worker so it never blocks the map — restricted to only the repeaters
+`inferred_scopes`/`default_scope` place in that region. Checking more than
+one region overlays their (distinctly coloured, semi-transparent)
+coverage together, so real per-region reach can be visually compared or
+seen to overlap, not just which markers are in each. A wide region's own
+raster can take on the order of a minute to compute the first time (real
+terrain fetch + a search over potentially dozens of sites) — deliberately
+capped to a bounded number of DEM tiles (falling back to a coarser zoom
+for a very large area, the same fix applied to the
+[simulator](#lora-flood-simulator)'s own connectivity builder) rather than
+an unbounded fetch, and a lower resolution than the main coverage map
+(this is a rough per-region overview, not a precision map).
 
 ## How the coverage estimate works
 
@@ -650,7 +687,7 @@ field within each):
 | `site` | Frontend branding, active/degraded/silent status thresholds, scope-filter checkboxes |
 | `map` | Initial Leaflet view (center, zoom) |
 | `region` | [Region boundary](#region-not-just-scotland), required CoreScope scope |
-| `corescope` | Which CoreScope instance to query, request timeout, [real scope inference](#inferring-real-scope-from-channel-traffic) |
+| `corescope` | Which CoreScope instance to query, request timeout, [real scope inference](#inferring-real-scope-from-each-packets-transport-code) |
 | `terrain` | DEM zoom/cache/tile source |
 | `propagation` | Link-budget/RF model inputs — see [How the coverage estimate works](#how-the-coverage-estimate-works) |
 | `coverage` | Raster resolution, [per-tier GPU gating](#remote-gpu-worker), recompute interval |

@@ -10,8 +10,6 @@ window.HOPREACH_CONFIG = {
   dataUrl: "data/repeaters.geojson",
   metaUrl: "data/meta.json",
 
-  mapScopeFilters: ["sco", "ioi", "unscoped"],
-
   demZoom: 11,
   // No nginx proxy in local dev (python -m http.server) — go straight to
   // the upstream tile host. In the container this is always "/dem-tiles".

@@ -44,16 +44,15 @@ func runPrepare(yc yconfig.Config, configPath string) error {
 // json.Marshal'd rather than text-templated, so site names/subtitles with
 // quotes or other special characters are always encoded safely.
 type jsConfig struct {
-	SiteName        string    `json:"siteName"`
-	SiteSubtitle    string    `json:"siteSubtitle"`
-	MapCenter       []float64 `json:"mapCenter"`
-	MapZoom         int       `json:"mapZoom"`
-	DataURL         string    `json:"dataUrl"`
-	MetaURL         string    `json:"metaUrl"`
-	MapScopeFilters []string  `json:"mapScopeFilters"`
-	DemZoom         int       `json:"demZoom"`
-	DemTileURLBase  string    `json:"demTileURLBase"`
-	Propagation     struct {
+	SiteName       string    `json:"siteName"`
+	SiteSubtitle   string    `json:"siteSubtitle"`
+	MapCenter      []float64 `json:"mapCenter"`
+	MapZoom        int       `json:"mapZoom"`
+	DataURL        string    `json:"dataUrl"`
+	MetaURL        string    `json:"metaUrl"`
+	DemZoom        int       `json:"demZoom"`
+	DemTileURLBase string    `json:"demTileURLBase"`
+	Propagation    struct {
 		FrequencyMhz     float64 `json:"frequencyMhz"`
 		TxPowerDbm       float64 `json:"txPowerDbm"`
 		TxAntennaGainDbi float64 `json:"txAntennaGainDbi"`
@@ -75,7 +74,6 @@ func writeConfigJS(yc yconfig.Config) error {
 	c.MapZoom = yc.Map.Zoom
 	c.DataURL = "data/repeaters.geojson"
 	c.MetaURL = "data/meta.json"
-	c.MapScopeFilters = yc.Site.ScopeFilters
 	c.DemZoom = yc.Terrain.DEMZoom
 	// Always proxied same-origin through nginx (see nginxConfTemplate),
 	// never the upstream tile host directly — see terrain.js for why
