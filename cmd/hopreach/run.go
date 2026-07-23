@@ -115,8 +115,12 @@ func analyticsPath(outputDir, name string) string {
 // marker), never fatal to this run.
 func recordCrashedRunIfAny(runsPath, markerPath, progressPath string) {
 	markers, err := analytics.ReadAll[analytics.InProgressMarker](markerPath)
-	if err != nil || len(markers) == 0 {
+	if err != nil {
+		log.Printf("analytics: could not check %s for a crashed previous run: %v", markerPath, err)
 		return
+	}
+	if len(markers) == 0 {
+		return // no marker — the common, expected case (the previous run finished cleanly and cleared its own)
 	}
 
 	// progress.json's last-written stage is the best available clue for
@@ -142,7 +146,9 @@ func recordCrashedRunIfAny(runsPath, markerPath, progressPath string) {
 	}
 	if aerr := analytics.Append(runsPath, rec, 2000); aerr != nil {
 		log.Printf("analytics: could not record crashed run: %v", aerr)
+		return
 	}
+	log.Printf("analytics: recorded a crashed run (started %s, last known stage: %s)", markers[0].StartedAt.Format(time.RFC3339), lastStage)
 }
 
 // recordLocalHardwareInfo records this box's static specs (CPU model, total
