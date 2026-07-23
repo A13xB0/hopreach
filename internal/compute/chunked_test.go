@@ -29,7 +29,7 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 	const imageWidth, imageHeight = 12000, 24248
 	const budgetBytes = 1_400_000_000
 	bounds := propagation.Bounds{South: 54.5, North: 60.9, West: -8.7, East: -0.7}
-	tiles := planTiles(bounds, 13, imageWidth, imageHeight, 78, budgetBytes)
+	tiles := planTiles(bounds, 13, imageWidth, imageHeight, 78, budgetBytes, 1)
 	if len(tiles) < 2 {
 		t.Fatalf("expected multiple tiles for a whole-Scotland zoom-13 region, got %d", len(tiles))
 	}
@@ -74,7 +74,7 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 
 func TestPlanTilesSmallRegionStaysOneTile(t *testing.T) {
 	bounds := propagation.Bounds{South: 56.0, North: 56.1, West: -4.3, East: -4.1}
-	tiles := planTiles(bounds, 11, 40, 40, 5, 1_400_000_000)
+	tiles := planTiles(bounds, 11, 40, 40, 5, 1_400_000_000, 1)
 	if len(tiles) != 1 {
 		t.Fatalf("expected a single tile for a small region well under budget, got %d", len(tiles))
 	}
@@ -140,7 +140,7 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 
 	client := &http.Client{}
 
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes)
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes, 1)
 	if len(tiles) < 3 {
 		t.Fatalf("test setup: expected several tiles, got %d — tighten testBudgetBytes further", len(tiles))
 	}
@@ -155,7 +155,7 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 	e.SetChunkBudgetBytes(testBudgetBytes)
 	want := e.Margins(refGrid, sites, bounds, imageWidth, imageHeight, rangeKm, p, nil)
 
-	got, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, nil)
+	got, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, 1, nil)
 	if err != nil {
 		t.Fatalf("MarginsChunked: %v", err)
 	}
@@ -179,6 +179,90 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 	}
 	if mismatches > 0 {
 		t.Errorf("%d/%d pixels differ between chunked and unchunked passes over identical flat terrain", mismatches, len(want))
+	}
+}
+
+// TestMarginsChunkedSupersampleMatchesFullResolutionThenDownsample is the
+// correctness check for the fix to a real production OOM: MarginsChunked
+// used to always return a full-compute-resolution buffer, leaving the
+// caller (RasterSupersampledChunked) to downsample the *whole region* in
+// one extra pass afterward — a second large buffer, on top of the first,
+// right when memory was already tightest. MarginsChunked now downsamples
+// each geographic tile immediately after computing it, so the one buffer
+// it ever holds is already at served (post-downsample) resolution. That
+// must produce numerically the same result as the old approach: compute at
+// full resolution, then downsample the whole thing at the end.
+func TestMarginsChunkedSupersampleMatchesFullResolutionThenDownsample(t *testing.T) {
+	const testBudgetBytes = 250 * demTileBytes // force several small geographic tiles
+	const supersample = 3
+	const servedWidth, servedHeight = 20, 20 // chosen so servedWidth/Height * supersample stays a whole number
+	const imageWidth, imageHeight = servedWidth * supersample, servedHeight * supersample
+
+	srv := flatTerrainServer(t, 100)
+	defer srv.Close()
+
+	bounds := propagation.Bounds{South: 56.0, North: 57.0, West: -5.0, East: -4.0}
+	const zoom = 12
+	p := propagation.Params{
+		FrequencyMHz: 868, TxPowerDBm: 22, TxAntennaGainDB: 3, RxAntennaGainDB: 0,
+		RxSensitivityDB: -124, FadeMarginDB: 20, AntennaHeightM: 1.6, RxHeightM: 2,
+		MaxRangeKm: 40, MarginGreenDB: 15,
+	}
+	rangeKm := propagation.LinkBudgetMaxRangeKm(p)
+	sites := []propagation.Site{
+		{Lat: 56.15, Lon: -4.7, GroundM: 100, TxHeightM: 101.6},
+		{Lat: 56.25, Lon: -4.4, GroundM: 100, TxHeightM: 101.6},
+	}
+	client := &http.Client{}
+
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes, supersample)
+	if len(tiles) < 3 {
+		t.Fatalf("test setup: expected several tiles even with supersample-alignment, got %d", len(tiles))
+	}
+
+	e := New()
+	e.SetChunkBudgetBytes(testBudgetBytes)
+
+	// Reference: compute at full resolution with no downsampling (supersample=1
+	// at this same imageWidth/imageHeight), then downsample the whole thing
+	// in one pass at the end — the old behaviour this must still match.
+	fullRes, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, 1, nil)
+	if err != nil {
+		t.Fatalf("MarginsChunked (reference, supersample=1): %v", err)
+	}
+	want, wantW, wantH := DownsampleMargins(fullRes, imageWidth, imageHeight, supersample)
+	if wantW != servedWidth || wantH != servedHeight {
+		t.Fatalf("test setup: reference downsampled to %dx%d, want %dx%d", wantW, wantH, servedWidth, servedHeight)
+	}
+
+	// Under test: downsample each geographic tile as it's computed.
+	got, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, supersample, nil)
+	if err != nil {
+		t.Fatalf("MarginsChunked (supersample=%d): %v", supersample, err)
+	}
+
+	if len(got) != servedWidth*servedHeight {
+		t.Fatalf("len(got) = %d, want %d (served resolution, not the %dx%d compute resolution)", len(got), servedWidth*servedHeight, imageWidth, imageHeight)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d (matching the reference)", len(got), len(want))
+	}
+	mismatches := 0
+	for i := range want {
+		wNaN, gNaN := math.IsNaN(float64(want[i])), math.IsNaN(float64(got[i]))
+		if wNaN != gNaN {
+			mismatches++
+			continue
+		}
+		if wNaN {
+			continue
+		}
+		if math.Abs(float64(want[i]-got[i])) > 1e-4 {
+			mismatches++
+		}
+	}
+	if mismatches > 0 {
+		t.Errorf("%d/%d pixels differ between per-tile downsampling and full-resolution-then-downsample", mismatches, len(want))
 	}
 }
 
@@ -215,7 +299,7 @@ func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
 		{Lat: 56.25, Lon: -4.4, GroundM: 100, TxHeightM: 101.6},
 	}
 
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes)
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes, 1)
 	if len(tiles) < 3 {
 		t.Fatalf("test setup: expected several tiles, got %d", len(tiles))
 	}
@@ -243,7 +327,7 @@ func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
 	e.SetRemote(strings.TrimPrefix(broker.URL, "http://"), localSrv.URL)
 	e.SetChunkBudgetBytes(testBudgetBytes)
 
-	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), localSrv.URL, &http.Client{}, sites, imageWidth, imageHeight, rangeKm, p, nil)
+	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), localSrv.URL, &http.Client{}, sites, imageWidth, imageHeight, rangeKm, p, 1, nil)
 	if err != nil {
 		t.Fatalf("MarginsChunked: %v", err)
 	}
@@ -309,7 +393,7 @@ func TestMarginsChunkedProgressWeightedBySiteDensity(t *testing.T) {
 	e.SetChunkBudgetBytes(testBudgetBytes)
 
 	var calls [][2]int
-	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, func(done, total int) {
+	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, 1, func(done, total int) {
 		calls = append(calls, [2]int{done, total})
 	})
 	if err != nil {
@@ -346,7 +430,7 @@ func TestMarginsChunkedProgressWeightedBySiteDensity(t *testing.T) {
 	// totals from this call sequence alone isn't reliable. This only
 	// checks the calling contract every caller (run.go's progress.Writer)
 	// depends on: monotonic, bounded, terminates exactly at total.
-	tilesInRegion := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes)
+	tilesInRegion := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes, 1)
 	if len(tilesInRegion) < 3 {
 		t.Fatalf("test setup: expected several tiles so this exercises a real skip/dense mix, got %d", len(tilesInRegion))
 	}

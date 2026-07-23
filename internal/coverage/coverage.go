@@ -120,50 +120,6 @@ func dimensions(bounds propagation.Bounds, imageWidth int) (width, height int) {
 	return imageWidth, h
 }
 
-// downsampleMargins box-averages src (srcWidth x srcHeight) down by factor
-// in each dimension, skipping NaN ("no coverage") samples in the average
-// and only producing NaN in the output where every contributing sample was
-// also NaN — so a downsampled pixel straddling a coverage boundary reads as
-// partial (blended) coverage rather than a jagged all-or-nothing edge.
-func downsampleMargins(src []float32, srcWidth, srcHeight, factor int) (dst []float32, dstWidth, dstHeight int) {
-	if factor <= 1 {
-		return src, srcWidth, srcHeight
-	}
-	dstWidth = (srcWidth + factor - 1) / factor
-	dstHeight = (srcHeight + factor - 1) / factor
-	dst = make([]float32, dstWidth*dstHeight)
-	for dy := 0; dy < dstHeight; dy++ {
-		syEnd := (dy + 1) * factor
-		if syEnd > srcHeight {
-			syEnd = srcHeight
-		}
-		for dx := 0; dx < dstWidth; dx++ {
-			sxEnd := (dx + 1) * factor
-			if sxEnd > srcWidth {
-				sxEnd = srcWidth
-			}
-			var sum float32
-			count := 0
-			for sy := dy * factor; sy < syEnd; sy++ {
-				rowOff := sy * srcWidth
-				for sx := dx * factor; sx < sxEnd; sx++ {
-					v := src[rowOff+sx]
-					if !math.IsNaN(float64(v)) {
-						sum += v
-						count++
-					}
-				}
-			}
-			if count == 0 {
-				dst[dy*dstWidth+dx] = float32(math.NaN())
-			} else {
-				dst[dy*dstWidth+dx] = sum / float32(count)
-			}
-		}
-	}
-	return dst, dstWidth, dstHeight
-}
-
 // RasterSupersampled computes margins at servedWidth*supersample
 // resolution — genuinely finer sampling of the underlying terrain/physics,
 // not just a bigger output file — then box-downsamples back to servedWidth
@@ -182,7 +138,7 @@ func RasterSupersampled(engine *compute.Engine, grid *demgrid.Grid, sites []prop
 
 	rangeKm := propagation.LinkBudgetMaxRangeKm(p)
 	margins := engine.Margins(grid, sites, bounds, computeW, computeH, rangeKm, p, progress)
-	margins, _, _ = downsampleMargins(margins, computeW, computeH, supersample)
+	margins, _, _ = compute.DownsampleMargins(margins, computeW, computeH, supersample)
 	return marginsToImage(margins, servedW, servedH, p, maxAlpha)
 }
 
@@ -202,11 +158,16 @@ func RasterSupersampledChunked(engine *compute.Engine, bounds propagation.Bounds
 	computeW, computeH := servedW*supersample, servedH*supersample
 
 	rangeKm := propagation.LinkBudgetMaxRangeKm(p)
-	margins, err := engine.MarginsChunked(bounds, zoom, cacheDir, tileURLBase, client, sites, computeW, computeH, rangeKm, p, progress)
+	// MarginsChunked downsamples internally, one geographic tile at a time,
+	// so margins already comes back at served (servedW x servedH)
+	// resolution — no separate whole-region downsample step needed here
+	// (that used to be a second ~servedW*servedH*supersample^2*4-byte
+	// buffer alongside the compute-resolution one MarginsChunked itself
+	// held; see its doc comment for why avoiding that mattered).
+	margins, err := engine.MarginsChunked(bounds, zoom, cacheDir, tileURLBase, client, sites, computeW, computeH, rangeKm, p, supersample, progress)
 	if err != nil {
 		return nil, err
 	}
-	margins, _, _ = downsampleMargins(margins, computeW, computeH, supersample)
 	return marginsToImage(margins, servedW, servedH, p, maxAlpha), nil
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -94,6 +95,56 @@ func cleanStaleGridScratch(demCacheDir string) {
 	}
 }
 
+// analyticsPath joins name onto the sibling "analytics" directory next to
+// outputDir — the convention cmd/hopreach and cmd/hopreach-shareapi both
+// use so they agree on where this data lives without a dedicated config
+// field just for the path.
+func analyticsPath(outputDir, name string) string {
+	return filepath.Join(outputDir, "..", "analytics", name)
+}
+
+// recordCrashedRunIfAny checks for an InProgressMarker left over from a
+// previous invocation of run() that never reached its own end — the
+// process was killed (OOM, a manual kill, a host reboot) partway through,
+// with no chance to run any Go-level cleanup, including the defer in run()
+// that would otherwise have recorded that run's own RunRecord. Finding a
+// leftover marker here (called right before this run writes its own) is
+// what gives that otherwise-silent failure a RunRecord at all. Best-effort
+// throughout: a missing/corrupt marker is simply not treated as a crash
+// (the common case — most runs finish cleanly and clear their own
+// marker), never fatal to this run.
+func recordCrashedRunIfAny(runsPath, markerPath, progressPath string) {
+	markers, err := analytics.ReadAll[analytics.InProgressMarker](markerPath)
+	if err != nil || len(markers) == 0 {
+		return
+	}
+
+	// progress.json's last-written stage is the best available clue for
+	// *where* the previous run was when it died — best-effort, since a
+	// sufficiently early crash (or one predating progress.json entirely)
+	// leaves nothing useful here.
+	lastStage := "unknown"
+	if data, err := os.ReadFile(progressPath); err == nil {
+		var p struct {
+			Stage string `json:"stage"`
+		}
+		if json.Unmarshal(data, &p) == nil && p.Stage != "" {
+			lastStage = p.Stage
+		}
+	}
+
+	rec := analytics.RunRecord{
+		StartedAt:  markers[0].StartedAt,
+		FinishedAt: time.Now(),
+		DurationS:  time.Since(markers[0].StartedAt).Seconds(),
+		Success:    false,
+		Error:      fmt.Sprintf("process did not complete (likely killed, e.g. OOM, or crashed) — last known stage: %s", lastStage),
+	}
+	if aerr := analytics.Append(runsPath, rec, 2000); aerr != nil {
+		log.Printf("analytics: could not record crashed run: %v", aerr)
+	}
+}
+
 // recordLocalHardwareInfo records this box's static specs (CPU model, total
 // RAM, and — if engine picked up a usable local GPU during Setup — its
 // adapter string) for the analytics page's hardware panel. Recorded once per
@@ -111,7 +162,7 @@ func recordLocalHardwareInfo(outputDir string, engine *compute.Engine) {
 	if v, err := sysinfo.TotalMemoryBytes(); err == nil {
 		info.TotalBytes = v
 	}
-	path := filepath.Join(outputDir, "..", "analytics", "hardware_website.jsonl")
+	path := analyticsPath(outputDir, "hardware_website.jsonl")
 	if err := analytics.Append(path, info, 1); err != nil {
 		log.Printf("analytics: could not record hardware info: %v", err)
 	}
@@ -122,13 +173,20 @@ func run(cfg appConfig) (err error) {
 	startedAt := time.Now()
 	var tierRecords []analytics.TierRecord
 	didRun := false // set true only once past the "nothing to do yet" skip check — that path isn't a real run worth recording
+	// Set once didRun becomes true (see below) — declared here so the
+	// defer below (a closure, capturing these by reference) sees whatever
+	// value they end up with, even though it's only assigned later.
+	var runsPath, markerPath string
 
 	// Records this run's outcome (success or failure, whichever return
 	// path fired) to analytics/runs.jsonl — a defer with a named return so
 	// every one of run()'s several early-return points is covered by one
 	// recording site instead of needing its own. Best-effort: a failure to
 	// record analytics is logged, never allowed to mask or replace the
-	// real return error from run() itself.
+	// real return error from run() itself. Also clears the in-progress
+	// marker (see recordCrashedRunIfAny) — reaching this defer at all means
+	// run() got to its own end one way or another, so there's nothing left
+	// for a future run to treat as a crash.
 	defer func() {
 		if !didRun {
 			return
@@ -144,9 +202,11 @@ func run(cfg appConfig) (err error) {
 		if err != nil {
 			rec.Error = err.Error()
 		}
-		runsPath := filepath.Join(cfg.outputDir, "..", "analytics", "runs.jsonl")
 		if aerr := analytics.Append(runsPath, rec, 2000); aerr != nil {
 			log.Printf("analytics: could not record run history: %v", aerr)
+		}
+		if rerr := os.Remove(markerPath); rerr != nil && !os.IsNotExist(rerr) {
+			log.Printf("analytics: could not clear in-progress marker: %v", rerr)
 		}
 	}()
 
@@ -171,6 +231,12 @@ func run(cfg appConfig) (err error) {
 		}
 	}
 	didRun = true
+	runsPath = analyticsPath(cfg.outputDir, "runs.jsonl")
+	markerPath = analyticsPath(cfg.outputDir, "in_progress.json")
+	recordCrashedRunIfAny(runsPath, markerPath, filepath.Join(cfg.outputDir, "progress.json"))
+	if merr := analytics.Append(markerPath, analytics.InProgressMarker{StartedAt: startedAt}, 1); merr != nil {
+		log.Printf("analytics: could not write in-progress marker: %v", merr)
+	}
 
 	engine := compute.New()
 	engine.Setup(cfg.gpuMode)
@@ -331,16 +397,26 @@ func run(cfg appConfig) (err error) {
 		return writeMeta()
 	}
 
-	// recordTier appends one tier's timing/backend to the analytics run
-	// record — called only for a tier that actually computed (not one
+	// recordTier appends one tier's timing/backend/outcome to the analytics
+	// run record — called for every tier actually attempted (not one
 	// skipped by GPU gating, which has no meaningful backend/duration of
-	// its own to report).
-	recordTier := func(name string, start time.Time) {
-		tierRecords = append(tierRecords, analytics.TierRecord{
+	// its own to report), whether it succeeded (terr == nil) or its
+	// writeTier call failed (terr != nil, right before run() itself
+	// returns that same error and aborts remaining tiers) — each tier is
+	// its own job dispatched to whichever backend serves it, so it can
+	// fail independently of the others and the analytics run history
+	// should show exactly which one did.
+	recordTier := func(name string, start time.Time, terr error) {
+		tr := analytics.TierRecord{
 			Name:      name,
 			Backend:   prog.LastBackend(),
 			DurationS: time.Since(start).Seconds(),
-		})
+			Success:   terr == nil,
+		}
+		if terr != nil {
+			tr.Error = terr.Error()
+		}
+		tierRecords = append(tierRecords, tr)
 	}
 
 	if haveBounds {
@@ -356,9 +432,10 @@ func run(cfg appConfig) (err error) {
 				"Terrain-aware estimate: free-space path loss + single-knife-edge diffraction over real elevation data (earth curvature included). Does not model foliage or buildings, and assumes one dominant obstruction per path.",
 				func(cm *coverageMeta) { m.Coverage.Standard = cm }); err != nil {
 				prog.Update("error", 0, 0, err.Error())
+				recordTier("standard", tierStart, err)
 				return err
 			}
-			recordTier("standard", tierStart)
+			recordTier("standard", tierStart, nil)
 		} else {
 			log.Printf("coverage: coverage.standard_requires_gpu=true but no GPU (local or remote) is available — skipping standard coverage raster")
 		}
@@ -381,9 +458,10 @@ func run(cfg appConfig) (err error) {
 				"As above, but positions are nudged (within a bounded radius) toward wherever the terrain model best explains each repeater's actually-observed reach data. See each repeater's calibration_offset_m/calibration_score_before/calibration_score_after properties.",
 				func(cm *coverageMeta) { m.Coverage.Calibrated = cm }); err != nil {
 				prog.Update("error", 0, 0, err.Error())
+				recordTier("calibrated", tierStart, err)
 				return err
 			}
-			recordTier("calibrated", tierStart)
+			recordTier("calibrated", tierStart, nil)
 		} else {
 			log.Printf("coverage: coverage.calibrated_requires_gpu=true but no GPU (local or remote) is available — skipping calibrated coverage raster")
 		}
@@ -448,6 +526,7 @@ func run(cfg appConfig) (err error) {
 				if err != nil {
 					siteGrid.Close()
 					prog.Update("error", 0, 0, err.Error())
+					recordTier("precision", tierStart, err)
 					return err
 				}
 				precisionImg := &imageResult{raster: precisionRaster, bounds: bounds}
@@ -456,9 +535,10 @@ func run(cfg appConfig) (err error) {
 					func(cm *coverageMeta) { m.Coverage.Precision = cm }); err != nil {
 					siteGrid.Close()
 					prog.Update("error", 0, 0, err.Error())
+					recordTier("precision", tierStart, err)
 					return err
 				}
-				recordTier("precision", tierStart)
+				recordTier("precision", tierStart, nil)
 			}
 
 			if calibratedPrecisionAllowed {
@@ -481,6 +561,7 @@ func run(cfg appConfig) (err error) {
 					})
 				if err != nil {
 					prog.Update("error", 0, 0, err.Error())
+					recordTier("calibrated_precision", tierStart, err)
 					return err
 				}
 				calibratedPrecisionImg := &imageResult{raster: calibratedPrecisionRaster, bounds: bounds}
@@ -488,9 +569,10 @@ func run(cfg appConfig) (err error) {
 					"Same model and calibrated positions as Calibrated, rendered at a much higher pixel resolution for a sharper result.",
 					func(cm *coverageMeta) { m.Coverage.CalibratedPrecision = cm }); err != nil {
 					prog.Update("error", 0, 0, err.Error())
+					recordTier("calibrated_precision", tierStart, err)
 					return err
 				}
-				recordTier("calibrated_precision", tierStart)
+				recordTier("calibrated_precision", tierStart, nil)
 			} else {
 				siteGrid.Close()
 			}

@@ -26,6 +26,10 @@ function fmtDuration(s) {
   return `${m}m ${Math.round(s - m * 60)}s`;
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
 function fmtDate(iso) {
   const d = new Date(iso);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -207,7 +211,10 @@ function renderRuns(data) {
 
 // renderRunsList shows the most recent runs newest-first as a plain table —
 // the chart above is good for spotting a trend, this is for looking up
-// "did last night's run actually succeed, and what did it use."
+// "did last night's run actually succeed, and which specific tier failed."
+// Each tier is its own job (often dispatched to the remote GPU box), so it
+// can fail independently of the others — shown per tier, not just once for
+// the whole run.
 function renderRunsList(runs) {
   const list = document.getElementById("an-runs-list");
   const maxRows = 25;
@@ -215,11 +222,15 @@ function renderRunsList(runs) {
 
   const table = document.createElement("table");
   table.className = "an-table";
-  table.innerHTML = "<tr><th>Finished</th><th>Duration</th><th>Result</th><th>Version</th><th>Tiers (backend)</th></tr>";
+  table.innerHTML = "<tr><th>Finished</th><th>Duration</th><th>Result</th><th>Version</th><th>Tiers</th></tr>";
   recent.forEach((r) => {
     const row = document.createElement("tr");
-    const result = r.success ? "✓ success" : `✗ failed${r.error ? `: ${r.error}` : ""}`;
-    const tiers = (r.tiers || []).map((t) => `${t.name} (${t.backend})`).join(", ") || "—";
+    const result = r.success ? "✓ success" : `✗ failed${r.error ? `: ${escapeHtml(r.error)}` : ""}`;
+    const tiers = (r.tiers || []).map((t) => {
+      const mark = t.success ? "✓" : "✗";
+      const label = t.success ? `${t.name} (${t.backend})` : `${t.name}${t.error ? `: ${escapeHtml(t.error)}` : ""}`;
+      return `${mark} ${label}`;
+    }).join(", ") || "—";
     row.innerHTML = `<td>${fmtDate(r.finished_at)}</td><td>${fmtDuration(r.duration_seconds)}</td><td>${result}</td><td>${r.version || "—"}</td><td>${tiers}</td>`;
     table.appendChild(row);
   });
@@ -275,7 +286,10 @@ function renderBackend(data) {
   const container = document.getElementById("an-backend");
   const runs = data.runs || [];
   const perBackend = {};
-  runs.forEach((r) => (r.tiers || []).forEach((t) => {
+  // Only successful tiers count toward "typical duration" — a failed
+  // tier's own duration is just how long it ran before failing, not a
+  // representative sample of that backend's real performance.
+  runs.forEach((r) => (r.tiers || []).filter((t) => t.success).forEach((t) => {
     const b = t.backend || "unknown";
     perBackend[b] = perBackend[b] || { count: 0, totalS: 0 };
     perBackend[b].count++;

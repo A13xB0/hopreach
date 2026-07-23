@@ -37,11 +37,29 @@ type RunRecord struct {
 }
 
 // TierRecord is one of the (up to four) coverage tiers within a run:
-// Standard, Calibrated, Precision, Calibrated Precision.
+// Standard, Calibrated, Precision, Calibrated Precision. Each tier is its
+// own job dispatched to whichever backend serves it (often the remote GPU
+// box), so it can fail independently of the others — Success/Error cover
+// that tier specifically, distinct from the whole run's own
+// RunRecord.Success/Error.
 type TierRecord struct {
 	Name      string  `json:"name"`
 	Backend   string  `json:"backend"` // "cpu" | "gpu" | "remote_gpu"
 	DurationS float64 `json:"duration_seconds"`
+	Success   bool    `json:"success"`
+	Error     string  `json:"error,omitempty"`
+}
+
+// InProgressMarker is written just before a run starts and removed just
+// after it finishes cleanly (success or a normal Go-level error return) —
+// see cmd/hopreach/run.go. A marker still present at the *start* of the
+// next run means the previous one never reached its own end: the process
+// was killed (OOM, a manual kill, a host reboot) partway through, with no
+// chance to run any Go-level cleanup at all, including the code that would
+// otherwise have recorded its own RunRecord. Finding a leftover marker is
+// how that otherwise-silent failure gets a RunRecord of its own.
+type InProgressMarker struct {
+	StartedAt time.Time `json:"started_at"`
 }
 
 // MemorySample is one point-in-time reading of a box's available/total

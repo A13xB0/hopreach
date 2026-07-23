@@ -196,6 +196,8 @@ type tile struct {
 // planTiles splits bounds into a 2D grid of geographic tiles, each sized so
 // its own padded elevation grid (loadBounds) stays around budgetBytes at
 // zoom (see Engine.effectiveChunkBudgetBytes for how a caller picks that).
+// supersample must evenly divide imageWidth/imageHeight (1 means no
+// downsampling at all, the common case) — see buildTiles for why.
 //
 // Both axes are chunked, not just latitude: for a propagation range that's
 // a meaningful fraction of the region's own size (a realistic MeshCore
@@ -205,10 +207,22 @@ type tile struct {
 // considered, making width-spanning bands unable to shrink no matter how
 // short they are. Splitting columns too keeps a tile's *padded* footprint,
 // not just its raw output slice, bounded by the budget.
-func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64, budgetBytes float64) []tile {
+func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64, budgetBytes float64, supersample int) []tile {
 	tilesPerChunkBudget := budgetBytes / demTileBytes
 	totalHeightDeg := bounds.North - bounds.South
 	totalWidthDeg := bounds.East - bounds.West
+
+	// maxRowTiles/maxColTiles cap how finely this can split: never finer
+	// than one supersample-sized block per tile, since buildTiles rounds
+	// every boundary down to a multiple of supersample — splitting any
+	// finer than that would round two adjacent (non-final) tiles' shared
+	// boundary to the same value, degenerating one of them to zero rows or
+	// columns. With supersample==1 this is just imageHeight/imageWidth, the
+	// original (pre-supersample-awareness) behaviour.
+	maxRowTiles, maxColTiles := imageHeight, imageWidth
+	if supersample > 1 {
+		maxRowTiles, maxColTiles = imageHeight/supersample, imageWidth/supersample
+	}
 
 	// Rough starting guess (uniform tiles-per-degree, i.e. treating
 	// longitude's own — always-uniform — tile density as if it applied to
@@ -221,8 +235,8 @@ func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int,
 	if sideDeg < minSideDeg {
 		sideDeg = minSideDeg
 	}
-	numRowTiles := clampTileCount(int(math.Ceil(totalHeightDeg/sideDeg)), imageHeight)
-	numColTiles := clampTileCount(int(math.Ceil(totalWidthDeg/sideDeg)), imageWidth)
+	numRowTiles := clampTileCount(int(math.Ceil(totalHeightDeg/sideDeg)), maxRowTiles)
+	numColTiles := clampTileCount(int(math.Ceil(totalWidthDeg/sideDeg)), maxColTiles)
 
 	// Verify against the real (Mercator) tile math and grow both axes
 	// together by whatever factor the worst *actual* tile is still over
@@ -238,7 +252,7 @@ func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int,
 	// unclipped on all four sides, which no single hand-picked sample
 	// reliably represents.
 	for iter := 0; iter < 8; iter++ {
-		candidates := buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles)
+		candidates := buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles, supersample)
 		maxFootprint := 0.0
 		for _, c := range candidates {
 			if fp := tileFootprint(c.loadBounds, zoom); fp > maxFootprint {
@@ -248,28 +262,44 @@ func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int,
 		if maxFootprint <= tilesPerChunkBudget {
 			return candidates
 		}
-		if numRowTiles >= imageHeight && numColTiles >= imageWidth {
-			return candidates // can't split any finer than one output row/column per tile
+		if numRowTiles >= maxRowTiles && numColTiles >= maxColTiles {
+			return candidates // can't split any finer without violating the supersample-alignment invariant above
 		}
 		growth := math.Sqrt(maxFootprint / tilesPerChunkBudget)
-		numRowTiles = clampTileCount(int(math.Ceil(float64(numRowTiles)*growth)), imageHeight)
-		numColTiles = clampTileCount(int(math.Ceil(float64(numColTiles)*growth)), imageWidth)
+		numRowTiles = clampTileCount(int(math.Ceil(float64(numRowTiles)*growth)), maxRowTiles)
+		numColTiles = clampTileCount(int(math.Ceil(float64(numColTiles)*growth)), maxColTiles)
 	}
-	return buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles)
+	return buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles, supersample)
+}
+
+// roundDownTo rounds v down to the nearest multiple of n (n<=1 is a no-op).
+func roundDownTo(v, n int) int {
+	if n <= 1 {
+		return v
+	}
+	return (v / n) * n
 }
 
 // buildTiles constructs the numRowTiles x numColTiles grid of tile
 // rectangles covering bounds — factored out of planTiles so its sizing
 // loop can measure real candidate tiles' footprints before committing to a
-// division.
-func buildTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64, numRowTiles, numColTiles int) []tile {
+// division. Every non-final row/column boundary is rounded down to a
+// multiple of supersample (1 = no rounding) so that MarginsChunked can
+// downsample each tile's own result independently, without needing
+// neighbouring tiles' pixels: a supersample x supersample downsample block
+// then never straddles two different geographic tiles. Safe because
+// imageWidth/imageHeight are themselves always exact multiples of
+// supersample by construction (see RasterSupersampledChunked), so the
+// final row/column — which always snaps to the true edge instead of a
+// rounded one, same as the un-rounded case — is one too.
+func buildTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64, numRowTiles, numColTiles, supersample int) []tile {
 	totalHeightDeg := bounds.North - bounds.South
 	totalWidthDeg := bounds.East - bounds.West
 
 	tiles := make([]tile, 0, numRowTiles*numColTiles)
 	for r := 0; r < numRowTiles; r++ {
-		rowOffset := r * imageHeight / numRowTiles
-		rowEnd := (r + 1) * imageHeight / numRowTiles
+		rowOffset := roundDownTo(r*imageHeight/numRowTiles, supersample)
+		rowEnd := roundDownTo((r+1)*imageHeight/numRowTiles, supersample)
 		if r == numRowTiles-1 {
 			rowEnd = imageHeight
 		}
@@ -279,8 +309,8 @@ func buildTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int
 		tileSouth := bounds.North - float64(rowEnd)/float64(imageHeight)*totalHeightDeg
 
 		for c := 0; c < numColTiles; c++ {
-			colOffset := c * imageWidth / numColTiles
-			colEnd := (c + 1) * imageWidth / numColTiles
+			colOffset := roundDownTo(c*imageWidth/numColTiles, supersample)
+			colEnd := roundDownTo((c+1)*imageWidth/numColTiles, supersample)
 			if c == numColTiles-1 {
 				colEnd = imageWidth
 			}
@@ -379,6 +409,54 @@ func tileWeight(tl tile, tileSites []propagation.Site) int {
 	return tl.rowCount * tl.colCount * sitesForWeight
 }
 
+// DownsampleMargins box-averages src (srcWidth x srcHeight) down by factor
+// in each dimension, skipping NaN ("no coverage") samples in the average
+// and only producing NaN in the output where every contributing sample was
+// also NaN — so a downsampled pixel straddling a coverage boundary reads as
+// partial (blended) coverage rather than a jagged all-or-nothing edge.
+// Shared by MarginsChunked (downsamples one geographic tile at a time, to
+// avoid ever holding a whole-region buffer at full supersampled
+// resolution) and internal/coverage's non-chunked RasterSupersampled
+// (downsamples the one whole-region buffer it already holds, in one call).
+func DownsampleMargins(src []float32, srcWidth, srcHeight, factor int) (dst []float32, dstWidth, dstHeight int) {
+	if factor <= 1 {
+		return src, srcWidth, srcHeight
+	}
+	dstWidth = (srcWidth + factor - 1) / factor
+	dstHeight = (srcHeight + factor - 1) / factor
+	dst = make([]float32, dstWidth*dstHeight)
+	for dy := 0; dy < dstHeight; dy++ {
+		syEnd := (dy + 1) * factor
+		if syEnd > srcHeight {
+			syEnd = srcHeight
+		}
+		for dx := 0; dx < dstWidth; dx++ {
+			sxEnd := (dx + 1) * factor
+			if sxEnd > srcWidth {
+				sxEnd = srcWidth
+			}
+			var sum float32
+			count := 0
+			for sy := dy * factor; sy < syEnd; sy++ {
+				rowOff := sy * srcWidth
+				for sx := dx * factor; sx < sxEnd; sx++ {
+					v := src[rowOff+sx]
+					if !math.IsNaN(float64(v)) {
+						sum += v
+						count++
+					}
+				}
+			}
+			if count == 0 {
+				dst[dy*dstWidth+dx] = float32(math.NaN())
+			} else {
+				dst[dy*dstWidth+dx] = sum / float32(count)
+			}
+		}
+	}
+	return dst, dstWidth, dstHeight
+}
+
 // MarginsChunked computes one whole coverage pass the same way Margins
 // does, but never asks demgrid.Load for the whole region's elevation grid
 // at once. It splits bounds into a 2D grid of geographic tiles (see
@@ -389,26 +467,50 @@ func tileWeight(tl tile, tileSites []propagation.Site) int {
 // GPU worker (4GB RAM) in production, and would be just as unsafe on the
 // website box's own 2GB if a pass ever fell back to local/CPU.
 //
+// supersample matches the caller's own supersample factor (1 = none):
+// imageWidth/imageHeight are the *compute* resolution (already multiplied
+// by supersample), and when supersample > 1 the returned buffer is
+// downsampled to imageWidth/supersample x imageHeight/supersample —
+// computed one geographic tile at a time, immediately after that tile's
+// own margins are ready, rather than assembling the entire
+// full-supersampled-resolution raster before downsampling it in one big
+// pass at the end. That distinction is what fixes a real production OOM:
+// the whole-pass buffer used to be sized at full compute resolution (e.g.
+// ~1.1GB for a 12000x24246 Precision raster at supersample=2) regardless of
+// how small the *served* resolution actually was — a supersample=2 pass's
+// own final output is only a quarter that size. Downsampling per-tile
+// means the one whole-pass-lifetime buffer this function holds is sized at
+// *served* resolution throughout, never the larger compute resolution.
+// Requires imageWidth/imageHeight to be exact multiples of supersample
+// (always true from RasterSupersampledChunked, which derives compute
+// resolution as served resolution times supersample).
+//
 // This is the entry point Precision-tier rendering uses instead of
 // Margins; the caller no longer loads a grid up front at all.
-func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, tileURLBase string, client *http.Client, sites []propagation.Site, imageWidth, imageHeight int, rangeKm float64, p propagation.Params, progress func(done, total int)) ([]float32, error) {
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, e.effectiveChunkBudgetBytes())
+func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, tileURLBase string, client *http.Client, sites []propagation.Site, imageWidth, imageHeight int, rangeKm float64, p propagation.Params, supersample int, progress func(done, total int)) ([]float32, error) {
+	if supersample < 1 {
+		supersample = 1
+	}
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, e.effectiveChunkBudgetBytes(), supersample)
+
+	outWidth, outHeight := imageWidth/supersample, imageHeight/supersample
 
 	// out is the one genuinely large, whole-pass-lifetime allocation this
-	// function makes (imageWidth*imageHeight float32s — order of a
-	// gigabyte for a real Precision-tier raster). On a memory-constrained
-	// box (the website VPS this batch job usually runs on has 2GB, no
-	// swap) that's tight enough on its own; back-to-back tiers (Precision
-	// then Calibrated Precision) each allocate their own such buffer, and
-	// without forcing a collection here, the *previous* tier's buffer can
-	// still be sitting around uncollected — Go's GC has no reason to run
-	// early — right as this tier allocates its own, doubling the peak for
-	// no real reason. Confirmed in production: a run survived Precision's
-	// own memory peak but was OOM-killed moments into Calibrated
-	// Precision, immediately after Precision's tiles had already been
-	// written — consistent with exactly this overlap.
+	// function makes — sized at *served* (post-downsample) resolution, not
+	// the larger compute resolution (see the doc comment above for why
+	// that distinction matters). Still order-of-a-gigabyte for a real
+	// Precision-tier raster at supersample=1, so back-to-back tiers
+	// (Precision then Calibrated Precision) each allocating their own such
+	// buffer still needs a forced collection here first: without it, the
+	// *previous* tier's buffer can still be sitting around uncollected —
+	// Go's GC has no reason to run early — right as this tier allocates
+	// its own, doubling the peak for no real reason. Confirmed in
+	// production: a run survived one tier's own memory peak but was
+	// OOM-killed moments into the next, immediately after the first tier's
+	// tiles had already been written — consistent with exactly this
+	// overlap.
 	runtime.GC()
-	out := make([]float32, imageWidth*imageHeight)
+	out := make([]float32, outWidth*outHeight)
 	for i := range out {
 		out[i] = float32(math.NaN())
 	}
@@ -484,10 +586,17 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 		})
 		grid.Close()
 
-		for row := 0; row < tl.rowCount; row++ {
-			srcStart := row * colCount
-			dstStart := (tl.rowOffset+row)*imageWidth + tl.colOffset
-			copy(out[dstStart:dstStart+colCount], tileMargins[srcStart:srcStart+colCount])
+		// Downsampled right here, per tile, at (at most) a few tens of MB —
+		// never the whole region at once — before ever touching out. Tile
+		// boundaries are always exact multiples of supersample (see
+		// buildTiles), so this tile's own block never needs any neighbouring
+		// tile's pixels to downsample correctly.
+		tileOut, tileOutWidth, tileOutHeight := DownsampleMargins(tileMargins, colCount, tl.rowCount, supersample)
+		tileOutRowOffset, tileOutColOffset := tl.rowOffset/supersample, tl.colOffset/supersample
+		for row := 0; row < tileOutHeight; row++ {
+			srcStart := row * tileOutWidth
+			dstStart := (tileOutRowOffset+row)*outWidth + tileOutColOffset
+			copy(out[dstStart:dstStart+tileOutWidth], tileOut[srcStart:srcStart+tileOutWidth])
 		}
 
 		doneWork += wt.weight
