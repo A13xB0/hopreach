@@ -3,6 +3,7 @@ package sysinfo
 import (
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"testing"
 )
 
@@ -159,5 +160,31 @@ func TestCPUModel(t *testing.T) {
 	}
 	if got == "" {
 		t.Errorf("CPUModel() = %q, want a non-empty string", got)
+	}
+}
+
+// TestApplyGoMemoryLimit is the regression test for the actual fix to a
+// real production OOM: without a GOMEMLIMIT set, Go's GC has no awareness
+// of a container's real memory ceiling at all, and only reacts to its own
+// default heap-doubling schedule — confirmed in production, a real
+// Precision-tier pass's buffers (already shrunk once) still drove the
+// website box's container to an OOM kill whose cgroup memory.peak landed
+// within 4KB of its exact memory.max. This checks that ApplyGoMemoryLimit
+// actually sets a real, non-default limit at the expected fraction of
+// total memory, not just that it runs without panicking.
+func TestApplyGoMemoryLimit(t *testing.T) {
+	total, err := TotalMemoryBytes()
+	if err != nil {
+		t.Skipf("no total memory available on this platform: %v", err)
+	}
+	orig := debug.SetMemoryLimit(-1) // -1 reads the current limit without changing it
+	defer debug.SetMemoryLimit(orig) // restore whatever this test suite's process already had
+
+	ApplyGoMemoryLimit()
+	got := debug.SetMemoryLimit(-1)
+
+	want := int64(float64(total) * goMemLimitFraction)
+	if !closeEnough(float64(got), float64(want)) {
+		t.Errorf("GOMEMLIMIT = %d, want approximately %d (%.0f%% of total memory %d)", got, want, goMemLimitFraction*100, total)
 	}
 }

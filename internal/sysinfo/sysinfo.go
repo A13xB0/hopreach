@@ -25,6 +25,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 )
@@ -152,6 +153,37 @@ func meminfoField(prefix string) (uint64, error) {
 		return kb * 1024, nil
 	}
 	return 0, fmt.Errorf("sysinfo: no %s field in /proc/meminfo", prefix)
+}
+
+// goMemLimitFraction is how much of this box's real total memory Go's own
+// runtime is told it may use — see ApplyGoMemoryLimit for why this exists.
+// Well under 1.0: the remainder covers non-Go-heap RSS (goroutine stacks,
+// GC bookkeeping, the OS/cgroup's own overhead) and, on the website box,
+// nginx and hopreach-shareapi running concurrently in the very same
+// container/cgroup.
+const goMemLimitFraction = 0.75
+
+// ApplyGoMemoryLimit sets Go's runtime soft memory limit (GOMEMLIMIT) to a
+// conservative fraction of this container's real total memory (see
+// TotalMemoryBytes — cgroup-aware, so this is meaningful even nested inside
+// an LXC/VM). Without this, Go's garbage collector only triggers on its
+// default heap-doubling schedule, with no awareness of the container's real
+// ceiling at all — confirmed in production: a real Precision-tier pass's
+// large-but-individually-modest buffers (see compute.Engine.MarginsChunked)
+// still drove the container to an OOM kill whose cgroup memory.peak landed
+// within 4KB of its exact memory.max, even after those buffers were
+// shrunk from whole-region to per-tile — because nothing was telling the
+// GC to reclaim proactively as usage approached that ceiling rather than
+// only reacting to its own default growth heuristic. Called once at
+// process startup; a no-op (leaving Go's own default, effectively
+// unlimited, behaviour untouched) if TotalMemoryBytes can't determine
+// anything (non-Linux, etc.).
+func ApplyGoMemoryLimit() {
+	total, err := TotalMemoryBytes()
+	if err != nil {
+		return
+	}
+	debug.SetMemoryLimit(int64(float64(total) * goMemLimitFraction))
 }
 
 // CPUModel returns /proc/cpuinfo's first "model name" field — a

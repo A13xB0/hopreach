@@ -21,9 +21,16 @@ import (
 	"log"
 
 	yconfig "hopreach/internal/config"
+	"hopreach/internal/sysinfo"
 )
 
 func main() {
+	// See sysinfo.ApplyGoMemoryLimit: without this, Go's GC has no
+	// awareness of this container's real memory ceiling at all, and a real
+	// Precision-tier pass's large buffers OOM-killed the container even
+	// after being shrunk, right up against the exact cgroup limit.
+	sysinfo.ApplyGoMemoryLimit()
+
 	configFlag := flag.String("config", "", "path to config.yaml (default: $HOPREACH_CONFIG, then ./config.yaml)")
 	force := flag.Bool("force", false, "recompute even if within coverage.min_recompute_interval_hours")
 	prepare := flag.Bool("prepare", false, "render config.js, nginx's site config, and the cron file from config.yaml, then exit")

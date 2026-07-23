@@ -25,6 +25,7 @@ import (
 
 	"hopreach/internal/analytics"
 	yconfig "hopreach/internal/config"
+	"hopreach/internal/sysinfo"
 )
 
 const maxPlanBytes = 256 * 1024 // plans are just repeater lists + labels; this is generous
@@ -207,6 +208,12 @@ func prune() error {
 }
 
 func main() {
+	// See sysinfo.ApplyGoMemoryLimit — this process shares the same
+	// container/cgroup as cmd/hopreach's own (much larger) batch runs on
+	// the website box, so it gets the same treatment for consistency, even
+	// though its own footprint is normally tiny.
+	sysinfo.ApplyGoMemoryLimit()
+
 	configFlag := flag.String("config", "", "path to config.yaml (default: $HOPREACH_CONFIG, then ./config.yaml)")
 	pruneMode := flag.Bool("prune", false, "delete plans older than share.ttl_days and exit")
 	flag.Parse()
