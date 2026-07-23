@@ -211,6 +211,7 @@ func main() {
 	api.Set("releaseGrid", js.FuncOf(jsReleaseGrid))
 	api.Set("gridAt", js.FuncOf(jsGridAt))
 	api.Set("pathMargin", js.FuncOf(jsPathMargin))
+	registerMeshsim(api)
 	js.Global().Set("__hopreachWasm", api)
 
 	// Signals public/wasm-bridge.js that __hopreachWasm is fully populated

@@ -103,7 +103,7 @@ func TestSuggestUsesAltitudeRulesWhenAttrsProvided(t *testing.T) {
 
 	foundAltitudeRule := false
 	for _, s := range result.Suggestions {
-		if s.Rule.Predicate != nil {
+		if s.Rule.Condition.Kind != ConditionNone {
 			foundAltitudeRule = true
 			break
 		}
@@ -125,7 +125,7 @@ func TestSuggestOmitsConditionalRulesWhenAttrsNil(t *testing.T) {
 	})
 
 	for _, s := range result.Suggestions {
-		if s.Rule.Predicate != nil {
+		if s.Rule.Condition.Kind != ConditionNone {
 			t.Errorf("did not expect a conditional rule %q when Attrs is nil", s.Rule.Name)
 		}
 	}
@@ -149,9 +149,9 @@ func TestConfigRuleApplyLeavesUnsetFieldsAtBaseline(t *testing.T) {
 	}
 }
 
-func TestConfigRuleMatchesNilPredicateMatchesEverything(t *testing.T) {
+func TestConfigRuleMatchesZeroConditionMatchesEverything(t *testing.T) {
 	rule := ConfigRule{}
 	if !rule.Matches(NodeAttrs{AltitudeM: -500, NeighborCount: 0}) {
-		t.Error("a rule with a nil Predicate should match every node")
+		t.Error("a rule with the zero-value Condition should match every node")
 	}
 }

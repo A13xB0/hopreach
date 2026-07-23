@@ -7,8 +7,8 @@ import "container/heap"
 // distinctly from a repeater (a client that only originates/receives
 // traffic, never re-floods it).
 type SimNode struct {
-	Prefs    NodePrefs
-	CanRelay bool
+	Prefs    NodePrefs `json:"prefs"`
+	CanRelay bool      `json:"canRelay"`
 }
 
 // Scenario is one whole simulated mesh: every node's own prefs, and the
@@ -17,8 +17,8 @@ type SimNode struct {
 // and the propagation model the caller chooses; this package only consumes
 // the result).
 type Scenario struct {
-	Nodes []SimNode
-	Links []Link
+	Nodes []SimNode `json:"nodes"`
+	Links []Link    `json:"links"`
 }
 
 // Message is one test-bench-scheduled flood transmission: node Origin
@@ -26,9 +26,9 @@ type Scenario struct {
 // from t=0). Direct/routed traffic isn't modeled yet — see the package doc
 // for why flood-only is the right first scope.
 type Message struct {
-	Origin     int
-	SendAtMs   uint32
-	PayloadLen int
+	Origin     int    `json:"origin"`
+	SendAtMs   uint32 `json:"sendAtMs"`
+	PayloadLen int    `json:"payloadLen"`
 }
 
 // Reception is one (packet, listening node) outcome — the core unit the
@@ -36,18 +36,18 @@ type Message struct {
 // per node that ever came within radio range of *some* transmission of it
 // (the original send, or any of its relays).
 type Reception struct {
-	PacketID   int // index into the Report's Messages/originating relay chain — see Report
-	Node       int
-	AtMs       uint32
-	FromNode   int
-	Collided   bool // true if another transmission's airtime window overlapped this one at Node
-	HopCount   int  // 0 = received directly from the original sender
-	WasRelayed bool // true if Node went on to relay this packet onward (false if already relayed by the time it arrived, or CanRelay is false, or hop limit reached)
+	PacketID   int    `json:"packetId"` // index into the Report's Messages/originating relay chain — see Report
+	Node       int    `json:"node"`
+	AtMs       uint32 `json:"atMs"`
+	FromNode   int    `json:"fromNode"`
+	Collided   bool   `json:"collided"`   // true if another transmission's airtime window overlapped this one at Node
+	HopCount   int    `json:"hopCount"`   // 0 = received directly from the original sender
+	WasRelayed bool   `json:"wasRelayed"` // true if Node went on to relay this packet onward (false if already relayed by the time it arrived, or CanRelay is false, or hop limit reached)
 }
 
 // Report is one simulation run's full result set.
 type Report struct {
-	Receptions []Reception
+	Receptions []Reception `json:"receptions"`
 }
 
 // MaxHopCount bounds how many times a single packet can be relayed before

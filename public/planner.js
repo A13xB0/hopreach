@@ -1693,6 +1693,22 @@
 
   init();
 
+  // Small, deliberately narrow surface other frontend modules (simulator.js
+  // — "load planned repeaters into the simulator") can read from without
+  // reaching into this closure's private state. Snapshots are taken fresh
+  // on each call (plan/realRepeatersById are reassigned, not mutated in
+  // place, whenever a plan switches or the repeater layer reloads) so
+  // callers always see current data, not a stale one-time copy.
+  window.HopReachPlanner = {
+    getActivePlan: () => plan,
+    getRealRepeaters: () => realRepeatersById,
+    // Lets simulator.js keep the two full-height right-side panels mutually
+    // exclusive (both are pinned to the same edge at the same width, so
+    // having both open at once would just overlap) without planner.js
+    // needing to know simulator.js exists.
+    closePanel: () => setPanelOpen(false),
+  };
+
   // Test-only introspection hook (no UI/behavioural surface of its own).
   window.__hopreachPlannerDebug = {
     getPreviewBounds: () => (previewOverlay ? previewOverlay.getBounds() : null),

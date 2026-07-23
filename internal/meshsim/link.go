@@ -10,8 +10,9 @@ package meshsim
 // consumes the resulting graph, so it stays independent of both data
 // sources.
 type Link struct {
-	From, To int
-	SNRdB    float64
+	From  int     `json:"from"`
+	To    int     `json:"to"`
+	SNRdB float64 `json:"snrDb"`
 }
 
 // adjacency indexes Links by sender for fast "who can hear node N" lookups

@@ -83,17 +83,22 @@ header .subtitle {
   inset: 0;
 }
 
-/* Plan panel spans the full right edge — shift Leaflet's own right-side
-   controls (basemap/layers up top, legend down below) left by the panel's
-   width so they stay reachable instead of disappearing underneath it. */
+/* Plan/simulator panels span the full right edge — shift Leaflet's own
+   right-side controls (basemap/layers up top, legend down below) left by
+   the panel's width so they stay reachable instead of disappearing
+   underneath it. */
 #map-wrap.plan-open .leaflet-top.leaflet-right,
-#map-wrap.plan-open .leaflet-bottom.leaflet-right {
+#map-wrap.plan-open .leaflet-bottom.leaflet-right,
+#map-wrap.sim-open .leaflet-top.leaflet-right,
+#map-wrap.sim-open .leaflet-bottom.leaflet-right {
   right: 320px;
   transition: right 0.15s ease;
 }
 @media (max-width: 500px) {
   #map-wrap.plan-open .leaflet-top.leaflet-right,
-  #map-wrap.plan-open .leaflet-bottom.leaflet-right {
+  #map-wrap.plan-open .leaflet-bottom.leaflet-right,
+  #map-wrap.sim-open .leaflet-top.leaflet-right,
+  #map-wrap.sim-open .leaflet-bottom.leaflet-right {
     right: 90vw;
   }
 }
@@ -356,7 +361,7 @@ header .subtitle {
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 
-#plan-panel {
+#plan-panel, #sim-panel {
   position: absolute;
   top: 0;
   right: 0;
@@ -371,7 +376,7 @@ header .subtitle {
   padding: 0.75rem;
   box-shadow: -4px 0 16px rgba(0,0,0,0.4);
 }
-#plan-panel.hidden { display: none; }
+#plan-panel.hidden, #sim-panel.hidden { display: none; }
 
 .plan-panel-header {
   display: flex;
@@ -426,7 +431,8 @@ header .subtitle {
   font-size: 0.72rem;
 }
 
-#plan-panel button, #plan-panel select, #plan-panel input[type="text"] {
+#plan-panel button, #plan-panel select, #plan-panel input[type="text"],
+#sim-panel button, #sim-panel select, #sim-panel input[type="text"], #sim-panel input[type="number"] {
   background: var(--surface1, #0a1929);
   color: var(--text);
   border: 1px solid var(--border);
@@ -435,8 +441,9 @@ header .subtitle {
   font-size: 0.78rem;
   cursor: pointer;
 }
-#plan-panel input[type="text"] { cursor: text; }
-#plan-panel button:hover { border-color: var(--accent); }
+#plan-panel input[type="text"], #sim-panel input[type="text"], #sim-panel input[type="number"] { cursor: text; }
+#plan-panel button:hover, #sim-panel button:hover { border-color: var(--accent); }
+#sim-panel button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .plan-mode-buttons {
   display: flex;
@@ -652,3 +659,38 @@ header .subtitle {
 .nb-dot.nb-strong { background: #4ade80; }
 .nb-dot.nb-marginal { background: #facc15; }
 .nb-dot.nb-weak { background: #f87171; }
+
+/* --- LoRa flood simulator (sim-panel / simulator.js) ------------------ */
+
+.sim-node-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.sim-node-badge.sim-badge-planned { background: rgba(74,222,128,0.18); color: #4ade80; }
+.sim-node-badge.sim-badge-real { background: rgba(56,189,248,0.18); color: #38bdf8; }
+
+.sim-list-item.sim-collided { border-left: 3px solid #f87171; }
+.sim-list-item.sim-clean { border-left: 3px solid #4ade80; }
+
+.sim-suggestion-rank {
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+  width: 1.4rem;
+}
+.sim-suggestion-rate { color: var(--text-muted); font-size: 0.68rem; }
+.sim-suggestion-rate.sim-rate-better { color: #4ade80; }
+
+.sim-marker-icon {
+  background: #a855f7;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 0 0 2px rgba(168,85,247,0.4);
+}

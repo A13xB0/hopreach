@@ -33,6 +33,7 @@
 
     <div id="map-tools">
       <button id="plan-toggle" title="Planning tools">Plan</button>
+      <button id="sim-toggle" title="LoRa flood simulator">📡 Simulate</button>
       <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
     </div>
     <div id="companion-pin-hint" class="plan-hint hidden">
@@ -120,6 +121,79 @@
 
       <div id="plan-coverage-status" class="plan-hint hidden"></div>
     </div>
+
+    <div id="sim-panel" class="hidden">
+      <div class="plan-panel-header">
+        <span>LoRa flood simulator</span>
+        <button id="sim-panel-close" aria-label="Close">×</button>
+      </div>
+
+      <div class="plan-hint">
+        Send simulated flood packets from chosen nodes and see where floods
+        collide, using MeshCore's real airtime/relay-delay formulas
+        (compiled from the same Go code as the server). Load real repeaters
+        and/or planned repeaters below, wire up connectivity, schedule some
+        sends, and run.
+      </div>
+
+      <div class="plan-section-title">Simulated nodes</div>
+      <div class="plan-row">
+        <button id="sim-load-planned">+ Load planned repeaters</button>
+        <button id="sim-load-real">+ Load real repeaters</button>
+        <button id="sim-nodes-clear">Clear all</button>
+      </div>
+      <div id="sim-node-list" class="plan-list"></div>
+
+      <div class="plan-section-title">Connectivity source</div>
+      <div class="plan-row">
+        <select id="sim-connectivity-source">
+          <option value="model">Propagation model</option>
+          <option value="corescope">CoreScope observed (real repeaters only)</option>
+          <option value="blend">Blend (observed where available, else model)</option>
+        </select>
+        <button id="sim-build-links">Build links</button>
+      </div>
+      <div id="sim-links-status" class="plan-hint hidden"></div>
+
+      <div class="plan-section-title">Message schedule</div>
+      <div class="plan-row">
+        <select id="sim-message-node"></select>
+        <input type="number" id="sim-message-time" min="0" step="100" value="0" title="Send time (ms)">
+        <input type="number" id="sim-message-payload" min="1" max="255" step="1" value="20" title="Payload length (bytes)">
+        <button id="sim-message-add">+ Add send</button>
+      </div>
+      <div id="sim-message-list" class="plan-list"></div>
+
+      <div class="plan-section-title">Run</div>
+      <div class="plan-field-row">
+        <label for="sim-seed">Random seed</label>
+        <input type="number" id="sim-seed" min="0" step="1" value="1">
+      </div>
+      <div class="plan-field-row">
+        <label for="sim-max-time">Sim duration (ms)</label>
+        <input type="number" id="sim-max-time" min="1000" step="1000" value="60000">
+      </div>
+      <div class="plan-field-row">
+        <label for="sim-trials">Predict-settings trials</label>
+        <input type="number" id="sim-trials" min="1" max="100" step="1" value="20">
+      </div>
+      <div class="plan-row">
+        <button id="sim-run">▶ Run simulation</button>
+        <button id="sim-predict">🎯 Predict settings</button>
+      </div>
+      <div id="sim-status" class="plan-hint hidden"></div>
+
+      <div id="sim-results-section" class="hidden">
+        <div class="plan-section-title">Results</div>
+        <div id="sim-results-summary" class="plan-hint"></div>
+        <div id="sim-results-log" class="plan-list"></div>
+      </div>
+
+      <div id="sim-suggestions-section" class="hidden">
+        <div class="plan-section-title">Suggested settings</div>
+        <div id="sim-suggestions-list" class="plan-list"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -130,7 +204,9 @@
 <script src="wasm-bridge.js"></script>
 <script src="terrain.js"></script>
 <script src="propagation.js"></script>
+<script src="meshsim-bridge.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>
+<script src="simulator.js"></script>
 </body>
 </html>

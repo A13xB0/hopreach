@@ -22,22 +22,22 @@ import "math"
 // the 4/CR coding rate), not the Semtech AN1200.13 paper's CR (1-4) — see
 // Airtime, which converts internally.
 type LoRaParams struct {
-	FreqMHz float64 // e.g. 869.525
-	BWkHz   float64 // e.g. 250
-	SF      int     // spreading factor, 5-12
-	CR      int     // coding rate denominator, 5-8 (i.e. 4/5 .. 4/8) — MeshCore's CLI convention
+	FreqMHz float64 `json:"freqMhz"` // e.g. 869.525
+	BWkHz   float64 `json:"bwKhz"`   // e.g. 250
+	SF      int     `json:"sf"`      // spreading factor, 5-12
+	CR      int     `json:"cr"`      // coding rate denominator, 5-8 (i.e. 4/5 .. 4/8) — MeshCore's CLI convention
 
 	// PreambleSymbols is the LoRa preamble length in symbols. 8 is the
 	// standard LoRa/RadioLib default and not yet confirmed against
 	// MeshCore's own radio init code — override if that turns out to
 	// differ once verified.
-	PreambleSymbols int
+	PreambleSymbols int `json:"preambleSymbols"`
 	// ExplicitHeader: true for MeshCore's normal packet framing (variable
 	// payload length needs an explicit header); implicit header (false) is
 	// a fixed-length-payload LoRa mode MeshCore doesn't appear to use.
-	ExplicitHeader bool
+	ExplicitHeader bool `json:"explicitHeader"`
 	// CRCEnabled: true for MeshCore's normal payload CRC.
-	CRCEnabled bool
+	CRCEnabled bool `json:"crcEnabled"`
 }
 
 // DefaultLoRaParams mirrors MeshCore's own documented default:

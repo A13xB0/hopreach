@@ -26,33 +26,33 @@ var (
 // TuneRequest is everything Suggest needs to search for better per-node
 // settings.
 type TuneRequest struct {
-	Scenario     Scenario
-	Messages     []Message
-	Attrs        []NodeAttrs // parallel to Scenario.Nodes; nil disables altitude/neighbour-based rules (global-only search)
-	MaxSimTimeMs uint32
+	Scenario     Scenario    `json:"scenario"`
+	Messages     []Message   `json:"messages"`
+	Attrs        []NodeAttrs `json:"attrs,omitempty"` // parallel to Scenario.Nodes; nil/omitted disables altitude/neighbour-based rules (global-only search)
+	MaxSimTimeMs uint32      `json:"maxSimTimeMs"`
 
 	// Trials is how many times each candidate is simulated, averaging out
 	// the randomized retransmit-delay draws so a candidate isn't judged on
 	// one lucky or unlucky run. Trials < 1 is treated as 1.
-	Trials int
+	Trials int `json:"trials"`
 	// Seed drives every trial's RNG deterministically — the same seed
 	// reproduces the same TuneResult, and every candidate (plus the
 	// baseline) is evaluated against the same per-trial draws so the
 	// comparison isn't confounded by which candidate merely got luckier.
-	Seed uint64
+	Seed uint64 `json:"seed"`
 }
 
 // Suggestion is one candidate rule's measured outcome.
 type Suggestion struct {
-	Rule          ConfigRule
-	CollisionRate float64
+	Rule          ConfigRule `json:"rule"`
+	CollisionRate float64    `json:"collisionRate"`
 }
 
 // TuneResult is Suggest's output: the no-override baseline collision rate,
 // and every searched candidate ranked best (lowest CollisionRate) first.
 type TuneResult struct {
-	Baseline    float64
-	Suggestions []Suggestion
+	Baseline    float64      `json:"baseline"`
+	Suggestions []Suggestion `json:"suggestions"`
 }
 
 // Suggest grid-searches candidate ConfigRules — global tx/rx-delay
@@ -88,18 +88,17 @@ func Suggest(req TuneRequest) TuneResult {
 
 	if req.Attrs != nil {
 		for _, alt := range altitudeThresholds {
-			alt := alt
 			for _, td := range txDelayCandidates {
 				td := td
 				candidates = append(candidates,
 					ConfigRule{
 						Name:          fmt.Sprintf("altitude >= %.0fm: txdelay %.2f", alt, td),
-						Predicate:     func(a NodeAttrs) bool { return a.AltitudeM >= alt },
+						Condition:     RuleCondition{Kind: ConditionAltitudeAtLeast, Threshold: alt},
 						TxDelayFactor: &td,
 					},
 					ConfigRule{
 						Name:          fmt.Sprintf("altitude <= %.0fm: txdelay %.2f", alt, td),
-						Predicate:     func(a NodeAttrs) bool { return a.AltitudeM <= alt },
+						Condition:     RuleCondition{Kind: ConditionAltitudeAtMost, Threshold: alt},
 						TxDelayFactor: &td,
 					},
 				)
@@ -109,24 +108,23 @@ func Suggest(req TuneRequest) TuneResult {
 				candidates = append(candidates,
 					ConfigRule{
 						Name:        fmt.Sprintf("altitude >= %.0fm: rxdelay %.1f", alt, rd),
-						Predicate:   func(a NodeAttrs) bool { return a.AltitudeM >= alt },
+						Condition:   RuleCondition{Kind: ConditionAltitudeAtLeast, Threshold: alt},
 						RxDelayBase: &rd,
 					},
 					ConfigRule{
 						Name:        fmt.Sprintf("altitude <= %.0fm: rxdelay %.1f", alt, rd),
-						Predicate:   func(a NodeAttrs) bool { return a.AltitudeM <= alt },
+						Condition:   RuleCondition{Kind: ConditionAltitudeAtMost, Threshold: alt},
 						RxDelayBase: &rd,
 					},
 				)
 			}
 		}
 		for _, nc := range neighborCountThresholds {
-			nc := nc
 			for _, td := range txDelayCandidates {
 				td := td
 				candidates = append(candidates, ConfigRule{
 					Name:          fmt.Sprintf("neighbours >= %d: txdelay %.2f", nc, td),
-					Predicate:     func(a NodeAttrs) bool { return a.NeighborCount >= nc },
+					Condition:     RuleCondition{Kind: ConditionNeighborsAtLeast, Threshold: float64(nc)},
 					TxDelayFactor: &td,
 				})
 			}
@@ -134,7 +132,7 @@ func Suggest(req TuneRequest) TuneResult {
 				rd := rd
 				candidates = append(candidates, ConfigRule{
 					Name:        fmt.Sprintf("neighbours >= %d: rxdelay %.1f", nc, rd),
-					Predicate:   func(a NodeAttrs) bool { return a.NeighborCount >= nc },
+					Condition:   RuleCondition{Kind: ConditionNeighborsAtLeast, Threshold: float64(nc)},
 					RxDelayBase: &rd,
 				})
 			}

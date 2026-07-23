@@ -9,22 +9,22 @@ package meshsim
 type NodePrefs struct {
 	// TxDelayFactor: `set txdelay <value>` — scales the random flood-relay
 	// delay window (see RetransmitDelayMs). Range 0-2, default 0.5.
-	TxDelayFactor float64
+	TxDelayFactor float64 `json:"txDelayFactor"`
 	// DirectTxDelayFactor: `set direct.txdelay <value>` — same, for direct
 	// (routed, non-flood) traffic. Range 0-2, default 0.3 (verified against
 	// current source; some secondhand descriptions say 0.2, an older
 	// default).
-	DirectTxDelayFactor float64
+	DirectTxDelayFactor float64 `json:"directTxDelayFactor"`
 	// RxDelayBase: `set rxdelay <value>` — weak-signal RX holdback (see
 	// RxDelayMs). Range 0-20, default 0 (off).
-	RxDelayBase float64
+	RxDelayBase float64 `json:"rxDelayBase"`
 	// TxPowerDBm: `set tx <dbm>`. Range 1-22 (verified from the CLI
 	// reference); the real firmware's own default specific value isn't yet
 	// confirmed against source — DefaultNodePrefs uses the range maximum as
 	// a placeholder until that's checked.
-	TxPowerDBm float64
+	TxPowerDBm float64 `json:"txPowerDbm"`
 
-	Radio LoRaParams
+	Radio LoRaParams `json:"radio"`
 }
 
 // DefaultNodePrefs mirrors MeshCore's own current firmware defaults

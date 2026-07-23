@@ -170,6 +170,46 @@ view) and are deleted after `share.ttl_days` (default 7) by a daily cron job
 (`hopreach-shareapi -prune`), the same mechanism that runs the nightly
 coverage fetch.
 
+## LoRa flood simulator
+
+A second, separate top-level mode (**📡 Simulate**, next to **Plan**, not a
+planning sub-mode) for testing and tuning MeshCore's flood-relay timing
+before touching a real device. It runs a discrete-event simulation
+(`internal/meshsim`) built from a faithful, from-source port of MeshCore's
+own airtime, packet-score, and retransmit-delay formulas — verified
+line-for-line against `github.com/meshcore-dev/MeshCore`'s actual source
+(`Dispatcher.cpp`, `MyMesh.cpp`, `RadioLibWrappers.cpp`), not a secondhand
+approximation — compiled to the same shared WASM module as the
+[planning tools](#planning-tools) (`wasm/meshsim.go`; see
+[WASM shared core](#wasm-shared-core)).
+
+1. **Load nodes** — pull in this browser's currently active plan's
+   repeaters, the site's real repeaters, or both.
+2. **Build connectivity** — choose how links between nodes are decided:
+   the propagation model (terrain-aware, works for planned repeaters too),
+   CoreScope's own observed reach data (real radio traffic, real repeaters
+   only), or a blend (observed where CoreScope has it, model everywhere
+   else — the propagation-model links use each pair's dB margin above
+   threshold as an approximate SNR, a documented proxy, not a certified RF
+   measurement).
+3. **Schedule sends** — pick which node(s) transmit a flood packet and
+   when (milliseconds into the simulation), then **Run** to see who
+   received what, whether any receptions collided with another
+   simultaneous transmission, and how far the flood actually propagated —
+   both as a results log and as green (clean) / red (collided) lines drawn
+   on the map.
+4. **Predict settings** — grid-searches candidate `txdelay`/`rxdelay`
+   overrides (global, or conditional on a repeater's altitude/neighbour
+   count once that data is supplied) and ranks them by measured collision
+   rate against the scheduled sends, averaged over repeated
+   deterministic-RNG trials so one candidate isn't judged on a lucky draw.
+   Suggested values are expressed in the same units as MeshCore's own CLI
+   (`set txdelay`/`set direct.txdelay`/`set rxdelay`), so a suggestion can
+   be pasted straight onto a real device.
+
+Direct/routed traffic isn't modeled yet — only flood packets, which is
+where relay-timing collisions actually happen.
+
 ## Region: not just Scotland
 
 A repeater is kept if it's **geographically inside the configured region**:
