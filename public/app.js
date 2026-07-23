@@ -445,16 +445,29 @@
   // (every remaining tier included) to complete first.
   let lastProgressStage = null;
 
+  // A run that gets killed (OOM, a manual kill, a host reboot) never
+  // reaches its own "done"/"error" write — progress.json just stops
+  // updating, frozen mid-stage. Without treating that as stale, the
+  // banner would show "still computing" forever for anyone loading the
+  // page, even though nothing is actually running (confirmed in
+  // production: a forced recompute OOM-killed mid-Precision-tier left
+  // progress.json frozen on computing_coverage_precision). Generous
+  // enough that a real (if slow) network-bound stage — a big DEM tile
+  // fetch, a slow CoreScope response — doesn't false-positive.
+  const PROGRESS_STALE_MS = 3 * 60 * 1000;
+
   function pollProgress() {
     fetch(`data/progress.json?t=${Date.now()}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((progress) => {
         const banner = document.getElementById("progress-banner");
-        if (!progress || progress.stage === "done" || progress.stage === "error") {
+        const stale = progress && progress.updated_at && Date.now() - Date.parse(progress.updated_at) > PROGRESS_STALE_MS;
+        if (!progress || progress.stage === "done" || progress.stage === "error" || stale) {
           const wasShowing = !banner.classList.contains("hidden");
           banner.classList.add("hidden");
           if (wasShowing) {
-            // A generation just finished (or failed) — refresh the map data.
+            // A generation just finished, failed, or (per `stale` above)
+            // was silently killed — refresh the map data either way.
             loadData();
           }
           lastProgressStage = null;
