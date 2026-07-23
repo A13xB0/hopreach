@@ -35,7 +35,13 @@
       <button id="plan-toggle" title="Planning tools">Plan</button>
       <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
     </div>
-    <div id="companion-pin-hint" class="plan-hint hidden">Click the map to drop a pin. Drag it to move. Click the button again to remove it. Search is capped to ~35km for speed.</div>
+    <div id="companion-pin-hint" class="plan-hint hidden">
+      Click the map to drop a pin. Drag it to move. Click the button again to remove it. Search is capped to ~35km for speed.
+      <label id="companion-pin-height-label">
+        Pin height (m, e.g. hip ~1m, head height ~1.7m):
+        <input type="number" id="companion-pin-height" value="1" min="0" max="3" step="0.1">
+      </label>
+    </div>
     <div id="plan-panel" class="hidden">
       <div class="plan-panel-header">
         <span>Planning tools</span>

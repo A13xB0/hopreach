@@ -147,11 +147,13 @@ too.
 A separate, always-available button next to "Plan" (no side panel needed):
 drop a single draggable pin anywhere on the map and see who it would likely
 reach, using the same terrain physics as everything else. Unlike a planned
-repeater, the pin uses `propagation.rx_height_m` (handheld height) rather
-than `propagation.antenna_height_m` (mast height) for its own end of the
-link, since it's the *receiving* side. Not saved anywhere — it resets on
-reload. Search is capped to ~35km and a coarser DEM zoom, same as the
-add-repeater preview, for speed.
+repeater, the pin uses its own adjustable height (a hip-carried device and
+one held overhead can genuinely differ on a marginal link) rather than
+`propagation.antenna_height_m` (mast height) for its own end of the link,
+since it's the *receiving* side — a height field next to the pin's hint text
+defaults to 1m and updates an already-placed pin live. Not saved anywhere —
+it resets on reload. Search is capped to ~35km and a coarser DEM zoom, same
+as the add-repeater preview, for speed.
 
 ### Saving and sharing plans
 

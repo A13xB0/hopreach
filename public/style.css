@@ -471,6 +471,22 @@ header .subtitle {
 }
 .plan-hint.hidden { display: none; }
 
+#companion-pin-height-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+#companion-pin-height {
+  width: 4rem;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.72rem;
+}
+
 .plan-section-title {
   font-size: 0.72rem;
   text-transform: uppercase;

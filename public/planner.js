@@ -1287,6 +1287,31 @@
   const COMPANION_MAX_RANGE_KM = 35;
   const COMPANION_ZOOM_CAP = 10;
 
+  // The pin's own height above ground — distinct from cfg.propagation's
+  // antennaHeightM (a repeater's mast) and its own default rxHeightM
+  // (tuned for the *real* map's assumed handheld height, not necessarily
+  // how someone actually carries a device — hip vs. head height can matter
+  // for a genuinely marginal link). User-adjustable, defaulting to 1m.
+  // companionPinPropagation is a *new* object (not a mutated
+  // cfg.propagation) each time the height changes: propagation.js's
+  // handleFor() caches one WASM-side params handle per object reference,
+  // so mutating cfg.propagation.rxHeightM in place would silently leave
+  // every other caller (and this pin's own already-cached handle) reading
+  // a stale value instead of picking up the change.
+  let companionPinHeightM = 1;
+  let companionPinPropagation = { ...cfg.propagation, rxHeightM: companionPinHeightM };
+
+  document.getElementById("companion-pin-height").addEventListener("input", (e) => {
+    const h = parseFloat(e.target.value);
+    if (!Number.isFinite(h) || h < 0) return;
+    companionPinHeightM = h;
+    companionPinPropagation = { ...cfg.propagation, rxHeightM: h };
+    if (companionMarker) {
+      const ll = companionMarker.getLatLng();
+      computeCompanionNeighbors(ll.lat, ll.lng); // live-update an already-placed pin, not just the next click
+    }
+  });
+
   function setCompanionPinMode(enabled) {
     companionPinMode = enabled;
     document.getElementById("companion-pin-toggle").classList.toggle("active", enabled);
@@ -1346,7 +1371,7 @@
         const d = Propagation.haversineKm(lat, lon, r.lat, r.lon);
         if (d < 0.01) continue;
         const txHeightASL = grid.at(r.lat, r.lon) + cfg.propagation.antennaHeightM;
-        const margin = Propagation.pathMargin(grid, cfg.propagation, r.lat, r.lon, txHeightASL, lat, lon, d);
+        const margin = Propagation.pathMargin(grid, companionPinPropagation, r.lat, r.lon, txHeightASL, lat, lon, d);
         if (margin >= 0) found.push({ id: r.id, label: r.label, isReal: false, lat: r.lat, lon: r.lon, distanceKm: d, marginDb: margin });
       }
       found.sort((a, b) => b.marginDb - a.marginDb);
