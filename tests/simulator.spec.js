@@ -104,3 +104,70 @@ test("clear all removes loaded nodes and hides results", async ({ page }) => {
   await expect(page.locator("#sim-node-list")).toContainText("None yet");
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(0);
 });
+
+test("places a virtual companion location by clicking the map, and stops when toggled off", async ({ page }) => {
+  await page.click("#sim-toggle");
+  await page.click("#sim-add-companion");
+  await expect(page.locator("#sim-add-companion")).toHaveClass(/active/);
+  await expect(page.locator("#sim-companion-hint")).toBeVisible();
+
+  const map = page.locator("#map");
+  const box = await map.boundingBox();
+  if (!box) throw new Error("map has no bounding box");
+  await map.click({ position: { x: box.width / 2, y: box.height / 2 } });
+  await expect(page.locator("#sim-node-list")).toContainText("Companion 1");
+  await expect(page.locator(".sim-marker-companion")).toHaveCount(1);
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(1);
+
+  // Toggling placement off means further map clicks don't add more nodes.
+  await page.click("#sim-add-companion");
+  await expect(page.locator("#sim-add-companion")).not.toHaveClass(/active/);
+  await map.click({ position: { x: box.width / 4, y: box.height / 4 } });
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(1);
+});
+
+test("runs a replay after a simulation and can skip to the final state", async ({ page }) => {
+  test.slow(); // link-building fetches real DEM tiles
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getLinkCount())).toBeGreaterThan(0);
+
+  await page.selectOption("#sim-message-node", { index: 0 });
+  await page.click("#sim-message-add");
+  await page.click("#sim-run");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 30_000 });
+
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getWaveCount())).toBeGreaterThan(0);
+  await expect(page.locator("#sim-replay-status")).toBeVisible();
+
+  await page.click("#sim-skip-to-end");
+  await expect(page.locator("#sim-replay-status")).toContainText("final state");
+});
+
+// The one test in this file that genuinely depends on the container's
+// background fetch reaching a live, third-party CoreScope instance over
+// the real network (see tests/basic.spec.js's own isolated CoreScope test
+// for why this is kept separate, generously timed, and not something the
+// rest of the suite's readiness gate waits on).
+test("builds real links from CoreScope's observed reach data", async ({ page }) => {
+  test.slow();
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-real");
+  await expect(page.locator("#sim-node-list .plan-list-item").first()).toBeVisible({ timeout: 120_000 });
+
+  await page.selectOption("#sim-connectivity-source", "corescope");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+  await expect(page.locator("#sim-links-status")).toContainText("built");
+
+  const linkCount = await page.evaluate(() => window.__hopreachSimulatorDebug.getLinkCount());
+  expect(linkCount, "expected at least one real observed link among the site's real repeaters").toBeGreaterThan(0);
+});

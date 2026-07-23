@@ -16,11 +16,15 @@
   const SIM_MAX_RANGE_KM = 35; // same rationale as planner.js's PREVIEW_MAX_RANGE_KM
   const SIM_ZOOM_CAP = 11;
   const CORESCOPE_REACH_DAYS = 7; // fixed window — simulator.js has no window-selector UI of its own (see planner.js's for the map's own hover tooltips)
+  const SF_THRESHOLDS_DB = [-7.5, -10, -12.5, -15, -17.5, -20]; // SF7..SF12, mirrors internal/meshsim/score.go
 
-  // Each entry: {id, source: 'planned'|'real', refId, label, lat, lon}.
-  // Prefs aren't stored per-node in v1 — Suggest's rule search already
-  // covers config tuning (see internal/meshsim/tune.go); manual per-node
-  // override editing is a possible future addition, not required here.
+  // Each entry: {id, source: 'planned'|'real'|'companion', refId, label, lat, lon}.
+  // Only 'companion' nodes are user-renameable/movable-by-nature — a
+  // planned/real repeater's identity comes from its source of truth (the
+  // active plan / the live map), not this tool. Prefs aren't stored
+  // per-node in v1 — Suggest's rule search already covers config tuning
+  // (see internal/meshsim/tune.go); manual per-node override editing is a
+  // possible future addition, not required here.
   let simNodes = [];
   // {from: nodeIndex, to: nodeIndex, snrDb} — directed, built by
   // buildLinks() below, cleared whenever the node list changes so a stale
@@ -30,6 +34,14 @@
   let simMessages = [];
   let lastReport = null;
   let linksGeneration = 0;
+
+  // "off" | "companion" — click-to-place mode for a virtual companion
+  // radio, scoped to this panel only (reset to "off" whenever the panel
+  // closes) — see setSimPanelOpen and the map click handler below. Named
+  // distinctly from Plan mode's own, unrelated "📍 Companion pin" feature
+  // (a neighbour-preview tool over real repeater data, not a simulation
+  // node).
+  let placementMode = "off";
 
   const simNodesLayer = L.layerGroup().addTo(map);
   const simResultsLayer = L.layerGroup().addTo(map);
@@ -42,6 +54,10 @@
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  }
+
+  function canRelay(node) {
+    return node.source !== "companion"; // a handheld companion originates/receives traffic but doesn't relay, same as real MeshCore companion apps
   }
 
   // --- node loading -------------------------------------------------
@@ -96,6 +112,40 @@
     setStatus("sim-status", `Loaded ${added} real repeater${added === 1 ? "" : "s"}${added < real.length ? " (some already loaded)" : ""}.`);
   }
 
+  function addCompanionAt(lat, lon) {
+    const n = simNodes.filter((x) => x.source === "companion").length + 1;
+    simNodes.push({ id: randomId(), source: "companion", refId: randomId(), label: `Companion ${n}`, lat, lon });
+    invalidateLinks();
+    renderNodeList();
+    renderMessageNodeOptions();
+    redrawNodeMarkers();
+  }
+
+  function setPlacementMode(next) {
+    placementMode = placementMode === next ? "off" : next;
+    document.getElementById("sim-add-companion").classList.toggle("active", placementMode === "companion");
+    const hint = document.getElementById("sim-companion-hint");
+    hint.classList.toggle("hidden", placementMode !== "companion");
+  }
+
+  map.on("click", (e) => {
+    if (placementMode === "companion") {
+      addCompanionAt(e.latlng.lat, e.latlng.lng);
+    }
+  });
+
+  function renameNode(id) {
+    const n = simNodes.find((x) => x.id === id);
+    if (!n) return;
+    const name = prompt("Label:", n.label);
+    if (name) {
+      n.label = name;
+      renderNodeList();
+      renderMessageNodeOptions();
+      redrawNodeMarkers();
+    }
+  }
+
   function removeNode(id) {
     simNodes = simNodes.filter((n) => n.id !== id);
     simMessages = simMessages.filter((m) => simNodes[m.nodeIndex] !== undefined);
@@ -125,22 +175,27 @@
 
   // --- rendering: node list, message list -----------------------------
 
+  const SOURCE_BADGE = { planned: "sim-badge-planned", real: "sim-badge-real", companion: "sim-badge-companion" };
+
   function renderNodeList() {
     const list = document.getElementById("sim-node-list");
     list.innerHTML = "";
     if (simNodes.length === 0) {
-      list.innerHTML = '<div class="plan-empty">None yet — load planned and/or real repeaters above.</div>';
+      list.innerHTML = '<div class="plan-empty">None yet — load repeaters or place a companion location below.</div>';
       return;
     }
     for (const n of simNodes) {
       const row = document.createElement("div");
       row.className = "plan-list-item";
-      const badgeClass = n.source === "planned" ? "sim-badge-planned" : "sim-badge-real";
       row.innerHTML = `
-        <span class="sim-node-badge ${badgeClass}">${n.source}</span>
+        <span class="sim-node-badge ${SOURCE_BADGE[n.source]}">${n.source}</span>
         <span class="plan-item-label">${escapeHtml(n.label)}</span>
-        <span class="plan-item-actions"><button data-act="remove" title="Remove">✕</button></span>
+        <span class="plan-item-actions">
+          ${n.source === "companion" ? '<button data-act="rename" title="Rename">✎</button>' : ""}
+          <button data-act="remove" title="Remove">✕</button>
+        </span>
       `;
+      if (n.source === "companion") row.querySelector('[data-act="rename"]').onclick = () => renameNode(n.id);
       row.querySelector('[data-act="remove"]').onclick = () => removeNode(n.id);
       list.appendChild(row);
     }
@@ -201,11 +256,19 @@
   function redrawNodeMarkers() {
     simNodesLayer.clearLayers();
     for (const n of simNodes) {
+      const iconClass = n.source === "companion" ? "sim-marker-companion" : "sim-marker-icon";
       L.marker([n.lat, n.lon], {
-        icon: L.divIcon({ className: "sim-marker-icon", iconSize: [12, 12] }),
+        icon: L.divIcon({ className: iconClass, iconSize: [12, 12] }),
+        draggable: n.source === "companion",
       })
+        .addTo(simNodesLayer)
         .bindTooltip(`${n.label} (${n.source})`)
-        .addTo(simNodesLayer);
+        .on("dragend", (e) => {
+          const ll = e.target.getLatLng();
+          n.lat = ll.lat;
+          n.lon = ll.lng;
+          invalidateLinks();
+        });
     }
   }
 
@@ -252,9 +315,27 @@
   // linearly with received power. Good for relative comparisons between
   // candidate settings; not a certified RF measurement.
   function approxSnrFromMargin(marginDb, sf) {
-    const thresholds = [-7.5, -10, -12.5, -15, -17.5, -20]; // SF7..SF12, mirrors internal/meshsim/score.go
     const idx = Math.min(Math.max(sf - 7, 0), 5);
-    return thresholds[idx] + marginDb;
+    return SF_THRESHOLDS_DB[idx] + marginDb;
+  }
+
+  // CoreScope's reach API doesn't expose a raw SNR reading at all — only
+  // real observation counts (we_hear/they_hear: how many times this
+  // link's traffic was actually seen in each direction). This converts
+  // "how many times we've actually seen it work" into the same SNR-shaped
+  // number the engine's threshold check understands, rather than
+  // borrowing the propagation model's own prediction — real traffic having
+  // happened at all already accounts for everything the terrain model
+  // can't see (foliage, buildings, antenna orientation, interference), so
+  // it's arguably more trustworthy than a model guess for these specific
+  // pairs. More observations -> a higher, safer estimate, capped so a
+  // very high count doesn't produce an absurd value; even a single
+  // observation clears every SF's threshold, since it genuinely happened.
+  function snrFromObservationCount(count, sf) {
+    const idx = Math.min(Math.max(sf - 7, 0), 5);
+    const threshold = SF_THRESHOLDS_DB[idx];
+    if (count <= 0) return threshold - 10;
+    return threshold + Math.min(15, Math.log2(1 + count) * 3);
   }
 
   async function buildLinksFromModel(nodes) {
@@ -278,18 +359,29 @@
     return links;
   }
 
+  // Fetches nodeIndex's real observed reach data and returns the confirmed
+  // directed links it implies. we_hear > 0 means this node has actually
+  // heard the neighbour (neighbour -> this node); they_hear > 0 means the
+  // neighbour has actually heard this node (this node -> neighbour) — two
+  // independent, potentially asymmetric real observations, not a single
+  // "bidir" flag.
   async function fetchCorescopeLinksFor(nodeIndex, nodes) {
     const n = nodes[nodeIndex];
     if (n.source !== "real") return [];
     const resp = await fetch(`/corescope-api/api/nodes/${encodeURIComponent(n.refId)}/reach?days=${CORESCOPE_REACH_DAYS}`);
     if (!resp.ok) return [];
     const data = await resp.json();
+    const sf = 11;
     const links = [];
     for (const l of data.links || []) {
       const targetIdx = nodes.findIndex((x) => x.source === "real" && x.refId === l.pubkey);
-      if (targetIdx === -1 || typeof l.avg_snr !== "number") continue;
-      links.push({ from: nodeIndex, to: targetIdx, snrDb: l.avg_snr });
-      if (l.bidir) links.push({ from: targetIdx, to: nodeIndex, snrDb: l.avg_snr });
+      if (targetIdx === -1) continue;
+      if (typeof l.we_hear === "number" && l.we_hear > 0) {
+        links.push({ from: targetIdx, to: nodeIndex, snrDb: snrFromObservationCount(l.we_hear, sf) });
+      }
+      if (typeof l.they_hear === "number" && l.they_hear > 0) {
+        links.push({ from: nodeIndex, to: targetIdx, snrDb: snrFromObservationCount(l.they_hear, sf) });
+      }
     }
     return links;
   }
@@ -298,6 +390,17 @@
     const realIndices = nodes.map((n, i) => i).filter((i) => nodes[i].source === "real");
     const perNode = await Promise.all(realIndices.map((i) => fetchCorescopeLinksFor(i, nodes)));
     return perNode.flat();
+  }
+
+  function isolatedNodeHint(nodes, links) {
+    const connected = new Set();
+    for (const l of links) {
+      connected.add(l.from);
+      connected.add(l.to);
+    }
+    const isolated = nodes.map((n, i) => (connected.has(i) ? null : n.label)).filter(Boolean);
+    if (isolated.length === 0) return "";
+    return ` ${isolated.length} node${isolated.length === 1 ? "" : "s"} with no links: ${isolated.join(", ")}.`;
   }
 
   async function buildLinks() {
@@ -317,16 +420,19 @@
       } else if (source === "corescope") {
         links = await buildLinksFromCorescope(nodesSnapshot);
       } else {
-        // blend: observed where CoreScope has data, model fills every gap
-        // (including any pair involving a planned repeater, which
-        // CoreScope has no history for at all).
+        // blend: observed where CoreScope has real data, model fills every
+        // gap (including any pair involving a planned repeater or
+        // companion location, which CoreScope has no history for at all).
         const [modelLinks, observedLinks] = await Promise.all([buildLinksFromModel(nodesSnapshot), buildLinksFromCorescope(nodesSnapshot)]);
         const observedPairs = new Set(observedLinks.map((l) => `${l.from}:${l.to}`));
         links = observedLinks.concat(modelLinks.filter((l) => !observedPairs.has(`${l.from}:${l.to}`)));
       }
       if (generation !== linksGeneration) return; // node set changed mid-build; discard stale result
       simLinks = links;
-      setStatus("sim-links-status", `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).`);
+      setStatus(
+        "sim-links-status",
+        `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(nodesSnapshot, simLinks)}`
+      );
     } catch (err) {
       if (generation !== linksGeneration) return;
       setStatus("sim-links-status", `Failed to build links: ${err.message || err}`);
@@ -339,7 +445,7 @@
 
   function scenarioFromState() {
     return {
-      nodes: simNodes.map(() => ({ prefs: defaultPrefs(), canRelay: true })),
+      nodes: simNodes.map((n) => ({ prefs: defaultPrefs(), canRelay: canRelay(n) })),
       links: simLinks,
     };
   }
@@ -381,7 +487,7 @@
       const report = MeshSim.run(scenarioFromState(), messagesFromState(), seed, maxSimTimeMs);
       lastReport = report;
       renderResults(report);
-      redrawResultLines(report);
+      startReplay();
       setStatus("sim-status", "Done.");
     } catch (err) {
       setStatus("sim-status", `Simulation failed: ${err.message || err}`);
@@ -415,7 +521,123 @@
     document.getElementById("sim-results-section").classList.add("hidden");
     document.getElementById("sim-suggestions-section").classList.add("hidden");
     lastReport = null;
+    stopReplay();
     simResultsLayer.clearLayers();
+  }
+
+  // --- animated flood replay ---------------------------------------------
+  //
+  // Receptions sharing the same (fromNode, packetId, atMs) are exactly the
+  // set of listeners a single over-the-air transmission reached — the
+  // engine schedules every listener's eventRxComplete at the identical
+  // instant (send time + airtime), see engine.go's eventSend handling — so
+  // grouping on that triple recovers each individual transmission
+  // ("wave") without needing the backend to expose send times or airtime
+  // directly. Waves are played back in order with a expanding/fading
+  // pulse at the sender and lines drawn to each listener as it arrives,
+  // instead of dumping the whole result on the map at once — this is what
+  // actually answers "watch the flood happen," not just "here's the
+  // final tally."
+
+  let replayWaves = [];
+  let replayIndex = 0;
+  let replayTimer = null;
+
+  function buildWaves(report) {
+    const groups = new Map();
+    for (const r of report.receptions) {
+      const key = `${r.fromNode}:${r.packetId}:${r.atMs}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { fromNode: r.fromNode, atMs: r.atMs, receptions: [] };
+        groups.set(key, g);
+      }
+      g.receptions.push(r);
+    }
+    return Array.from(groups.values()).sort((a, b) => a.atMs - b.atMs);
+  }
+
+  // pulseAt draws an expanding, fading ring at latlng — a fixed-pixel
+  // radius (circleMarker, not circle) so the effect reads the same at any
+  // zoom level, like a radar sweep rather than a geographically-scaled
+  // wavefront.
+  function pulseAt(latlng, color) {
+    const circle = L.circleMarker(latlng, {
+      radius: 6,
+      color,
+      weight: 2,
+      fillColor: color,
+      fillOpacity: 0.45,
+      opacity: 0.9,
+    }).addTo(simResultsLayer);
+    const durationMs = 700;
+    const start = performance.now();
+    function tick(now) {
+      const t = Math.min(1, (now - start) / durationMs);
+      circle.setRadius(6 + t * 34);
+      circle.setStyle({ opacity: 0.9 * (1 - t), fillOpacity: 0.45 * (1 - t) });
+      if (t < 1) requestAnimationFrame(tick);
+      else simResultsLayer.removeLayer(circle);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function playWave(wave) {
+    const from = simNodes[wave.fromNode];
+    if (from) pulseAt([from.lat, from.lon], "#a855f7");
+    for (const r of wave.receptions) {
+      const to = simNodes[r.node];
+      if (!from || !to) continue;
+      L.polyline(
+        [
+          [from.lat, from.lon],
+          [to.lat, to.lon],
+        ],
+        { color: r.collided ? "#f87171" : "#4ade80", weight: r.collided ? 3 : 2, opacity: 0.85 }
+      ).addTo(simResultsLayer);
+      if (r.collided) pulseAt([to.lat, to.lon], "#f87171");
+    }
+  }
+
+  function stopReplay() {
+    if (replayTimer) {
+      clearTimeout(replayTimer);
+      replayTimer = null;
+    }
+  }
+
+  function replayStep() {
+    if (replayIndex >= replayWaves.length) {
+      replayTimer = null;
+      setStatus("sim-replay-status", replayWaves.length ? "Replay finished — showing final state." : "");
+      return;
+    }
+    const wave = replayWaves[replayIndex];
+    playWave(wave);
+    setStatus("sim-replay-status", `Playing… t=${wave.atMs}ms (${replayIndex + 1}/${replayWaves.length})`);
+    const next = replayWaves[replayIndex + 1];
+    const deltaMs = next ? next.atMs - wave.atMs : 0;
+    // Clamp so a long gap between sends doesn't stall playback for real
+    // minutes, and a burst of near-simultaneous waves doesn't flash by too
+    // fast to actually watch.
+    const waitMs = Math.min(1200, Math.max(150, deltaMs));
+    replayIndex++;
+    replayTimer = setTimeout(replayStep, waitMs);
+  }
+
+  function startReplay() {
+    stopReplay();
+    simResultsLayer.clearLayers();
+    replayWaves = lastReport ? buildWaves(lastReport) : [];
+    replayIndex = 0;
+    replayStep();
+  }
+
+  function skipToEnd() {
+    stopReplay();
+    redrawResultLines(lastReport);
+    replayIndex = replayWaves.length;
+    setStatus("sim-replay-status", replayWaves.length ? "Showing final state." : "");
   }
 
   async function predictSettings() {
@@ -486,6 +708,8 @@
       simNodesLayer.addTo(map);
       simResultsLayer.addTo(map);
     } else {
+      setPlacementMode("off");
+      stopReplay();
       map.removeLayer(simNodesLayer);
       map.removeLayer(simResultsLayer);
     }
@@ -503,11 +727,14 @@
 
   document.getElementById("sim-load-planned").addEventListener("click", loadPlannedRepeaters);
   document.getElementById("sim-load-real").addEventListener("click", loadRealRepeaters);
+  document.getElementById("sim-add-companion").addEventListener("click", () => setPlacementMode("companion"));
   document.getElementById("sim-nodes-clear").addEventListener("click", clearNodes);
   document.getElementById("sim-build-links").addEventListener("click", buildLinks);
   document.getElementById("sim-message-add").addEventListener("click", addMessage);
   document.getElementById("sim-run").addEventListener("click", runSimulation);
   document.getElementById("sim-predict").addEventListener("click", predictSettings);
+  document.getElementById("sim-replay").addEventListener("click", startReplay);
+  document.getElementById("sim-skip-to-end").addEventListener("click", skipToEnd);
 
   renderNodeList();
   renderMessageList();
@@ -518,5 +745,6 @@
     getLinkCount: () => simLinks.length,
     getMessageCount: () => simMessages.length,
     getLastReport: () => lastReport,
+    getWaveCount: () => replayWaves.length,
   };
 })();

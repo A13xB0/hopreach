@@ -140,7 +140,13 @@
       <div class="plan-row">
         <button id="sim-load-planned">+ Load planned repeaters</button>
         <button id="sim-load-real">+ Load real repeaters</button>
+      </div>
+      <div class="plan-row">
+        <button id="sim-add-companion" title="Click the map to place a virtual handheld/companion device">📱 Add companion location</button>
         <button id="sim-nodes-clear">Clear all</button>
+      </div>
+      <div id="sim-companion-hint" class="plan-hint hidden">
+        Click the map to place a virtual companion device (originates/receives traffic like a handheld, but doesn't relay). Drag it to move; click the button again to stop placing.
       </div>
       <div id="sim-node-list" class="plan-list"></div>
 
@@ -186,6 +192,11 @@
       <div id="sim-results-section" class="hidden">
         <div class="plan-section-title">Results</div>
         <div id="sim-results-summary" class="plan-hint"></div>
+        <div class="plan-row">
+          <button id="sim-replay" title="Watch the flood propagate again from the start">▶ Replay</button>
+          <button id="sim-skip-to-end" title="Jump straight to the final state">⏭ Skip to end</button>
+        </div>
+        <div id="sim-replay-status" class="plan-hint hidden"></div>
         <div id="sim-results-log" class="plan-list"></div>
       </div>
 

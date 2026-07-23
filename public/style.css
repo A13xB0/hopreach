@@ -673,6 +673,13 @@ header .subtitle {
 }
 .sim-node-badge.sim-badge-planned { background: rgba(74,222,128,0.18); color: #4ade80; }
 .sim-node-badge.sim-badge-real { background: rgba(56,189,248,0.18); color: #38bdf8; }
+.sim-node-badge.sim-badge-companion { background: rgba(251,146,60,0.18); color: #fb923c; }
+
+#sim-add-companion.active {
+  background: #fb923c;
+  border-color: #fb923c;
+  color: #1c1206;
+}
 
 .sim-list-item.sim-collided { border-left: 3px solid #f87171; }
 .sim-list-item.sim-clean { border-left: 3px solid #4ade80; }
@@ -693,4 +700,17 @@ header .subtitle {
   width: 12px;
   height: 12px;
   box-shadow: 0 0 0 2px rgba(168,85,247,0.4);
+}
+
+/* Companion locations are draggable, user-placed points, distinct from
+   fixed repeater sites — a diamond (rotated square) instead of a dot
+   reads as "a portable device" at a glance, plus its own colour. */
+.sim-marker-companion {
+  background: #fb923c;
+  border: 2px solid #fff;
+  width: 11px;
+  height: 11px;
+  transform: rotate(45deg);
+  box-shadow: 0 0 0 2px rgba(251,146,60,0.45);
+  cursor: grab;
 }

@@ -184,20 +184,31 @@ approximation — compiled to the same shared WASM module as the
 [WASM shared core](#wasm-shared-core)).
 
 1. **Load nodes** — pull in this browser's currently active plan's
-   repeaters, the site's real repeaters, or both.
+   repeaters, the site's real repeaters, or both, plus (**📱 Add companion
+   location**) any number of virtual handheld/companion devices at
+   arbitrary points you click on the map — draggable afterward, and, unlike
+   a repeater, never relays traffic (originates/receives only, matching a
+   real MeshCore companion app).
 2. **Build connectivity** — choose how links between nodes are decided:
-   the propagation model (terrain-aware, works for planned repeaters too),
-   CoreScope's own observed reach data (real radio traffic, real repeaters
-   only), or a blend (observed where CoreScope has it, model everywhere
-   else — the propagation-model links use each pair's dB margin above
-   threshold as an approximate SNR, a documented proxy, not a certified RF
-   measurement).
+   the propagation model (terrain-aware, works for planned repeaters and
+   companion locations too), CoreScope's own observed reach data (real
+   radio traffic, real repeaters only — built from its `we_hear`/`they_hear`
+   observation counts, since the API has no raw SNR reading; more real
+   observations map to a higher, safer estimate), or a blend (observed
+   where CoreScope has it, model everywhere else). The propagation-model
+   links use each pair's dB margin above threshold as an approximate SNR, a
+   documented proxy, not a certified RF measurement. After building, any
+   node left with no links at all is called out by name, since that's
+   usually worth knowing before scheduling a send through it.
 3. **Schedule sends** — pick which node(s) transmit a flood packet and
-   when (milliseconds into the simulation), then **Run** to see who
-   received what, whether any receptions collided with another
-   simultaneous transmission, and how far the flood actually propagated —
-   both as a results log and as green (clean) / red (collided) lines drawn
-   on the map.
+   when (milliseconds into the simulation), then **Run** to watch it
+   happen: an animated replay steps through the flood wave by wave (every
+   listener a single transmission reached, all at once) with an expanding
+   pulse at the sender and a line to each receiver as it arrives — green
+   for a clean reception, red for a collision — rather than dumping the
+   whole result on the map at once. **Replay** watches it again from the
+   start; **Skip to end** jumps straight to the final picture. The results
+   log lists every reception in order underneath.
 4. **Predict settings** — grid-searches candidate `txdelay`/`rxdelay`
    overrides (global, or conditional on a repeater's altitude/neighbour
    count once that data is supplied) and ranks them by measured collision
