@@ -83,22 +83,19 @@ header .subtitle {
   inset: 0;
 }
 
-/* Plan/simulator panels span the full right edge — shift Leaflet's own
+/* The plan panel docks to the full right edge — shift Leaflet's own
    right-side controls (basemap/layers up top, legend down below) left by
-   the panel's width so they stay reachable instead of disappearing
-   underneath it. */
+   its width so they stay reachable instead of disappearing underneath it.
+   The simulator is a centered overlay with its own backdrop instead (see
+   #sim-panel/#sim-backdrop below), so it has no equivalent need. */
 #map-wrap.plan-open .leaflet-top.leaflet-right,
-#map-wrap.plan-open .leaflet-bottom.leaflet-right,
-#map-wrap.sim-open .leaflet-top.leaflet-right,
-#map-wrap.sim-open .leaflet-bottom.leaflet-right {
+#map-wrap.plan-open .leaflet-bottom.leaflet-right {
   right: 320px;
   transition: right 0.15s ease;
 }
 @media (max-width: 500px) {
   #map-wrap.plan-open .leaflet-top.leaflet-right,
-  #map-wrap.plan-open .leaflet-bottom.leaflet-right,
-  #map-wrap.sim-open .leaflet-top.leaflet-right,
-  #map-wrap.sim-open .leaflet-bottom.leaflet-right {
+  #map-wrap.plan-open .leaflet-bottom.leaflet-right {
     right: 90vw;
   }
 }
@@ -361,7 +358,37 @@ header .subtitle {
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 
-#plan-panel, #sim-panel {
+/* Shown in place of the (much bigger) simulator workspace while placing a
+   companion location — see setPlacementMode's own comment for why the
+   panel has to step aside for this specifically, unlike everything else
+   in the workspace. */
+#sim-placement-hint {
+  position: fixed;
+  bottom: 1.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1150;
+  max-width: 420px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+#sim-placement-hint.hidden { display: none; }
+#sim-placement-hint button {
+  margin-top: 0.5rem;
+  background: var(--surface1, #0a1929);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#sim-placement-hint button:hover { border-color: var(--accent); }
+
+#plan-panel {
   position: absolute;
   top: 0;
   right: 0;
@@ -376,7 +403,56 @@ header .subtitle {
   padding: 0.75rem;
   box-shadow: -4px 0 16px rgba(0,0,0,0.4);
 }
-#plan-panel.hidden, #sim-panel.hidden { display: none; }
+#plan-panel.hidden { display: none; }
+
+/* The simulator is its own workspace, not a docked tool drawer — a real
+   plan (dozens of loaded repeaters, a full results log, a per-repeater
+   prediction breakdown) needs more room than a 320px sidebar can give
+   without everything fighting for the same cramped vertical scroll. A
+   centered, wide overlay with an internal two-column grid (setup | results)
+   lets both sides breathe independently. */
+#sim-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(3,4,20,0.6);
+  z-index: 1099;
+}
+#sim-backdrop.hidden { display: none; }
+
+#sim-panel {
+  position: fixed;
+  top: 4vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(1180px, 94vw);
+  height: 92vh;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  z-index: 1100;
+  padding: 0.9rem 1rem;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  display: flex;
+  flex-direction: column;
+}
+#sim-panel.hidden { display: none; }
+
+.sim-workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) 1fr;
+  gap: 1.25rem;
+}
+.sim-col {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.35rem;
+}
+@media (max-width: 900px) {
+  .sim-workspace { grid-template-columns: 1fr; overflow-y: auto; }
+  .sim-col { overflow-y: visible; }
+}
 
 .plan-panel-header {
   display: flex;
@@ -500,6 +576,13 @@ header .subtitle {
   letter-spacing: 0.04em;
   color: var(--text-muted);
   margin: 0.6rem 0 0.3rem;
+}
+
+.sim-subsection-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0.6rem 0 0.15rem;
 }
 
 .plan-list { display: flex; flex-direction: column; gap: 0.3rem; }
@@ -661,6 +744,16 @@ header .subtitle {
 .nb-dot.nb-weak { background: #f87171; }
 
 /* --- LoRa flood simulator (sim-panel / simulator.js) ------------------ */
+
+/* These lists can grow large (loading real repeaters alone can mean
+   dozens of rows) — each still gets its own capped scroll region so one
+   long list can't push every section after it out of view within its
+   column, but the cap itself is generous now that setup/results each have
+   a full workspace column (not a 320px sidebar) to work with. */
+#sim-node-list, #sim-message-list, #sim-results-log, #sim-per-node-list, #sim-suggestions-list, #sim-bottleneck-list, #sim-unmodeled-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
 
 .sim-node-badge {
   font-size: 0.62rem;

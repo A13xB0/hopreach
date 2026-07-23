@@ -172,4 +172,11 @@ func TestRunSkipsUnreachableNodes(t *testing.T) {
 	if len(report.Receptions) != 0 {
 		t.Errorf("expected no receptions with no connectivity, got %+v", report.Receptions)
 	}
+	// Not just empty but non-nil: a nil slice marshals to JSON "null", not
+	// "[]" — the WASM bridge's JS callers (see wasm/meshsim.go,
+	// public/simulator.js) iterate this field directly and shouldn't need
+	// a null-guard for what is really just "zero results."
+	if report.Receptions == nil {
+		t.Error("Report.Receptions should be a non-nil empty slice, not nil, so it JSON-marshals to [] rather than null")
+	}
 }

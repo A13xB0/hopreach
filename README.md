@@ -174,21 +174,29 @@ coverage fetch.
 
 A second, separate top-level mode (**📡 Simulate**, next to **Plan**, not a
 planning sub-mode) for testing and tuning MeshCore's flood-relay timing
-before touching a real device. It runs a discrete-event simulation
-(`internal/meshsim`) built from a faithful, from-source port of MeshCore's
-own airtime, packet-score, and retransmit-delay formulas — verified
-line-for-line against `github.com/meshcore-dev/MeshCore`'s actual source
+before touching a real device — and for replaying what a real packet
+actually did. It runs a discrete-event simulation (`internal/meshsim`)
+built from a faithful, from-source port of MeshCore's own airtime,
+packet-score, and retransmit-delay formulas — verified line-for-line
+against `github.com/meshcore-dev/MeshCore`'s actual source
 (`Dispatcher.cpp`, `MyMesh.cpp`, `RadioLibWrappers.cpp`), not a secondhand
 approximation — compiled to the same shared WASM module as the
 [planning tools](#planning-tools) (`wasm/meshsim.go`; see
 [WASM shared core](#wasm-shared-core)).
+
+Opens as a wide centered workspace (not a docked sidebar like Plan) with
+its own backdrop — a loaded node list, a full results log, and a
+per-repeater prediction breakdown all need real room, not one cramped
+320px column everything has to take turns scrolling through.
 
 1. **Load nodes** — pull in this browser's currently active plan's
    repeaters, the site's real repeaters, or both, plus (**📱 Add companion
    location**) any number of virtual handheld/companion devices at
    arbitrary points you click on the map — draggable afterward, and, unlike
    a repeater, never relays traffic (originates/receives only, matching a
-   real MeshCore companion app).
+   real MeshCore companion app). Placing one temporarily steps the whole
+   workspace aside (there'd be nowhere left to click on the map otherwise)
+   and brings it back the moment you place it or hit Cancel.
 2. **Build connectivity** — choose how links between nodes are decided:
    the propagation model (terrain-aware, works for planned repeaters and
    companion locations too), CoreScope's own observed reach data (real
@@ -211,15 +219,39 @@ approximation — compiled to the same shared WASM module as the
    log lists every reception in order underneath.
 4. **Predict settings** — grid-searches candidate `txdelay`/`rxdelay`
    overrides (global, or conditional on a repeater's altitude/neighbour
-   count once that data is supplied) and ranks them by measured collision
-   rate against the scheduled sends, averaged over repeated
-   deterministic-RNG trials so one candidate isn't judged on a lucky draw.
-   Suggested values are expressed in the same units as MeshCore's own CLI
-   (`set txdelay`/`set direct.txdelay`/`set rxdelay`), so a suggestion can
-   be pasted straight onto a real device.
+   count once that data is supplied — altitude comes from the same terrain
+   grid connectivity-building already fetched, neighbour count from the
+   built links themselves) and ranks them by measured collision rate
+   against the scheduled sends, averaged over repeated deterministic-RNG
+   trials so one candidate isn't judged on a lucky draw. Suggested values
+   are expressed in the same units as MeshCore's own CLI (`set txdelay`/
+   `set direct.txdelay`/`set rxdelay`), so a suggestion can be pasted
+   straight onto a real device — and shown two ways: ranked strategies
+   ("altitude >= 600m: txdelay 1.0"), and, applying the top-ranked one, the
+   concrete resulting `txdelay`/`rxdelay` pair next to each individual
+   repeater by name.
+5. **Replay a real CoreScope packet** — paste a packet hash (or a link
+   containing one) and it reconstructs what actually happened: every relay
+   CoreScope has proof of (aggregated across every station that observed
+   it, since a real flood is commonly heard via more than one path),
+   resolved straight to real node identities and positions via CoreScope's
+   own `/api/packets/{hash}` endpoint (no prefix-guessing on this end — it
+   already resolves each observation's relay path to full public keys). Runs
+   our own simulation from the same origin over the currently-selected
+   connectivity source and compares the two directions: **predicted but
+   never confirmed** (the model expects this hop to work but no real
+   observation backs it up — a candidate for where a collision or
+   interference actually happened) and **real links our model doesn't
+   predict** (CoreScope proved the hop happened, but the model doesn't even
+   consider it possible — usually means the real link is longer or better
+   sited than this tool's default planning assumptions, not that anything's
+   wrong with the real network). Proven hops draw as solid lines on the map
+   (green where the model agrees, blue where it doesn't), predicted-but-
+   unconfirmed ones as dashed amber.
 
 Direct/routed traffic isn't modeled yet — only flood packets, which is
-where relay-timing collisions actually happen.
+where relay-timing collisions actually happen. Correspondingly, the packet
+replay's "predicted" side is only meaningful for flood-routed packets.
 
 ## Region: not just Scotland
 

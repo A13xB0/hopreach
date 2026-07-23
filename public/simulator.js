@@ -34,6 +34,12 @@
   let simMessages = [];
   let lastReport = null;
   let linksGeneration = 0;
+  // Terrain grid from the last "model"/"blend" link build, reused so
+  // predictSettings() can look up each node's altitude without a second
+  // DEM fetch — cleared in invalidateLinks() since moving a node (or
+  // changing the node set) invalidates it exactly the same way it
+  // invalidates links.
+  let cachedGrid = null;
 
   // "off" | "companion" — click-to-place mode for a virtual companion
   // radio, scoped to this panel only (reset to "off" whenever the panel
@@ -121,16 +127,28 @@
     redrawNodeMarkers();
   }
 
+  // The workspace covers most of the viewport by design (see
+  // .sim-workspace's own comment) — there's nowhere left to click on the
+  // map underneath it. Entering companion placement steps the whole panel
+  // + backdrop aside (hidden, not closed — sim-open/layer state is
+  // untouched) and shows a small floating hint instead, restored the
+  // moment placement ends (either by placing one, or Cancel/toggling the
+  // button again). setSimPanelOpen(false) resets placementMode directly
+  // rather than through here when the whole simulator is closing, so that
+  // path never fights with this one over the panel's visibility.
   function setPlacementMode(next) {
     placementMode = placementMode === next ? "off" : next;
-    document.getElementById("sim-add-companion").classList.toggle("active", placementMode === "companion");
-    const hint = document.getElementById("sim-companion-hint");
-    hint.classList.toggle("hidden", placementMode !== "companion");
+    const placing = placementMode === "companion";
+    document.getElementById("sim-add-companion").classList.toggle("active", placing);
+    document.getElementById("sim-placement-hint").classList.toggle("hidden", !placing);
+    document.getElementById("sim-panel").classList.toggle("hidden", placing);
+    document.getElementById("sim-backdrop").classList.toggle("hidden", placing);
   }
 
   map.on("click", (e) => {
     if (placementMode === "companion") {
       addCompanionAt(e.latlng.lat, e.latlng.lng);
+      setPlacementMode("companion"); // toggles back off (see above) and restores the panel
     }
   });
 
@@ -169,6 +187,7 @@
 
   function invalidateLinks() {
     simLinks = [];
+    cachedGrid = null;
     linksGeneration++;
     setStatus("sim-links-status", "Connectivity not built yet for the current node set — click \"Build links\".");
   }
@@ -305,6 +324,44 @@
     return { south: south - padDeg, north: north + padDeg, west: west - padDeg, east: east + padDeg };
   }
 
+  // Only nodes with at least one OTHER node within propagation range can
+  // ever get a model-derived link at all (buildLinksFromModel already
+  // skips any pair beyond SIM_MAX_RANGE_KM) — so a node with no in-range
+  // neighbour contributes nothing but wasted bounding-box area. This
+  // matters because the loaded node set isn't always geographically
+  // compact: a packet replayed from CoreScope (see replayFromHash) can
+  // pull in nodes from genuinely distant clusters — one real observed
+  // packet's path spanned Scotland to Ireland, a real link far past this
+  // tool's own SIM_MAX_RANGE_KM planning default (not a bug in the real
+  // network — evidently a genuinely long, well-sited RF link — just one
+  // our model doesn't attempt to predict). Fetching one terrain grid
+  // covering that whole gap would mean requesting on the order of a
+  // thousand DEM tiles at once, enough to genuinely exhaust the browser's
+  // own connection resources (observed directly during testing, not a
+  // hypothetical).
+  function nodesWithInRangeNeighbor(nodes) {
+    const keep = new Set();
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        if (Propagation.haversineKm(nodes[i].lat, nodes[i].lon, nodes[j].lat, nodes[j].lon) <= SIM_MAX_RANGE_KM) {
+          keep.add(i);
+          keep.add(j);
+        }
+      }
+    }
+    return nodes.filter((_, i) => keep.has(i));
+  }
+
+  function estimateTileCount(bounds, zoom) {
+    const minTileX = Math.floor(Terrain.lonToTileX(bounds.west, zoom));
+    const maxTileX = Math.floor(Terrain.lonToTileX(bounds.east, zoom));
+    const minTileY = Math.floor(Terrain.latToTileY(bounds.north, zoom));
+    const maxTileY = Math.floor(Terrain.latToTileY(bounds.south, zoom));
+    return (maxTileX - minTileX + 1) * (maxTileY - minTileY + 1);
+  }
+
+  const MAX_GRID_TILES = 400; // keeps one grid fetch well within the browser's concurrent-request budget, even for a legitimately long, densely-spaced chain
+
   // Converts a propagation-model margin (dB above the receiver's
   // sensitivity spec) into an approximate SNR for meshsim's threshold
   // check. Not a physically rigorous SNR derivation — margin and SNR are
@@ -338,10 +395,34 @@
     return threshold + Math.min(15, Math.log2(1 + count) * 3);
   }
 
-  async function buildLinksFromModel(nodes) {
+  // ensureGrid returns the cached terrain grid if one's already been built
+  // for the current node set, or fetches one fresh — used both by
+  // buildLinksFromModel and, independently, by predictSettings() for
+  // altitude lookups even when the last link build used pure "corescope"
+  // connectivity (which never touches terrain at all).
+  async function ensureGrid(nodes) {
+    if (cachedGrid) return cachedGrid;
     await Propagation.ready;
-    const bounds = boundsForNodes(nodes);
-    const grid = await Terrain.buildLocalGrid(cfg.demTileURLBase, Math.min(cfg.demZoom, SIM_ZOOM_CAP), bounds);
+    const clustered = nodesWithInRangeNeighbor(nodes);
+    if (clustered.length < 2) {
+      throw new Error("no two nodes are within propagation range of each other — nothing to fetch terrain for");
+    }
+    const bounds = boundsForNodes(clustered);
+    // Even after clustering, a legitimately long, densely-spaced chain
+    // could still need a big grid — fall back to a coarser zoom rather
+    // than fetching an unbounded number of tiles, down to a floor past
+    // which the terrain data would be too coarse to be useful anyway.
+    let zoom = Math.min(cfg.demZoom, SIM_ZOOM_CAP);
+    while (zoom > 4 && estimateTileCount(bounds, zoom) > MAX_GRID_TILES) zoom--;
+    if (estimateTileCount(bounds, zoom) > MAX_GRID_TILES) {
+      throw new Error(`the involved area is too large to fetch terrain for (${estimateTileCount(bounds, zoom)} tiles even at the coarsest usable zoom)`);
+    }
+    cachedGrid = await Terrain.buildLocalGrid(cfg.demTileURLBase, zoom, bounds);
+    return cachedGrid;
+  }
+
+  async function buildLinksFromModel(nodes) {
+    const grid = await ensureGrid(nodes);
     const links = [];
     const sf = 11; // DefaultLoRaParams' SF — see internal/meshsim.DefaultLoRaParams
     for (let i = 0; i < nodes.length; i++) {
@@ -520,6 +601,8 @@
   function hideResults() {
     document.getElementById("sim-results-section").classList.add("hidden");
     document.getElementById("sim-suggestions-section").classList.add("hidden");
+    document.getElementById("sim-per-node-section").classList.add("hidden");
+    document.getElementById("sim-bottleneck-section").classList.add("hidden");
     lastReport = null;
     stopReplay();
     simResultsLayer.clearLayers();
@@ -640,6 +723,51 @@
     setStatus("sim-replay-status", replayWaves.length ? "Showing final state." : "");
   }
 
+  // Per-node real-world attributes (altitude, neighbour count) the rule
+  // search can key conditional overrides on — see internal/meshsim/
+  // rules.go's NodeAttrs. Altitude comes from the same terrain grid link-
+  // building already fetches (or a fresh one if the last build was pure
+  // "corescope", which never touches terrain); neighbour count is derived
+  // straight from the currently-built links, in either direction.
+  function attrsFromState(nodes, grid) {
+    const neighbors = nodes.map(() => new Set());
+    for (const l of simLinks) {
+      if (neighbors[l.from]) neighbors[l.from].add(l.to);
+      if (neighbors[l.to]) neighbors[l.to].add(l.from);
+    }
+    return nodes.map((n, i) => ({
+      altitudeM: grid ? grid.at(n.lat, n.lon) : 0,
+      neighborCount: neighbors[i].size,
+    }));
+  }
+
+  // Mirrors internal/meshsim/rules.go's RuleCondition.matches — kept in
+  // sync manually, same as defaultPrefs() mirroring DefaultNodePrefs.
+  function ruleMatchesAttrs(rule, attrs) {
+    const c = rule.condition;
+    switch (c.kind) {
+      case "":
+        return true;
+      case "altitude_at_least_m":
+        return attrs.altitudeM >= c.threshold;
+      case "altitude_at_most_m":
+        return attrs.altitudeM <= c.threshold;
+      case "neighbors_at_least":
+        return attrs.neighborCount >= c.threshold;
+      default:
+        return false;
+    }
+  }
+
+  // Mirrors internal/meshsim/rules.go's ConfigRule.Apply.
+  function applyRule(basePrefs, rule) {
+    const out = { ...basePrefs };
+    if (rule.txDelayFactor != null) out.txDelayFactor = rule.txDelayFactor;
+    if (rule.directTxDelayFactor != null) out.directTxDelayFactor = rule.directTxDelayFactor;
+    if (rule.rxDelayBase != null) out.rxDelayBase = rule.rxDelayBase;
+    return out;
+  }
+
   async function predictSettings() {
     if (simNodes.length === 0) {
       setStatus("sim-status", "Load some nodes first.");
@@ -659,14 +787,22 @@
     const trials = Math.min(100, Math.max(1, parseInt(document.getElementById("sim-trials").value, 10) || 20));
     setStatus("sim-status", "Searching for better settings — this runs many simulations, may take a few seconds…");
     try {
+      // Altitude is a nice-to-have for the search (unlocks altitude-
+      // conditional rules), not a hard requirement — a failed terrain
+      // fetch shouldn't block prediction, just fall back to neighbour-
+      // count-only/global rules (attrsFromState tolerates a null grid).
+      const grid = await ensureGrid(simNodes).catch(() => null);
+      const attrs = attrsFromState(simNodes, grid);
       const result = MeshSim.suggest({
         scenario: scenarioFromState(),
         messages: messagesFromState(),
+        attrs,
         maxSimTimeMs,
         trials,
         seed,
       });
       renderSuggestions(result);
+      renderPerNodePredictions(result, attrs);
       setStatus("sim-status", "Done.");
     } catch (err) {
       setStatus("sim-status", `Predict settings failed: ${err.message || err}`);
@@ -692,6 +828,286 @@
     });
   }
 
+  // Turns the single best-ranked rule into a concrete "this repeater:
+  // these values" list — the ranked rule descriptions above answer "what
+  // strategy works best," this answers "so what do I actually set on each
+  // device." A node whose attrs don't match the best rule's condition
+  // keeps the baseline defaults rather than searching further down the
+  // ranked list for a node-specific alternative: each rule was validated
+  // as a uniform whole-scenario override, not in combination with others,
+  // so mixing rules per node isn't something the search actually verified.
+  function renderPerNodePredictions(result, attrsList) {
+    const section = document.getElementById("sim-per-node-section");
+    const list = document.getElementById("sim-per-node-list");
+    list.innerHTML = "";
+    if (!result.suggestions.length) {
+      section.classList.add("hidden");
+      return;
+    }
+    section.classList.remove("hidden");
+    const best = result.suggestions[0];
+    simNodes.forEach((n, i) => {
+      const matches = ruleMatchesAttrs(best.rule, attrsList[i]);
+      const prefs = matches ? applyRule(defaultPrefs(), best.rule) : defaultPrefs();
+      const row = document.createElement("div");
+      row.className = "plan-list-item";
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(n.label)}</span>
+        <span class="plan-item-sub">txdelay ${prefs.txDelayFactor.toFixed(2)} · rxdelay ${prefs.rxDelayBase.toFixed(1)}${matches ? "" : " (baseline — best rule doesn't apply here)"}</span>
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  // --- CoreScope real packet replay & bottleneck analysis ----------------
+  //
+  // CoreScope's own /api/packets/{hash} already resolves every observation's
+  // relay path to full public keys (resolved_path) — no prefix-matching
+  // needed on our side. Every consecutive pair in that chain, plus the
+  // final hop into whichever CoreScope observer captured it, is a "proven"
+  // edge: real evidence that specific transmission actually happened,
+  // aggregated across every observation of the hash (a flood is commonly
+  // heard via multiple paths/observers). Running our own engine from the
+  // same origin over the same connectivity gives a "predicted" flood; a
+  // predicted relay with no corresponding proven edge is exactly what the
+  // user asked for — a candidate collision/bottleneck location a real
+  // packet's own observed data can't reveal on its own (CoreScope only
+  // ever tells you who *did* hear it, never why someone who should have
+  // didn't).
+
+  let nodeDirectoryCache = null; // lowercase pubkey -> {name, lat, lon, role}
+
+  async function ensureNodeDirectory() {
+    if (nodeDirectoryCache) return nodeDirectoryCache;
+    const resp = await fetch("/corescope-api/api/nodes?limit=5000");
+    if (!resp.ok) throw new Error(`CoreScope node directory fetch failed: HTTP ${resp.status}`);
+    const data = await resp.json();
+    nodeDirectoryCache = new Map();
+    for (const n of data.nodes || []) {
+      if (n.lat == null || n.lon == null || !n.public_key) continue; // can't place a node with no known position
+      nodeDirectoryCache.set(n.public_key.toLowerCase(), { name: n.name || n.public_key.slice(0, 8), lat: n.lat, lon: n.lon, role: n.role });
+    }
+    return nodeDirectoryCache;
+  }
+
+  // Accepts either a bare hash or a pasted CoreScope link containing one —
+  // packet hashes are consistently 16 hex characters in every real example
+  // observed (see internal/meshsim's own port of MeshCore's formulas for
+  // the broader packet-ID convention), so a straightforward regex over the
+  // whole input handles both without needing to know CoreScope's exact URL
+  // shape.
+  function extractPacketHash(input) {
+    const m = String(input).trim().match(/[0-9a-f]{16}/i);
+    return m ? m[0].toLowerCase() : null;
+  }
+
+  function addProvenEdge(edges, from, to, tMs) {
+    if (from === to) return;
+    const key = `${from}:${to}`;
+    const existing = edges.get(key);
+    if (!existing || tMs < existing.firstMs) edges.set(key, { from, to, firstMs: tMs });
+  }
+
+  async function replayFromHash() {
+    const hash = extractPacketHash(document.getElementById("sim-replay-hash-input").value);
+    if (!hash) {
+      setStatus("sim-replay-hash-status", "Couldn't find a packet hash (16 hex characters) in that input.");
+      return;
+    }
+    document.getElementById("sim-replay-hash-go").disabled = true;
+    setStatus("sim-replay-hash-status", "Fetching packet + node data from CoreScope…");
+    try {
+      const [packetData, nodeDir] = await Promise.all([
+        fetch(`/corescope-api/api/packets/${encodeURIComponent(hash)}`).then((r) => {
+          if (!r.ok) throw new Error(`packet fetch failed: HTTP ${r.status}`);
+          return r.json();
+        }),
+        ensureNodeDirectory(),
+      ]);
+      const observations = packetData.observations || [];
+      if (observations.length === 0) throw new Error("CoreScope has no observations for that hash.");
+
+      const provenEdges = new Map();
+      const allPubkeys = new Set();
+      let originPubkey = null;
+      for (const obs of observations) {
+        const chain = (obs.resolved_path || []).map((k) => k.toLowerCase());
+        if (chain.length === 0) continue;
+        if (originPubkey === null) originPubkey = chain[0];
+        const tMs = Date.parse(obs.timestamp) || 0;
+        for (const k of chain) allPubkeys.add(k);
+        const observerKey = (obs.observer_id || "").toLowerCase();
+        if (observerKey) allPubkeys.add(observerKey);
+        for (let i = 0; i < chain.length - 1; i++) addProvenEdge(provenEdges, chain[i], chain[i + 1], tMs);
+        if (observerKey) addProvenEdge(provenEdges, chain[chain.length - 1], observerKey, tMs);
+      }
+      if (originPubkey === null) throw new Error("Couldn't determine this packet's origin from CoreScope's data.");
+
+      clearNodes(); // a replay is a fresh investigation, not additive to whatever was already set up
+      const pubkeyToIndex = new Map();
+      for (const pk of allPubkeys) {
+        const info = nodeDir.get(pk);
+        if (!info) continue; // CoreScope knows the key but has no position for it — can't place it
+        pubkeyToIndex.set(pk, simNodes.length);
+        simNodes.push({ id: randomId(), source: "real", refId: pk, label: info.name, lat: info.lat, lon: info.lon });
+      }
+      if (!pubkeyToIndex.has(originPubkey)) {
+        throw new Error("The packet's origin has no known position — can't place it on the map.");
+      }
+      renderNodeList();
+      renderMessageNodeOptions();
+      redrawNodeMarkers();
+
+      setStatus("sim-replay-hash-status", `Building predicted connectivity for ${simNodes.length} involved node${simNodes.length === 1 ? "" : "s"}…`);
+      const source = document.getElementById("sim-connectivity-source").value;
+      if (source === "model") simLinks = await buildLinksFromModel(simNodes);
+      else if (source === "corescope") simLinks = await buildLinksFromCorescope(simNodes);
+      else {
+        const [modelLinks, observedLinks] = await Promise.all([buildLinksFromModel(simNodes), buildLinksFromCorescope(simNodes)]);
+        const observedPairs = new Set(observedLinks.map((l) => `${l.from}:${l.to}`));
+        simLinks = observedLinks.concat(modelLinks.filter((l) => !observedPairs.has(`${l.from}:${l.to}`)));
+      }
+      linksGeneration++;
+      setStatus(
+        "sim-links-status",
+        `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(simNodes, simLinks)}`
+      );
+
+      await MeshSim.ready;
+      // raw_hex is the whole on-air frame (header included, not stripped
+      // to just the application payload) — close enough for an airtime
+      // estimate; the header is a handful of bytes against a typical
+      // 20-200 byte packet, not worth the extra complexity of parsing it
+      // out precisely for this analytical purpose.
+      const payloadLen = packetData.packet && packetData.packet.raw_hex ? Math.max(1, Math.floor(packetData.packet.raw_hex.length / 2)) : 20;
+      const originIndex = pubkeyToIndex.get(originPubkey);
+      const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
+      const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
+      const predictedReport = MeshSim.run(scenarioFromState(), [{ origin: originIndex, sendAtMs: 0, payloadLen }], seed, maxSimTimeMs);
+
+      const routeType = packetData.packet ? packetData.packet.route_type : null;
+      renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport });
+      setStatus(
+        "sim-replay-hash-status",
+        `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}.` +
+          (routeType !== 0 ? " Note: our model only predicts flood relaying — if this packet used direct routing, the prediction side won't be meaningful." : "")
+      );
+    } catch (err) {
+      setStatus("sim-replay-hash-status", `Replay failed: ${err.message || err}`);
+    } finally {
+      document.getElementById("sim-replay-hash-go").disabled = false;
+    }
+  }
+
+  function renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport }) {
+    const provenPairIndices = new Set();
+    for (const e of provenEdges.values()) {
+      const f = pubkeyToIndex.get(e.from);
+      const t = pubkeyToIndex.get(e.to);
+      if (f != null && t != null) provenPairIndices.add(`${f}:${t}`);
+    }
+
+    const predictedPairs = new Map(); // "from:to" -> Reception
+    for (const r of predictedReport.receptions || []) predictedPairs.set(`${r.fromNode}:${r.node}`, r);
+
+    // Direction 1: the model expects this hop to work, but no real
+    // observation ever confirmed it — a candidate collision/bottleneck.
+    const unconfirmed = Array.from(predictedPairs.entries())
+      .filter(([key]) => !provenPairIndices.has(key))
+      .map(([, r]) => r)
+      .sort((a, b) => a.atMs - b.atMs);
+
+    // Direction 2: CoreScope proved this hop happened, but our model
+    // doesn't even consider it a possible link at all (never appears in
+    // simLinks — not merely "wasn't used in this particular simulated
+    // run"). Real, observed example this surfaced: a packet's own origin
+    // repeater had zero model-predicted links to anyone, entirely because
+    // its nearest real neighbour is further away than this tool's default
+    // planning-range cap — the model wasn't wrong about physics, its
+    // defaults just didn't anticipate that link. Distinguishing this from
+    // direction 1 matters: it points at the model's own assumptions
+    // (range, antenna heights, terrain), not at the real network.
+    const modeledPairIndices = new Set(simLinks.map((l) => `${l.from}:${l.to}`));
+    const unmodeled = Array.from(provenEdges.values())
+      .map((e) => ({ from: pubkeyToIndex.get(e.from), to: pubkeyToIndex.get(e.to), firstMs: e.firstMs }))
+      .filter((e) => e.from != null && e.to != null && !modeledPairIndices.has(`${e.from}:${e.to}`))
+      .sort((a, b) => a.firstMs - b.firstMs);
+
+    const section = document.getElementById("sim-bottleneck-section");
+    section.classList.remove("hidden");
+    document.getElementById("sim-bottleneck-summary").textContent =
+      `${provenEdges.size} proven hop${provenEdges.size === 1 ? "" : "s"} from real CoreScope observations, ` +
+      `${predictedPairs.size} predicted by our model — ${unconfirmed.length} predicted but never confirmed, ` +
+      `${unmodeled.length} proven but not even predicted possible.`;
+
+    const list = document.getElementById("sim-bottleneck-list");
+    list.innerHTML = "";
+    if (unconfirmed.length === 0) {
+      list.innerHTML = '<div class="plan-empty">Every predicted relay was confirmed by a real observation.</div>';
+    }
+    for (const r of unconfirmed) {
+      const from = simNodes[r.fromNode];
+      const to = simNodes[r.node];
+      const row = document.createElement("div");
+      row.className = "plan-list-item sim-list-item sim-collided";
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(from ? from.label : "?")} → ${escapeHtml(to ? to.label : "?")}</span>
+        <span class="plan-item-sub">predicted at ~${r.atMs}ms, hop ${r.hopCount}${r.collided ? " · our model also predicts a collision here" : " · no real observer ever confirmed this hop"}</span>
+      `;
+      list.appendChild(row);
+    }
+
+    const unmodeledList = document.getElementById("sim-unmodeled-list");
+    unmodeledList.innerHTML = "";
+    if (unmodeled.length === 0) {
+      unmodeledList.innerHTML = '<div class="plan-empty">Every real observed hop is at least within our model\'s own connectivity assumptions.</div>';
+    }
+    for (const e of unmodeled) {
+      const from = simNodes[e.from];
+      const to = simNodes[e.to];
+      const row = document.createElement("div");
+      row.className = "plan-list-item sim-list-item";
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(from ? from.label : "?")} → ${escapeHtml(to ? to.label : "?")}</span>
+        <span class="plan-item-sub">real observed hop, but outside this tool's modeled range/terrain assumptions for that pair</span>
+      `;
+      unmodeledList.appendChild(row);
+    }
+
+    // Map: solid green for proven+modeled hops, solid blue for proven but
+    // unmodeled (the model's own blind spot), dashed amber for
+    // predicted-but-unconfirmed (the bottleneck candidates).
+    simResultsLayer.clearLayers();
+    const unmodeledPairs = new Set(unmodeled.map((e) => `${e.from}:${e.to}`));
+    for (const e of provenEdges.values()) {
+      const fIdx = pubkeyToIndex.get(e.from);
+      const tIdx = pubkeyToIndex.get(e.to);
+      const from = simNodes[fIdx];
+      const to = simNodes[tIdx];
+      if (!from || !to) continue;
+      const isUnmodeled = unmodeledPairs.has(`${fIdx}:${tIdx}`);
+      L.polyline(
+        [
+          [from.lat, from.lon],
+          [to.lat, to.lon],
+        ],
+        { color: isUnmodeled ? "#38bdf8" : "#4ade80", weight: 3, opacity: 0.9 }
+      ).addTo(simResultsLayer);
+    }
+    for (const r of unconfirmed) {
+      const from = simNodes[r.fromNode];
+      const to = simNodes[r.node];
+      if (!from || !to) continue;
+      L.polyline(
+        [
+          [from.lat, from.lon],
+          [to.lat, to.lon],
+        ],
+        { color: "#facc15", weight: 3, opacity: 0.9, dashArray: "6 6" }
+      ).addTo(simResultsLayer);
+    }
+  }
+
   // --- status hints, panel open/close --------------------------------
 
   function setStatus(elId, text) {
@@ -702,24 +1118,32 @@
 
   function setSimPanelOpen(open) {
     document.getElementById("sim-panel").classList.toggle("hidden", !open);
+    document.getElementById("sim-backdrop").classList.toggle("hidden", !open);
     document.getElementById("map-wrap").classList.toggle("sim-open", open);
     if (open) {
       if (window.HopReachPlanner) window.HopReachPlanner.closePanel();
       simNodesLayer.addTo(map);
       simResultsLayer.addTo(map);
     } else {
-      setPlacementMode("off");
+      // Reset placement state directly rather than through
+      // setPlacementMode — that would also try to un-hide the panel/
+      // backdrop we just hid above, fighting with this close.
+      placementMode = "off";
+      document.getElementById("sim-add-companion").classList.remove("active");
+      document.getElementById("sim-placement-hint").classList.add("hidden");
       stopReplay();
       map.removeLayer(simNodesLayer);
       map.removeLayer(simResultsLayer);
     }
-    map.invalidateSize();
+    // Unlike the docked plan panel, the simulator overlays the map instead
+    // of resizing its container — no invalidateSize() needed.
   }
 
   document.getElementById("sim-toggle").addEventListener("click", () => {
     setSimPanelOpen(document.getElementById("sim-panel").classList.contains("hidden"));
   });
   document.getElementById("sim-panel-close").addEventListener("click", () => setSimPanelOpen(false));
+  document.getElementById("sim-backdrop").addEventListener("click", () => setSimPanelOpen(false));
   // Clicking into Plan mode should always leave Simulate closed — see
   // HopReachPlanner.closePanel's own comment for why this is one-directional
   // rather than a shared toggle-coordinator module.
@@ -728,6 +1152,7 @@
   document.getElementById("sim-load-planned").addEventListener("click", loadPlannedRepeaters);
   document.getElementById("sim-load-real").addEventListener("click", loadRealRepeaters);
   document.getElementById("sim-add-companion").addEventListener("click", () => setPlacementMode("companion"));
+  document.getElementById("sim-placement-cancel").addEventListener("click", () => setPlacementMode("companion"));
   document.getElementById("sim-nodes-clear").addEventListener("click", clearNodes);
   document.getElementById("sim-build-links").addEventListener("click", buildLinks);
   document.getElementById("sim-message-add").addEventListener("click", addMessage);
@@ -735,6 +1160,7 @@
   document.getElementById("sim-predict").addEventListener("click", predictSettings);
   document.getElementById("sim-replay").addEventListener("click", startReplay);
   document.getElementById("sim-skip-to-end").addEventListener("click", skipToEnd);
+  document.getElementById("sim-replay-hash-go").addEventListener("click", replayFromHash);
 
   renderNodeList();
   renderMessageList();
@@ -746,5 +1172,7 @@
     getMessageCount: () => simMessages.length,
     getLastReport: () => lastReport,
     getWaveCount: () => replayWaves.length,
+    getNodes: () => simNodes,
+    getLinks: () => simLinks,
   };
 })();

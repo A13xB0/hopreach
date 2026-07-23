@@ -128,7 +128,13 @@ func Run(scenario Scenario, messages []Message, rng RNG, maxSimTimeMs uint32) Re
 	// regardless of how many times it's subsequently heard again.
 	relayed := make(map[int]map[int]bool)
 
-	var report Report
+	// Explicitly non-nil so JSON callers (the WASM bridge, see
+	// wasm/meshsim.go) always get "receptions":[] for a scenario with no
+	// receptions, never "receptions":null — a nil slice and an empty one
+	// are the same thing in Go but not in JSON, and a JS caller iterating
+	// the field shouldn't need a null-guard for what's really just "zero
+	// results."
+	report := Report{Receptions: []Reception{}}
 
 	for q.Len() > 0 {
 		e := heap.Pop(&q).(event)
