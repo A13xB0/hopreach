@@ -400,6 +400,25 @@ func TestEffectiveChunkBudgetBytesNoRemoteUsesLocal(t *testing.T) {
 // smaller box if it ends up loading that same tile locally. The budget
 // must never exceed what's safe for *this* process's own box, no matter
 // how much RAM a connected remote worker reports.
+// closeEnough reports whether a and b are within a small relative tolerance
+// of each other — effectiveChunkBudgetBytes reads real /proc/meminfo state
+// live on every call with no injection seam, so two independently-taken
+// readings a moment apart (this test's "local-only" baseline and each
+// subtest's own call) can legitimately differ by a few MB under normal
+// system load without indicating anything is actually wrong; exact equality
+// would make this test flaky on any real, non-idle machine (observed in CI).
+func closeEnough(a, b float64) bool {
+	if a == 0 || b == 0 {
+		return a == b
+	}
+	const tolerance = 0.05 // 5%
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff/a < tolerance
+}
+
 func TestEffectiveChunkBudgetBytesPicksSmallerOfLocalAndRemote(t *testing.T) {
 	localOnly := New().effectiveChunkBudgetBytes() // no remote configured — pure local sizing, for comparison
 
@@ -431,8 +450,8 @@ func TestEffectiveChunkBudgetBytesPicksSmallerOfLocalAndRemote(t *testing.T) {
 		e := New()
 		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
 		got := e.effectiveChunkBudgetBytes()
-		if got != localOnly {
-			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want exactly the local-only budget %.0f when remote reports far more RAM than local (must never pick a budget only safe for the remote box)", got, localOnly)
+		if !closeEnough(got, localOnly) {
+			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want approximately the local-only budget %.0f when remote reports far more RAM than local (must never pick a budget only safe for the remote box)", got, localOnly)
 		}
 	})
 
@@ -442,8 +461,8 @@ func TestEffectiveChunkBudgetBytesPicksSmallerOfLocalAndRemote(t *testing.T) {
 		e := New()
 		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
 		got := e.effectiveChunkBudgetBytes()
-		if got != localOnly {
-			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want the local-only budget %.0f when remote's report is unknown (0)", got, localOnly)
+		if !closeEnough(got, localOnly) {
+			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want approximately the local-only budget %.0f when remote's report is unknown (0)", got, localOnly)
 		}
 	})
 }
