@@ -43,24 +43,130 @@ cp config.example.yaml config.yaml   # defaults to Scotland, CPU compute — edi
 docker compose up --build
 ```
 
-Open `http://localhost:8080`. That's the whole setup for **CPU** compute —
-works on any machine, no GPU required, and is the default.
+Open `http://localhost:8080`. That's it — works on any machine, no GPU
+required. The first run computes coverage in the background (a progress bar
+shows how far along it is); everything after that is a daily refresh.
 
-Coverage computation (the slow part — see [Run it](#run-it)) can run
-substantially faster on a GPU instead, in two forms:
+Have a compatible GPU and want it faster (roughly 50x for the same raster)?
+See [GPU-accelerated coverage compute](#gpu-accelerated-coverage-compute-optional)
+— one extra file, still `docker compose up --build`.
 
-| | Extra setup | Use when |
-|---|---|---|
-| **CPU** (default) | none — the steps above | always works, no GPU needed |
-| **Local GPU** | `cp docker-compose.override.yml.example docker-compose.override.yml`, then `docker compose up --build` | this machine has a Vulkan-capable GPU |
-| **Remote GPU** | see [Remote GPU worker](#remote-gpu-worker) | this machine has no GPU (e.g. a VPS) but another one on your network does |
+## Planning tools
 
-Roughly 50x faster on a GPU (local or remote) than CPU for the same raster —
-`gpu.mode: auto` in `config.yaml` (the default) uses one automatically if
-available and falls back to CPU otherwise, so it's always safe to try. See
-[GPU-accelerated coverage compute](#gpu-accelerated-coverage-compute-optional)
-for the full picture, including NVIDIA (needs the
-`nvidia-container-toolkit` runtime, not covered by the override file above).
+Once it's running, here's what you can actually do with it. A "Plan" panel
+(bottom-left on the map) lets you sketch hypothetical repeater sites
+entirely **in the browser** — no server round-trip — using the same physics
+as the real map:
+
+![Add repeater mode: a planned site's predicted coverage overlaid in blue→purple over the real map's orange→green](docs/screenshot-planning-addrepeater.png)
+
+- **Add repeater**: click the map to drop a draggable planned site (rename,
+  override mast height, or delete it from the panel). A coverage preview
+  recomputes automatically (debounced, in a Web Worker so the map stays
+  responsive) and overlays in blue→purple — deliberately distinct from the
+  real map's orange→green, so "existing" and "proposed" coverage read as
+  different things when both are shown at once. The preview is capped to a
+  ~35km radius and a coarser DEM zoom for speed; the real nightly map has no
+  such cap.
+- **Check line of sight**: click a sequence of points (existing repeaters,
+  planned ones, or bare clicks) to build a hop chain. Each hop is drawn as a
+  line coloured by its computed margin — green (clear), orange (marginal),
+  red (blocked or out of range) — with the distance and dB margin listed in
+  the panel.
+- **🔗 Connect repeaters**: click two existing repeaters and it works out the
+  minimum number of *new* repeaters needed to bridge them — reusing any
+  existing repeater that already helps along the way (existing
+  infrastructure is free to use, a new build isn't). First checks whether
+  they're already connected via existing repeaters (0 new repeaters, most
+  common case); otherwise tries every reachable pair of bridgeable repeaters
+  (not just the closest one) and offers up to 3 distinct route options —
+  ranked fewest-new-relays-first — so you can pick between them rather than
+  being locked into whichever the search happened to try first. Each
+  candidate new site is biased toward higher local ground. The "max new
+  repeaters" cap is user-settable (default 6, persisted across visits) — a
+  tighter cap fails faster, a looser one lets it search further before
+  giving up. This is a heuristic, not a guaranteed-optimal placement search
+  (that's a much harder geometric problem) — it mirrors how you'd plan it by
+  hand, not a formal solver. New relays land in your plan as ordinary
+  planned repeaters (draggable, renameable, deletable).
+
+  ![Connect repeaters: a route bridging two real repeaters with 5 new relays, with alternative options listed](docs/screenshot-planningroute-connectrepeaters.png)
+- **▱ Cover an area**: click the map to draw a polygon (up to ~100km
+  across), then Finish shape to place up to N new repeaters (settable,
+  default 6) for maximal coverage of the enclosed area — reusing whatever
+  coverage already exists from real repeaters and anything already in your
+  plan first, same "existing infrastructure is free" philosophy as Connect
+  repeaters. Uses the standard greedy maximum-coverage heuristic: repeatedly
+  place whichever candidate site (biased toward local high ground,
+  restricted to strictly inside the drawn shape) newly covers the most
+  still-uncovered ground, until the budget runs out or nothing left can
+  improve coverage — provably within ~63% of the true optimum, another
+  "principled heuristic, not a solver" tool rather than a claim of a perfect
+  answer. Tries the search 3 times against slightly shifted candidate grids
+  and keeps whichever attempt covers the most ground, since a single fixed
+  grid can easily miss the actual best site. Reports the before/after
+  coverage percentage of the drawn area, scored at the exact same range the
+  map itself will render — a placement crediting coverage from a link the
+  map won't draw isn't real coverage — and if it's already fully covered,
+  reports that immediately without placing anything.
+
+This works by re-fetching the same
+[terrarium elevation tiles](#how-the-coverage-estimate-works) client-side
+(via the same `/dem-tiles` nginx proxy, for canvas pixel access without CORS
+issues) and running the propagation model through a **WebAssembly module
+compiled from the exact same Go code the server uses**
+(`internal/propagation` + `internal/demgrid`, via `wasm/main.go`) — not a
+hand-ported JS reimplementation. Browser and server share one
+implementation bit-for-bit, so there's no separate copy of the physics that
+could quietly drift out of sync; only tile fetching/caching (a plain
+`fetch()` + canvas decode, not domain logic) stays JS. See
+[WASM shared core](#wasm-shared-core) below.
+
+### Personal repeater adjustments
+
+A third plan mode, **✎ Adjust repeater**: click any existing real repeater
+to reposition or re-height it for yourself, without touching the shared
+nightly data. The repeater's official marker/popup are completely untouched
+— the adjustment renders as a separate draggable amber marker, linked to the
+real position by a thin dashed line so it's always clear what moved and by
+how much. The panel's "Adjusted repeaters" list shows the offset distance, a
+mast-height override (same control as a planned repeater's), a
+reset-to-original button, and a remove button.
+
+Adjustments feed straight into the same coverage-preview pipeline as
+planned repeaters — your browser recomputes their predicted coverage live,
+exactly like a brand-new planned site, which is what makes it "personal":
+nothing is sent anywhere until you choose to. They save with the plan
+(`localStorage`, export/import) and travel with a shared link the same way
+— a recipient's browser recomputes the preview from the adjustment data
+itself, never a static image, so it stays live and interactive on their end
+too.
+
+### Companion pin
+
+A separate, always-available button next to "Plan" (no side panel needed):
+drop a single draggable pin anywhere on the map and see who it would likely
+reach, using the same terrain physics as everything else. Unlike a planned
+repeater, the pin uses `propagation.rx_height_m` (handheld height) rather
+than `propagation.antenna_height_m` (mast height) for its own end of the
+link, since it's the *receiving* side. Not saved anywhere — it resets on
+reload. Search is capped to ~35km and a coarser DEM zoom, same as the
+add-repeater preview, for speed.
+
+### Saving and sharing plans
+
+Plans save locally by default: `localStorage` in your browser, with
+Export/Import to a `.json` file for manual sharing, or Export to `.kml` for
+Google Earth (placemarks for every repeater plus the current coverage
+overlay as a ground-projected image). The **Share** button goes further —
+it POSTs the plan's structure only (repeater positions, labels, hop chains —
+**never** a rendered coverage image, since that's cheap to recompute and
+would only go stale) to a small always-on Go server
+(`cmd/hopreach-shareapi`, proxied by nginx at `/api/plans`) and returns a
+link anyone can open. Shared plans have no auth (anyone with the link can
+view) and are deleted after `share.ttl_days` (default 7) by a daily cron job
+(`hopreach-shareapi -prune`), the same mechanism that runs the nightly
+coverage fetch.
 
 ## Region: not just Scotland
 
@@ -210,6 +316,12 @@ correction is always inspectable, never silent.
 
 ## GPU-accelerated coverage compute (optional)
 
+| | Extra setup | Use when |
+|---|---|---|
+| **CPU** (default) | none — [Quick start](#quick-start) | always works, no GPU needed |
+| **Local GPU** | `cp docker-compose.override.yml.example docker-compose.override.yml`, then `docker compose up --build` | this machine has a Vulkan-capable GPU |
+| **Remote GPU** | see [Remote GPU worker](#remote-gpu-worker) | this machine has no GPU (e.g. a VPS) but another one on your network does |
+
 Coverage computation — the same free-space-path-loss + knife-edge
 diffraction math described above — can run on a GPU via
 [WebGPU](https://github.com/rajveermalviya/go-webgpu) (`wgpu-native`,
@@ -315,122 +427,6 @@ tier" shape `Calibrated` already has) rather than silently running a very
 slow CPU pass — the most likely thing worth setting on a GPU-less VPS is
 gating Precision/Calibrated Precision specifically, since those are the
 tiers where CPU compute is least practical at full resolution.
-
-## Planning tools
-
-A "Plan" panel (bottom-left on the map) lets you sketch hypothetical
-repeater sites entirely **in the browser** — no server round-trip — using
-the same physics as the real map:
-
-![Add repeater mode: a planned site's predicted coverage overlaid in blue→purple over the real map's orange→green](docs/screenshot-planning-addrepeater.png)
-
-- **Add repeater**: click the map to drop a draggable planned site (rename,
-  override mast height, or delete it from the panel). A coverage preview
-  recomputes automatically (debounced, in a Web Worker so the map stays
-  responsive) and overlays in blue→purple — deliberately distinct from the
-  real map's orange→green, so "existing" and "proposed" coverage read as
-  different things when both are shown at once. The preview is capped to a
-  ~35km radius and a coarser DEM zoom for speed; the real nightly map has no
-  such cap.
-- **Check line of sight**: click a sequence of points (existing repeaters,
-  planned ones, or bare clicks) to build a hop chain. Each hop is drawn as a
-  line coloured by its computed margin — green (clear), orange (marginal),
-  red (blocked or out of range) — with the distance and dB margin listed in
-  the panel.
-- **🔗 Connect repeaters**: click two existing repeaters and it works out the
-  minimum number of *new* repeaters needed to bridge them — reusing any
-  existing repeater that already helps along the way (existing
-  infrastructure is free to use, a new build isn't). First checks whether
-  they're already connected via existing repeaters (0 new repeaters, most
-  common case); otherwise tries every reachable pair of bridgeable repeaters
-  (not just the closest one) and offers up to 3 distinct route options —
-  ranked fewest-new-relays-first — so you can pick between them rather than
-  being locked into whichever the search happened to try first. Each
-  candidate new site is biased toward higher local ground. The "max new
-  repeaters" cap is user-settable (default 6, persisted across visits) — a
-  tighter cap fails faster, a looser one lets it search further before
-  giving up. This is a heuristic, not a guaranteed-optimal placement search
-  (that's a much harder geometric problem) — it mirrors how you'd plan it by
-  hand, not a formal solver. New relays land in your plan as ordinary
-  planned repeaters (draggable, renameable, deletable).
-
-  ![Connect repeaters: a route bridging two real repeaters with 5 new relays, with alternative options listed](docs/screenshot-planningroute-connectrepeaters.png)
-- **▱ Cover an area**: click the map to draw a polygon (up to ~100km
-  across), then Finish shape to place up to N new repeaters (settable,
-  default 6) for maximal coverage of the enclosed area — reusing whatever
-  coverage already exists from real repeaters and anything already in your
-  plan first, same "existing infrastructure is free" philosophy as Connect
-  repeaters. Uses the standard greedy maximum-coverage heuristic: repeatedly
-  place whichever candidate site (biased toward local high ground,
-  restricted to strictly inside the drawn shape) newly covers the most
-  still-uncovered ground, until the budget runs out or nothing left can
-  improve coverage — provably within ~63% of the true optimum, another
-  "principled heuristic, not a solver" tool rather than a claim of a perfect
-  answer. Tries the search 3 times against slightly shifted candidate grids
-  and keeps whichever attempt covers the most ground, since a single fixed
-  grid can easily miss the actual best site. Reports the before/after
-  coverage percentage of the drawn area, scored at the exact same range the
-  map itself will render — a placement crediting coverage from a link the
-  map won't draw isn't real coverage — and if it's already fully covered,
-  reports that immediately without placing anything.
-
-This works by re-fetching the same
-[terrarium elevation tiles](#how-the-coverage-estimate-works) client-side
-(via the same `/dem-tiles` nginx proxy, for canvas pixel access without CORS
-issues) and running the propagation model through a **WebAssembly module
-compiled from the exact same Go code the server uses**
-(`internal/propagation` + `internal/demgrid`, via `wasm/main.go`) — not a
-hand-ported JS reimplementation. Browser and server share one
-implementation bit-for-bit, so there's no separate copy of the physics that
-could quietly drift out of sync; only tile fetching/caching (a plain
-`fetch()` + canvas decode, not domain logic) stays JS. See
-[WASM shared core](#wasm-shared-core) below.
-
-### Personal repeater adjustments
-
-A third plan mode, **✎ Adjust repeater**: click any existing real repeater
-to reposition or re-height it for yourself, without touching the shared
-nightly data. The repeater's official marker/popup are completely untouched
-— the adjustment renders as a separate draggable amber marker, linked to the
-real position by a thin dashed line so it's always clear what moved and by
-how much. The panel's "Adjusted repeaters" list shows the offset distance, a
-mast-height override (same control as a planned repeater's), a
-reset-to-original button, and a remove button.
-
-Adjustments feed straight into the same coverage-preview pipeline as
-planned repeaters — your browser recomputes their predicted coverage live,
-exactly like a brand-new planned site, which is what makes it "personal":
-nothing is sent anywhere until you choose to. They save with the plan
-(`localStorage`, export/import) and travel with a shared link the same way
-— a recipient's browser recomputes the preview from the adjustment data
-itself, never a static image, so it stays live and interactive on their end
-too.
-
-### Companion pin
-
-A separate, always-available button next to "Plan" (no side panel needed):
-drop a single draggable pin anywhere on the map and see who it would likely
-reach, using the same terrain physics as everything else. Unlike a planned
-repeater, the pin uses `propagation.rx_height_m` (handheld height) rather
-than `propagation.antenna_height_m` (mast height) for its own end of the
-link, since it's the *receiving* side. Not saved anywhere — it resets on
-reload. Search is capped to ~35km and a coarser DEM zoom, same as the
-add-repeater preview, for speed.
-
-### Saving and sharing plans
-
-Plans save locally by default: `localStorage` in your browser, with
-Export/Import to a `.json` file for manual sharing, or Export to `.kml` for
-Google Earth (placemarks for every repeater plus the current coverage
-overlay as a ground-projected image). The **Share** button goes further —
-it POSTs the plan's structure only (repeater positions, labels, hop chains —
-**never** a rendered coverage image, since that's cheap to recompute and
-would only go stale) to a small always-on Go server
-(`cmd/hopreach-shareapi`, proxied by nginx at `/api/plans`) and returns a
-link anyone can open. Shared plans have no auth (anyone with the link can
-view) and are deleted after `share.ttl_days` (default 7) by a daily cron job
-(`hopreach-shareapi -prune`), the same mechanism that runs the nightly
-coverage fetch.
 
 ## Progress reporting
 
