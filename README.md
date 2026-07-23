@@ -501,15 +501,19 @@ The Precision elevation grid at the default zoom (13) needs ~22,700 tiles on
 first run for all of Scotland (a few GB on disk, cached in the
 `hopreach-dem-cache` volume afterwards). It's never all loaded into memory at
 once: Precision/Calibrated Precision are computed in geographic tiles, each
-loading only its own (much smaller) slice of that grid before moving on, sized
-to stay within a memory budget that auto-detects real available memory on
-whichever box actually loads a tile — this process's own, or a connected
-remote GPU worker's, whichever is smaller (a tile has to be safe for either,
-since a dropped remote connection falls back to computing locally
-mid-pass). `coverage.precision_chunk_budget_mb` in `config.example.yaml` can
-override that auto-sizing if it ever picks a value your setup doesn't like.
-`coverage.precision_dem_zoom` there also has reference points for
-lighter/heavier zoom settings.
+loading only its own (much smaller) slice of that grid before moving on,
+sized against whichever box will actually load most tiles' terrain — a
+connected remote GPU worker's real available memory, since that grid is
+never loaded on this process's own box at all while a worker is handling a
+tile, or this process's own available memory if there's no worker. A tile
+that can't actually reach the remote worker re-splits itself down to this
+process's own (typically much smaller) memory budget right at that point,
+rather than every tile paying that cost up front for a fallback that, in
+the normal case, never happens. `coverage.precision_chunk_budget_mb` in
+`config.example.yaml` overrides all of this auto-sizing with one fixed
+value, applied everywhere (planning and any local fallback alike), if it
+ever picks something your setup doesn't like. `coverage.precision_dem_zoom`
+there also has reference points for lighter/heavier zoom settings.
 
 If this container runs on a host whose own real memory ceiling isn't a
 constant the container can see for itself (e.g. Docker inside a VM/LXC with

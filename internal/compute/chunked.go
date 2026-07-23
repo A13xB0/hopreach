@@ -14,7 +14,7 @@ import (
 
 // chunkGridBudgetBytes bounds how much elevation grid memory a single
 // geographic tile's demgrid.Load call is allowed to need — see
-// MarginsChunked and Engine.effectiveChunkBudgetBytes, which computes this
+// MarginsChunked and Engine.planningChunkBudgetBytes, which computes this
 // per pass rather than using one fixed value. A whole-Scotland grid at the
 // Precision tier's DEM zoom runs into several GB loaded all at once, which
 // is what OOM-killed the remote GPU worker in production before per-tile
@@ -36,7 +36,7 @@ import (
 // fetch/cache-lookup, and GPU dispatch overhead — which is what made a
 // real run take well over an hour per tier instead of the roughly a
 // minute a single whole-raster job used to take before per-tile chunking
-// existed at all. effectiveChunkBudgetBytes auto-sizes this from whichever
+// existed at all. planningChunkBudgetBytes auto-sizes this from whichever
 // box will actually load a tile's grid instead.
 //
 // defaultChunkGridBudgetBytes is only the fallback for when auto-sizing
@@ -82,36 +82,54 @@ func budgetFromAvailable(availableBytes uint64) float64 {
 	return budget
 }
 
-// effectiveChunkBudgetBytes decides the per-tile memory budget for this
-// pass: an explicit override (SetChunkBudgetBytes) always wins; otherwise
-// auto-size from whichever box will actually load each tile's grid.
-//
-// A tile can fall back from remote to local/CPU mid-pass if the remote
-// worker drops out (a real, observed production scenario — see
-// MarginsChunked's own per-tile local/remote choice), so the auto-sized
-// budget is the *smaller* of what's safe for this process's own box and
-// what's safe for a connected remote worker's box, not just whichever one
-// is expected to serve most tiles: a tile sized only for a large remote
-// worker's RAM could OOM this process's own, much smaller box if it ends
-// up having to load that same tile locally.
-func (e *Engine) effectiveChunkBudgetBytes() float64 {
+// localChunkBudgetBytes is this process's own per-tile memory budget — see
+// budgetFromAvailable. Used two ways: as the tile-planning budget outright
+// when no remote worker is available at all, and as the safety ceiling a
+// tile gets re-split down to if it ever actually needs local/CPU
+// computation (see computeTileLocal) — the terrain grid for a tile a
+// connected remote worker serves is never loaded on this box at all (see
+// computeTile), so this budget has no bearing on tiles remote successfully
+// handles, only on the (typically rare) ones that fall back.
+func (e *Engine) localChunkBudgetBytes() float64 {
+	if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
+		return budgetFromAvailable(avail)
+	}
+	return float64(defaultChunkGridBudgetBytes)
+}
+
+// remoteChunkBudgetBytes is a connected remote worker's own per-tile memory
+// budget, 0 if no worker is connected or its available memory is unknown
+// (predates gpujob.Hello) — callers should treat 0 as "not usable for
+// planning" and fall back to localChunkBudgetBytes.
+func (e *Engine) remoteChunkBudgetBytes() float64 {
+	connected, remoteAvail := e.remoteStatus()
+	if !connected || remoteAvail == 0 {
+		return 0
+	}
+	return budgetFromAvailable(remoteAvail)
+}
+
+// planningChunkBudgetBytes picks the budget MarginsChunked plans tile sizes
+// against: an explicit override (SetChunkBudgetBytes) always wins;
+// otherwise the remote worker's own (typically much larger) budget when one
+// is connected, since a connected worker serves the vast majority of tiles
+// and never needs this box's own memory at all for them — sizing every
+// tile down to this box's own tiny budget "just in case" it might someday
+// need to fall back paid enormous, unnecessary dispatch overhead for a
+// fallback that, in the common case, never happens (confirmed in
+// production: a real Precision pass that fits in ~15 tiles at a sane
+// remote-sized budget needed ~3,960 at this box's own tiny budget instead —
+// each one its own broker round trip). A tile that does need to fall back
+// gets re-split down to localChunkBudgetBytes right at that point instead
+// of paying for it up front — see computeTileLocal.
+func (e *Engine) planningChunkBudgetBytes() float64 {
 	if e.chunkBudgetBytes > 0 {
 		return e.chunkBudgetBytes
 	}
-
-	localBudget := float64(defaultChunkGridBudgetBytes)
-	if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
-		localBudget = budgetFromAvailable(avail)
-	}
-
-	connected, remoteAvail := e.remoteStatus()
-	if !connected || remoteAvail == 0 {
-		return localBudget
-	}
-	if remoteBudget := budgetFromAvailable(remoteAvail); remoteBudget < localBudget {
+	if remoteBudget := e.remoteChunkBudgetBytes(); remoteBudget > 0 {
 		return remoteBudget
 	}
-	return localBudget
+	return e.localChunkBudgetBytes()
 }
 
 // demTileBytes is one decoded 256x256 terrarium tile's footprint in the
@@ -221,7 +239,7 @@ const maxPlanTiles = 4000
 
 // planTiles splits bounds into a 2D grid of geographic tiles, each sized so
 // its own padded elevation grid (loadBounds) stays around budgetBytes at
-// zoom (see Engine.effectiveChunkBudgetBytes for how a caller picks that;
+// zoom (see Engine.planningChunkBudgetBytes for how a caller picks that;
 // see maxPlanTiles for why that target isn't always reachable). supersample
 // must evenly divide imageWidth/imageHeight (1 means no downsampling at
 // all, the common case) — see buildTiles for why.
@@ -507,6 +525,87 @@ func DownsampleMargins(src []float32, srcWidth, srcHeight, factor int) (dst []fl
 	return dst, dstWidth, dstHeight
 }
 
+// computeTile computes one geographic tile's margins, already downsampled
+// to served resolution. Tries a connected remote worker first — which
+// never reads grid content, only its Zoom (see stubGrid), so this never
+// needs a real elevation grid loaded here regardless of the tile's size —
+// and only falls back to local GPU/CPU (which does need a real grid) if
+// remote genuinely fails or isn't configured at all. progressFn may be nil
+// (used for re-split sub-tiles, where losing intra-tile granularity is an
+// acceptable simplification — see computeTileLocal).
+func (e *Engine) computeTile(tl tile, tileSites []propagation.Site, zoom int, cacheDir, tileURLBase string, client *http.Client, rangeKm float64, p propagation.Params, supersample int, localBudgetBytes float64, progressFn func(done, total int)) ([]float32, int, int, error) {
+	if e.localBE == nil && e.remoteConfigured() {
+		margins, err := e.marginsRemote(stubGrid(zoom), tileSites, tl.outputBounds, tl.colCount, tl.rowCount, rangeKm, p, progressFn)
+		if err == nil {
+			out, w, h := DownsampleMargins(margins, tl.colCount, tl.rowCount, supersample)
+			return out, w, h, nil
+		}
+		e.remoteLogOnce.Do(func() {
+			log.Printf("coverage: remote GPU worker dispatch failed, falling back to CPU for this pass: %v", err)
+		})
+		// Remote genuinely failed for this specific tile (not just "wasn't
+		// attempted") — the stub above is only valid for a successful
+		// remote round trip; everything from here needs real terrain.
+	}
+	return e.computeTileLocal(tl, tileSites, zoom, cacheDir, tileURLBase, client, rangeKm, p, supersample, localBudgetBytes, progressFn)
+}
+
+// computeTileLocal computes tl using local GPU/CPU, which needs a real
+// elevation grid. If tl's own padded footprint already fits
+// localBudgetBytes, it's loaded and computed directly — the common case
+// when there's no remote worker at all, since tiles are then planned
+// against this same budget to begin with. Otherwise tl was planned against
+// a much larger remote budget and doesn't fit this box's own memory: it's
+// re-split right here (reusing planTiles, scoped to just tl's own
+// outputBounds and sized for localBudgetBytes instead) into pieces that do
+// fit, each computed and stitched back into one result covering the whole
+// of tl. Keeping this recursive (a re-split piece goes through computeTile
+// again, so it can even still try remote — it may have reconnected by
+// then) rather than a fixed one-shot split.
+func (e *Engine) computeTileLocal(tl tile, tileSites []propagation.Site, zoom int, cacheDir, tileURLBase string, client *http.Client, rangeKm float64, p propagation.Params, supersample int, localBudgetBytes float64, progressFn func(done, total int)) ([]float32, int, int, error) {
+	if tileFootprint(tl.loadBounds, zoom) <= localBudgetBytes/demTileBytes {
+		loadBounds := demgrid.Bounds{South: tl.loadBounds.South, North: tl.loadBounds.North, West: tl.loadBounds.West, East: tl.loadBounds.East}
+		grid, err := demgrid.Load(loadBounds, zoom, cacheDir, tileURLBase, client, nil)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("local terrain: %w", err)
+		}
+		defer grid.Close()
+		margins := e.Margins(grid, tileSites, tl.outputBounds, tl.colCount, tl.rowCount, rangeKm, p, progressFn)
+		out, w, h := DownsampleMargins(margins, tl.colCount, tl.rowCount, supersample)
+		return out, w, h, nil
+	}
+
+	// Too big for local memory as planned (sized for a much larger remote
+	// budget) — re-split scoped to just this tile, sized for what's
+	// actually safe here.
+	subTiles := planTiles(tl.outputBounds, zoom, tl.colCount, tl.rowCount, rangeKm, localBudgetBytes, supersample)
+	outWidth, outHeight := tl.colCount/supersample, tl.rowCount/supersample
+	out := make([]float32, outWidth*outHeight)
+	for _, sub := range subTiles {
+		subRowOffset, subColOffset := sub.rowOffset/supersample, sub.colOffset/supersample
+		subSites := sitesNear(tileSites, sub.outputBounds, rangeKm)
+		if len(subSites) == 0 {
+			for row := 0; row < sub.rowCount/supersample; row++ {
+				dstStart := (subRowOffset+row)*outWidth + subColOffset
+				for col := 0; col < sub.colCount/supersample; col++ {
+					out[dstStart+col] = float32(math.NaN())
+				}
+			}
+			continue
+		}
+		subOut, subW, subH, err := e.computeTile(sub, subSites, zoom, cacheDir, tileURLBase, client, rangeKm, p, supersample, localBudgetBytes, nil)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		for row := 0; row < subH; row++ {
+			srcStart := row * subW
+			dstStart := (subRowOffset+row)*outWidth + subColOffset
+			copy(out[dstStart:dstStart+subW], subOut[srcStart:srcStart+subW])
+		}
+	}
+	return out, outWidth, outHeight, nil
+}
+
 // MarginsChunked computes one whole coverage pass the same way Margins
 // does, but never asks demgrid.Load for the whole region's elevation grid
 // at once. It splits bounds into a 2D grid of geographic tiles (see
@@ -541,8 +640,12 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 	if supersample < 1 {
 		supersample = 1
 	}
-	budgetBytes := e.effectiveChunkBudgetBytes()
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, budgetBytes, supersample)
+	planBudget := e.planningChunkBudgetBytes()
+	localBudget := e.localChunkBudgetBytes()
+	if e.chunkBudgetBytes > 0 {
+		localBudget = e.chunkBudgetBytes // an explicit override applies uniformly, not just to planning
+	}
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, planBudget, supersample)
 
 	outWidth, outHeight := imageWidth/supersample, imageHeight/supersample
 
@@ -554,13 +657,8 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 	// of millions of tiles, before maxPlanTiles capped it. Worth keeping
 	// permanently for the same reason: cheap, and the first thing worth
 	// checking if a future pass is unexpectedly slow or memory-hungry.
-	if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
-		log.Printf("chunked margins: %d tiles planned (budget=%.0fMB, out=%dx%d=%.0fMB), %.0fMB available before allocating out",
-			len(tiles), budgetBytes/1e6, outWidth, outHeight, float64(outWidth*outHeight*4)/1e6, float64(avail)/1e6)
-	} else {
-		log.Printf("chunked margins: %d tiles planned (budget=%.0fMB, out=%dx%d=%.0fMB)",
-			len(tiles), budgetBytes/1e6, outWidth, outHeight, float64(outWidth*outHeight*4)/1e6)
-	}
+	log.Printf("chunked margins: %d tiles planned (plan budget=%.0fMB, local fallback budget=%.0fMB, out=%dx%d=%.0fMB)",
+		len(tiles), planBudget/1e6, localBudget/1e6, outWidth, outHeight, float64(outWidth*outHeight*4)/1e6)
 
 	// out is the one genuinely large, whole-pass-lifetime allocation this
 	// function makes — sized at *served* (post-downsample) resolution, not
@@ -616,49 +714,21 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 			continue
 		}
 
-		// A connected remote worker never reads this grid's contents (only
-		// its Zoom, to set the job's DemZoom — see marginsRemote) since it
-		// loads its own copy from DemBounds. Skipping the load here when
-		// remote is the path that will actually serve this tile matters:
-		// this process (the batch job, often the same modest box that also
-		// runs the website) would otherwise pay real memory for a grid
-		// nothing here ever looks at, on top of the full-raster margins
-		// buffer (out, above) it's already holding for the whole pass —
-		// together enough to OOM a 2GB box. If local GPU is configured
-		// (e.localBE != nil), the real grid is still needed, since that
-		// path *does* read it directly.
-		var grid *demgrid.Grid
-		if e.localBE == nil && e.remoteAvailable() {
-			grid = stubGrid(zoom)
-		} else {
-			loadBounds := demgrid.Bounds{South: tl.loadBounds.South, North: tl.loadBounds.North, West: tl.loadBounds.West, East: tl.loadBounds.East}
-			var err error
-			grid, err = demgrid.Load(loadBounds, zoom, cacheDir, tileURLBase, client, nil)
-			if err != nil {
-				return nil, fmt.Errorf("chunked margins: tile %d/%d terrain: %w", i+1, len(tiles), err)
-			}
-		}
-
 		base := doneWork
 		colCount := tl.colCount
 		sitesForWeight := wt.weight / (tl.rowCount * colCount) // == max(1, len(tileSites)), recovered rather than recomputed
-		tileMargins := e.Margins(grid, tileSites, tl.outputBounds, colCount, tl.rowCount, rangeKm, p, func(done, total int) {
+		tileOut, tileOutWidth, tileOutHeight, err := e.computeTile(tl, tileSites, zoom, cacheDir, tileURLBase, client, rangeKm, p, supersample, localBudget, func(done, total int) {
 			if progress != nil {
-				// done/total from Margins are rows within this tile;
-				// scale by the same per-pixel weight used for this tile's
-				// total so intermediate progress lines up with it exactly
-				// once done reaches rowCount.
+				// done/total are rows within this tile; scale by the same
+				// per-pixel weight used for this tile's total so
+				// intermediate progress lines up with it exactly once done
+				// reaches rowCount.
 				progress(base+done*colCount*sitesForWeight, totalWork)
 			}
 		})
-		grid.Close()
-
-		// Downsampled right here, per tile, at (at most) a few tens of MB —
-		// never the whole region at once — before ever touching out. Tile
-		// boundaries are always exact multiples of supersample (see
-		// buildTiles), so this tile's own block never needs any neighbouring
-		// tile's pixels to downsample correctly.
-		tileOut, tileOutWidth, tileOutHeight := DownsampleMargins(tileMargins, colCount, tl.rowCount, supersample)
+		if err != nil {
+			return nil, fmt.Errorf("chunked margins: tile %d/%d: %w", i+1, len(tiles), err)
+		}
 		tileOutRowOffset, tileOutColOffset := tl.rowOffset/supersample, tl.colOffset/supersample
 		for row := 0; row < tileOutHeight; row++ {
 			srcStart := row * tileOutWidth
