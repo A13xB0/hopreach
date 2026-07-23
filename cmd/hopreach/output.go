@@ -169,6 +169,12 @@ type meta struct {
 	RepeatersInRegion     int              `json:"repeaters_in_region"`
 	Counts                map[string]int   `json:"counts"`
 	Coverage              *coverageOutputs `json:"coverage,omitempty"`
+	// Complete is false from the moment meta.json is first written (before
+	// any raster) until run() reaches its very end successfully — see
+	// lastGeneratedAt. Left false (the zero value) if the process dies
+	// partway through (crash, OOM, kill) instead of only ever being
+	// overwritten by a later, complete run.
+	Complete bool `json:"complete"`
 }
 
 func writeJSONFile(path string, v any) error {
@@ -190,9 +196,20 @@ func writeJSONFile(path string, v any) error {
 }
 
 // lastGeneratedAt reads the existing meta.json's generated_at timestamp, if
-// any — absent (ok=false) on a genuine first run, or if it's missing/
-// unparseable for any reason, in which case the caller should just proceed
-// with a full run as usual.
+// it reflects a *complete* run — absent (ok=false) on a genuine first run,
+// if it's missing/unparseable for any reason, or if the last run never
+// reached its own end (Complete is only ever set true right before run()
+// returns successfully — see meta.Complete). That last case matters: this
+// process's own meta.json is written early, before any raster, so it can
+// show the repeater list immediately — a run that then crashes partway
+// through (an OOM, a kill, any other abrupt exit) leaves a *recent* but
+// *incomplete* meta.json behind. Without this check, the next container
+// start would see that recent timestamp, believe a full render just
+// happened, and skip retrying — leaving stale/partial coverage data live
+// until the next scheduled interval or a manual -force, exactly the
+// scenario this project hit in production (several crashed runs in a row
+// while chasing GPU OOM/dispatch bugs). The caller should just proceed
+// with a full run whenever this returns ok=false, regardless of age.
 func lastGeneratedAt(outputDir string) (time.Time, bool) {
 	data, err := os.ReadFile(filepath.Join(outputDir, "meta.json"))
 	if err != nil {
@@ -200,8 +217,12 @@ func lastGeneratedAt(outputDir string) (time.Time, bool) {
 	}
 	var m struct {
 		GeneratedAt string `json:"generated_at"`
+		Complete    bool   `json:"complete"`
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
+		return time.Time{}, false
+	}
+	if !m.Complete {
 		return time.Time{}, false
 	}
 	t, err := time.Parse(time.RFC3339, m.GeneratedAt)

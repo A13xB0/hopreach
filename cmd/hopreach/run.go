@@ -374,6 +374,12 @@ func run(cfg appConfig) error {
 		}
 	}
 
+	m.Complete = true
+	if err := writeMeta(); err != nil {
+		prog.Update("error", 0, 0, err.Error())
+		return fmt.Errorf("writing %s: %w", metaPath, err)
+	}
+
 	prog.Update("done", 1, 1, fmt.Sprintf("%d repeaters, coverage up to date", len(features)))
 
 	log.Printf("wrote %d/%d repeaters within region (scope=%q) -> %s (active=%d degraded=%d silent=%d)",

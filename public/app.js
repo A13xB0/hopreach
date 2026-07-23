@@ -36,15 +36,40 @@
   const layersControl = L.control.layers(baseLayers, {}, { collapsed: false, position: "topright" }).addTo(map);
   map.on("baselayerchange", (e) => localStorage.setItem(BASEMAP_STORAGE_KEY, e.name));
 
-  // Place names/roads, drawn in their own pane above the coverage overlay
-  // (imageOverlay defaults to Leaflet's overlayPane, z-index 400) but below
-  // markers (markerPane, z-index 600) — so text stays legible through the
-  // coverage tint instead of being hidden underneath it, without covering
-  // up the repeater dots themselves. Only available for the Dark basemap:
-  // CARTO publishes a matching label-only layer for it for free: the other
-  // three basemaps here (OSM Streets, Esri Satellite, OpenTopoMap Terrain)
-  // bake labels into the same raster as everything else, with no equivalent
-  // free split layer to draw separately.
+  // Roads and place names, drawn in their own panes above the coverage
+  // overlay (imageOverlay defaults to Leaflet's overlayPane, z-index 400)
+  // but below markers (markerPane, z-index 600) — so both stay legible
+  // through the coverage tint instead of being hidden underneath it,
+  // without covering up the repeater dots themselves. Only available for
+  // the Dark basemap: CARTO publishes a matching label-only layer for it
+  // for free: the other three basemaps here (OSM Streets, Esri Satellite,
+  // OpenTopoMap Terrain) bake labels into the same raster as everything
+  // else, with no equivalent free split layer to draw separately.
+  //
+  // CARTO's free raster tiles don't offer a roads-only (transparent
+  // background) layer the way they do for labels — only the full
+  // dark_nolabels raster, which already bakes roads into the same opaque
+  // fill used for the base layer below the coverage overlay. Reusing that
+  // same tile source a second time, in its own pane above the coverage
+  // overlay, blended via mix-blend-mode: screen on the *pane* (Leaflet
+  // 1.9.4's TileLayer has no per-tile className option to hang CSS off of
+  // directly — the pane itself is the right place, and blending there
+  // still composites correctly against everything painted beneath it)
+  // gets the same practical effect without a second tile provider or API
+  // key: the near-black background (~RGB 6-14) blends away to almost
+  // nothing against whatever's beneath it, while the lighter road-line
+  // pixels (~RGB 25-44+) punch through visibly. Same tile URL as the base
+  // layer, so the browser serves it from the same tile cache rather than
+  // doubling network requests.
+  map.createPane("roads");
+  map.getPane("roads").style.zIndex = 440;
+  map.getPane("roads").style.pointerEvents = "none";
+  map.getPane("roads").style.mixBlendMode = "screen";
+  const darkRoads = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
+    pane: "roads",
+    maxZoom: 19,
+  });
+
   map.createPane("labels");
   map.getPane("labels").style.zIndex = 450;
   map.getPane("labels").style.pointerEvents = "none";
@@ -54,9 +79,11 @@
   });
   function syncLabelsLayer(basemapName) {
     if (basemapName === "Dark") {
+      if (!map.hasLayer(darkRoads)) darkRoads.addTo(map);
       if (!map.hasLayer(darkLabels)) darkLabels.addTo(map);
-    } else if (map.hasLayer(darkLabels)) {
-      map.removeLayer(darkLabels);
+    } else {
+      if (map.hasLayer(darkRoads)) map.removeLayer(darkRoads);
+      if (map.hasLayer(darkLabels)) map.removeLayer(darkLabels);
     }
   }
   syncLabelsLayer(initialBasemap);
