@@ -133,6 +133,18 @@ func (e *Engine) Available() bool {
 	return e.localBE != nil || e.remoteAvailable()
 }
 
+// LocalAdapterID returns the local GPU's adapter description (as reported by
+// gpucompute.Init), or "" if this box has no usable local GPU — read once by
+// cmd/hopreach after Setup to record this box's hardware for the analytics
+// page, the same adapter string cmd/hopreach-gpuworker reports for a remote
+// box via gpujob.Hello.
+func (e *Engine) LocalAdapterID() string {
+	if e.localBE == nil {
+		return ""
+	}
+	return e.localBE.AdapterID
+}
+
 // Margins is the single entry point coverage.Raster*() uses instead of
 // calling propagation.ComputeMarginsCPU directly. Tried in order: local GPU,
 // then a connected remote GPU worker (if configured), then CPU. Each

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HopReach Analytics</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="analytics.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div>
+      <h1>HopReach Analytics</h1>
+      <span class="subtitle">Coverage-run history and infrastructure stats &mdash; no visitor data of any kind</span>
+    </div>
+    <div id="an-top-stats"></div>
+  </header>
+
+  <div id="an-content">
+    <section class="an-card">
+      <h2>Hardware</h2>
+      <div id="an-hardware"></div>
+    </section>
+
+    <section class="an-card">
+      <h2>Coverage runs</h2>
+      <div id="an-runs-summary"></div>
+      <div id="an-runs-chart" class="an-chart"></div>
+      <div id="an-runs-list"></div>
+    </section>
+
+    <section class="an-card">
+      <h2>Available memory over time</h2>
+      <div id="an-memory-chart" class="an-chart"></div>
+    </section>
+
+    <section class="an-card">
+      <h2>Backend usage &amp; bottlenecks</h2>
+      <div id="an-backend"></div>
+    </section>
+
+    <section class="an-card">
+      <h2>Plans shared over time</h2>
+      <div id="an-shares-chart" class="an-chart"></div>
+    </section>
+  </div>
+
+  <a id="an-back" href="index.html">&larr; Back to the map</a>
+</div>
+
+<script src="analytics.js"></script>
+</body>
+</html>

@@ -45,28 +45,40 @@ type Job struct {
 }
 
 // KindHello/KindProgress/KindResult discriminate the JSON text-frame shapes
-// the worker sends over its one WebSocket connection to the broker: exactly
-// one Hello right after connecting, then zero or more Progress frames while
-// a job is in flight, then exactly one Result when it finishes. Kind is
-// omitted (empty) on Result when it's used as the HTTP-level error envelope
-// from POST /gpu/submit instead of a WS frame — that context only ever has
-// one possible shape, so there's nothing to discriminate there.
+// the worker sends over its one WebSocket connection to the broker: one
+// Hello right after connecting and then again periodically as a heartbeat
+// (see cmd/hopreach-gpuworker's helloInterval) so the broker's view of this
+// box's available memory doesn't go stale over a long-lived connection,
+// interleaved with zero or more Progress frames while a job is in flight and
+// exactly one Result each time one finishes. Kind is omitted (empty) on
+// Result when it's used as the HTTP-level error envelope from POST
+// /gpu/submit instead of a WS frame — that context only ever has one
+// possible shape, so there's nothing to discriminate there.
 const (
 	KindHello    = "hello"
 	KindProgress = "progress"
 	KindResult   = "result"
 )
 
-// Hello is sent once by the worker immediately after connecting, reporting
-// its own available memory (see internal/sysinfo) so the batch job can size
-// MarginsChunked's per-tile memory budget to whatever box will actually
-// load each tile's elevation grid, instead of a fixed guess that has to be
-// hand-tuned again every time either box's RAM changes. AvailableBytes is 0
-// if the worker couldn't determine it (e.g. not running on Linux) — callers
-// should treat that the same as "unknown", not "zero RAM available".
+// Hello is sent by the worker right after connecting, and then again every
+// helloInterval as a heartbeat, reporting its own available memory (see
+// internal/sysinfo) so the batch job can size MarginsChunked's per-tile
+// memory budget to whatever box will actually load each tile's elevation
+// grid, instead of a fixed guess that has to be hand-tuned again every time
+// either box's RAM changes — and so the analytics memory-over-time graph
+// has fresh samples for this box for as long as the connection stays up.
+// AvailableBytes/TotalBytes are 0 if the worker couldn't determine them
+// (e.g. not running on Linux) — callers should treat that as "unknown", not
+// "zero RAM". CPUModel/GPUAdapter are static hardware descriptions, sent
+// alongside for the analytics page's hardware panel rather than requiring a
+// separate request/response round trip for information that never changes
+// for the lifetime of one connection.
 type Hello struct {
 	Kind           string `json:"kind"`
 	AvailableBytes uint64 `json:"available_bytes"`
+	TotalBytes     uint64 `json:"total_bytes,omitempty"`
+	CPUModel       string `json:"cpu_model,omitempty"`
+	GPUAdapter     string `json:"gpu_adapter,omitempty"`
 }
 
 // Result is sent back by the worker once a job completes. Margins is the

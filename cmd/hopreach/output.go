@@ -237,6 +237,29 @@ func lastGeneratedAt(outputDir string) (time.Time, bool) {
 	return t, true
 }
 
+// previousCoverage reads whatever coverage tiles the last run wrote (if
+// any) — used to seed a fresh run's own meta.json before any tier in *this*
+// run has been recomputed, so a visitor loading the page mid-run still sees
+// the last real coverage instead of nothing, right up until each tier's own
+// writeTier call replaces it. Unlike lastGeneratedAt, this deliberately does
+// NOT check Complete: even a previous run that crashed partway through can
+// have left real, valid tiles on disk for whichever tiers it did finish
+// before failing, and those PNG files are still genuinely there, untouched,
+// regardless of whether the run that made them ever reached its own end.
+func previousCoverage(outputDir string) *coverageOutputs {
+	data, err := os.ReadFile(filepath.Join(outputDir, "meta.json"))
+	if err != nil {
+		return nil
+	}
+	var m struct {
+		Coverage *coverageOutputs `json:"coverage"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m.Coverage
+}
+
 type imageResult struct {
 	raster *image.NRGBA
 	bounds propagation.Bounds

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"hopreach/internal/analytics"
 	yconfig "hopreach/internal/config"
 )
 
@@ -123,6 +124,14 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Anonymous count only — just a timestamp, nothing about the plan's
+	// contents or who created it (see internal/analytics's package doc).
+	// Best-effort: a failure to record this never fails the actual share.
+	sharePath := filepath.Join(analyticsDir(), "plan_shares.jsonl")
+	if err := analytics.Append(sharePath, analytics.PlanShareEvent{Time: time.Now()}, analytics.MaxLinesDefault); err != nil {
+		log.Printf("analytics: could not record plan share event: %v", err)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"id": id, "url": "/?plan=" + id})
 }
@@ -218,7 +227,10 @@ func main() {
 	addr := cfg.Share.ListenAddr
 	http.HandleFunc("/api/plans", handlePlans)
 	http.HandleFunc("/api/plans/", handlePlans)
+	http.HandleFunc("/api/analytics", handleAnalytics)
 	http.HandleFunc("/admin/recompute", handleRecompute)
+
+	go startMemorySampling()
 
 	// Remote GPU worker support is entirely opt-in: refuse to expose
 	// /gpu-worker at all unless a real token is configured, rather than

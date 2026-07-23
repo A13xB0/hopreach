@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -56,7 +57,46 @@ func getEnvFloat(key string, fallback float64) float64 {
 // rationale/value as internal/progress.Writer's own minSampleInterval.
 const progressSendInterval = 500 * time.Millisecond
 
-func processJob(be *gpucompute.Backend, cacheDir string, httpClient *http.Client, job gpujob.Job, conn *websocket.Conn) (margins []byte, err error) {
+// helloInterval is how often runConnection re-sends its Hello heartbeat
+// after the initial one — frequent enough that the analytics memory graph
+// (internal/analytics.MemorySample) gets a reasonably continuous picture of
+// this box over a long-lived connection, infrequent enough that it's noise
+// on the wire compared to an actual job's traffic.
+const helloInterval = 2 * time.Minute
+
+// buildHello reads this box's current available memory plus its (static,
+// rarely-changing) total memory/CPU/GPU description, for both the initial
+// Hello and each heartbeat resend. Best-effort throughout: any field that
+// can't be determined (non-Linux, etc.) is just left at its zero value —
+// callers already treat 0/"" as "unknown" rather than a real value.
+func buildHello(be *gpucompute.Backend) gpujob.Hello {
+	h := gpujob.Hello{Kind: gpujob.KindHello, GPUAdapter: be.AdapterID}
+	if v, err := sysinfo.AvailableMemoryBytes(); err == nil {
+		h.AvailableBytes = v
+	} else {
+		log.Printf("gpuworker: could not determine available memory (%v), reporting unknown", err)
+	}
+	if v, err := sysinfo.TotalMemoryBytes(); err == nil {
+		h.TotalBytes = v
+	}
+	if v, err := sysinfo.CPUModel(); err == nil {
+		h.CPUModel = v
+	}
+	return h
+}
+
+// writeMessage serializes writes to conn: gorilla/websocket connections
+// aren't safe for concurrent writers, but this worker now has two
+// (runConnection's own result/error writes and the Hello heartbeat ticker
+// started alongside it), so every write anywhere in this file goes through
+// here rather than calling conn.WriteMessage directly.
+func writeMessage(conn *websocket.Conn, mu *sync.Mutex, msgType int, data []byte) error {
+	mu.Lock()
+	defer mu.Unlock()
+	return conn.WriteMessage(msgType, data)
+}
+
+func processJob(be *gpucompute.Backend, mu *sync.Mutex, cacheDir string, httpClient *http.Client, job gpujob.Job, conn *websocket.Conn) (margins []byte, err error) {
 	// DemBounds (padded by the job's range so a site/path near the edge of
 	// Bounds still sees real terrain beyond it) is what this worker should
 	// actually fetch — see the field comment on gpujob.Job. Falls back to
@@ -87,12 +127,10 @@ func processJob(be *gpucompute.Backend, cacheDir string, httpClient *http.Client
 		if merr != nil {
 			return
 		}
-		// Best-effort: this connection is only ever used by this one
-		// goroutine (one job at a time, no concurrent writer), but a
-		// failed write here just means one missed progress update, not a
-		// failed job — the caller's own conn.ReadMessage loop is what
-		// actually detects a genuinely dead connection.
-		_ = conn.WriteMessage(websocket.TextMessage, body)
+		// Best-effort: a failed write here just means one missed progress
+		// update, not a failed job — the caller's own conn.ReadMessage loop
+		// is what actually detects a genuinely dead connection.
+		_ = writeMessage(conn, mu, websocket.TextMessage, body)
 	})
 	if err != nil {
 		return nil, err
@@ -110,23 +148,38 @@ func runConnection(wsURL, token, cacheDir string, be *gpucompute.Backend, httpCl
 	defer conn.Close()
 	log.Printf("gpuworker: connected to broker at %s", wsURL)
 
-	// Report available memory once up front so the batch job can size
-	// MarginsChunked's per-tile budget against this box's actual RAM
-	// instead of a fixed guess — see gpujob.Hello. Best-effort: if this
-	// box isn't Linux (sysinfo.AvailableMemoryBytes fails) or the send
-	// itself fails, AvailableBytes just stays 0/unknown and the batch job
-	// falls back to its own default, same as if this worker predated the
-	// Hello message entirely.
-	availableBytes, err := sysinfo.AvailableMemoryBytes()
-	if err != nil {
-		log.Printf("gpuworker: could not determine available memory (%v), reporting unknown", err)
-		availableBytes = 0
-	}
-	if helloBody, err := json.Marshal(gpujob.Hello{Kind: gpujob.KindHello, AvailableBytes: availableBytes}); err == nil {
-		if err := conn.WriteMessage(websocket.TextMessage, helloBody); err != nil {
+	var writeMu sync.Mutex
+	sendHello := func() {
+		body, err := json.Marshal(buildHello(be))
+		if err != nil {
+			return
+		}
+		if err := writeMessage(conn, &writeMu, websocket.TextMessage, body); err != nil {
 			log.Printf("gpuworker: sending hello failed: %v", err)
 		}
 	}
+
+	// Report memory/hardware info once up front so the batch job can size
+	// MarginsChunked's per-tile budget against this box's actual RAM
+	// instead of a fixed guess (see gpujob.Hello), then keep re-sending it
+	// every helloInterval for as long as the connection stays up so the
+	// analytics memory graph and hardware panel don't go stale on a
+	// long-lived connection. Stopped via done when this connection ends.
+	sendHello()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(helloInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sendHello()
+			case <-done:
+				return
+			}
+		}
+	}()
 
 	for {
 		msgType, data, err := conn.ReadMessage()
@@ -143,21 +196,21 @@ func runConnection(wsURL, token, cacheDir string, be *gpucompute.Backend, httpCl
 		}
 		log.Printf("gpuworker: job %s: %dx%d, %d sites, DEM zoom %d", job.ID, job.ImageWidth, job.ImageHeight, len(job.Sites), job.DemZoom)
 
-		margins, jobErr := processJob(be, cacheDir, httpClient, job, conn)
+		margins, jobErr := processJob(be, &writeMu, cacheDir, httpClient, job, conn)
 		if jobErr != nil {
 			log.Printf("gpuworker: job %s failed: %v", job.ID, jobErr)
 			resultBody, _ := json.Marshal(gpujob.Result{Kind: gpujob.KindResult, ID: job.ID, Error: jobErr.Error()})
-			if err := conn.WriteMessage(websocket.TextMessage, resultBody); err != nil {
+			if err := writeMessage(conn, &writeMu, websocket.TextMessage, resultBody); err != nil {
 				return err
 			}
 			continue
 		}
 
 		resultBody, _ := json.Marshal(gpujob.Result{Kind: gpujob.KindResult, ID: job.ID})
-		if err := conn.WriteMessage(websocket.TextMessage, resultBody); err != nil {
+		if err := writeMessage(conn, &writeMu, websocket.TextMessage, resultBody); err != nil {
 			return err
 		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, margins); err != nil {
+		if err := writeMessage(conn, &writeMu, websocket.BinaryMessage, margins); err != nil {
 			return err
 		}
 		log.Printf("gpuworker: job %s done", job.ID)

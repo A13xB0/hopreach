@@ -443,6 +443,14 @@ rather than waiting for the first (slow) run to finish, so the frontend can
 poll this file and show a live progress bar with a per-stage ETA and
 backend label; it auto-reloads the map data once a run completes.
 
+A separate `/analytics` page (linked from the map's attribution bar) shows
+run history (duration, success/failure, which backend served each tier),
+available-memory-over-time for both boxes, each box's hardware, and
+shared-plan counts over time — all served from small append-only JSON logs
+next to `data/`. Deliberately excludes anything that could identify a
+visitor: no IP addresses, no user agents, nothing beyond this deployment's
+own infrastructure and anonymous counts.
+
 ## WASM shared core
 
 `internal/propagation` (the link-budget/knife-edge-diffraction physics) and

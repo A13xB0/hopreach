@@ -95,7 +95,7 @@
   // loadMeta() once meta.json's own Version field is known — always
   // obvious at a glance which release actually generated what's on screen.
   map.attributionControl.addAttribution(
-    '<a href="https://github.com/A13xB0/hopreach" target="_blank" rel="noopener">HopReach on GitHub</a> <span id="version-tag"></span>'
+    '<a href="https://github.com/A13xB0/hopreach" target="_blank" rel="noopener">HopReach on GitHub</a> <span id="version-tag"></span> · <a href="analytics.html">Analytics</a>'
   );
 
   const statusColor = { active: "#4ade80", degraded: "#facc15", silent: "#64748b" };

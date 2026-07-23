@@ -52,6 +52,14 @@ server {
         proxy_pass http://127.0.0.1:8081;
     }
 
+    # Analytics data behind the /analytics page — see cmd/hopreach-shareapi's
+    # handleAnalytics. Public and unauthenticated: contains no IP addresses,
+    # user agents, or any other visitor-identifying data, only aggregate
+    # run/hardware/memory history about this deployment's own infrastructure.
+    location /api/analytics {
+        proxy_pass http://127.0.0.1:8081;
+    }
+
     # Remote GPU worker WebSocket endpoint (cmd/hopreach-shareapi's
     # gpubroker routes) — the one part of that process that genuinely
     # needs to be reachable from outside this host, since the worker runs

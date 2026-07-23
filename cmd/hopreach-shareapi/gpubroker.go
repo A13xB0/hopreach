@@ -40,12 +40,12 @@ type gpuJobResult struct {
 type jobProgress struct{ done, total int }
 
 type gpuBroker struct {
-	mu             sync.Mutex
-	conn           *websocket.Conn
-	writeMu        sync.Mutex // serializes writes to conn, separate from mu so a slow write doesn't block status/pending bookkeeping
-	pending        map[string]chan gpuJobResult
-	progress       map[string]jobProgress // updated as Progress frames arrive, read by /gpu/progress; cleared once a job is delivered
-	availableBytes uint64                 // 0 = unknown, either never reported or the current worker predates Hello — see setAvailableBytes
+	mu       sync.Mutex
+	conn     *websocket.Conn
+	writeMu  sync.Mutex // serializes writes to conn, separate from mu so a slow write doesn't block status/pending bookkeeping
+	pending  map[string]chan gpuJobResult
+	progress map[string]jobProgress // updated as Progress frames arrive, read by /gpu/progress; cleared once a job is delivered
+	hello    gpujob.Hello           // zero value = unknown, either never reported or the current worker predates Hello — see setHello
 }
 
 var broker = &gpuBroker{
@@ -83,23 +83,31 @@ func (b *gpuBroker) setConn(c *websocket.Conn) (old *websocket.Conn) {
 	// longer trustworthy — a replacement worker could be a different box
 	// entirely, and no connection at all means no worker to size tiles
 	// against. The new connection's own Hello (if any) will set this again.
-	b.availableBytes = 0
+	b.hello = gpujob.Hello{}
 	return old
 }
 
-// setAvailableBytes records the worker's self-reported available memory
-// (see gpujob.Hello) — read by handleGPUStatus, and from there by
-// compute.Engine's chunk-budget auto-sizing.
-func (b *gpuBroker) setAvailableBytes(n uint64) {
+// setHello records the worker's self-reported memory/hardware info (see
+// gpujob.Hello), sent once on connect and then repeated periodically as a
+// heartbeat — read by handleGPUStatus (and from there by compute.Engine's
+// chunk-budget auto-sizing) and by the analytics endpoint's hardware panel
+// and memory-sample collection.
+func (b *gpuBroker) setHello(h gpujob.Hello) {
 	b.mu.Lock()
-	b.availableBytes = n
+	b.hello = h
 	b.mu.Unlock()
+}
+
+func (b *gpuBroker) getHello() gpujob.Hello {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hello
 }
 
 func (b *gpuBroker) getAvailableBytes() uint64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.availableBytes
+	return b.hello.AvailableBytes
 }
 
 // failAllPending is called when the worker connection is lost — any job
@@ -232,8 +240,8 @@ func (b *gpuBroker) readLoop(conn *websocket.Conn) {
 				log.Printf("gpubroker: malformed hello frame from worker: %v", err)
 				continue
 			}
-			b.setAvailableBytes(h.AvailableBytes)
-			log.Printf("gpubroker: worker reports %.1fGB available memory", float64(h.AvailableBytes)/1e9)
+			b.setHello(h)
+			recordGPUWorkerHardware(h)
 			continue
 		}
 
@@ -343,14 +351,20 @@ func handleGPUProgress(w http.ResponseWriter, r *http.Request) {
 // handleGPUStatus reports whether a worker is currently connected — used
 // both by the remote-dispatch path (skip the doomed /gpu/submit call
 // entirely if nothing's connected) and the per-tier GPU-gating check in
-// main.go (decide whether to attempt a gated tier at all). available_bytes
-// is the connected worker's self-reported available memory (see
-// gpujob.Hello), 0 if unknown (no worker connected, or a worker that
-// predates Hello) — read by compute.Engine's chunk-budget auto-sizing.
+// main.go (decide whether to attempt a gated tier at all). The remaining
+// fields are the connected worker's self-reported memory/hardware info (see
+// gpujob.Hello), zero-valued if unknown (no worker connected, or a worker
+// that predates Hello) — available_bytes specifically is read by
+// compute.Engine's chunk-budget auto-sizing, the rest by the analytics
+// endpoint's hardware panel.
 func handleGPUStatus(w http.ResponseWriter, r *http.Request) {
+	h := broker.getHello()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"worker_connected": broker.connected(),
-		"available_bytes":  broker.getAvailableBytes(),
+		"available_bytes":  h.AvailableBytes,
+		"total_bytes":      h.TotalBytes,
+		"cpu_model":        h.CPUModel,
+		"gpu_adapter":      h.GPUAdapter,
 	})
 }

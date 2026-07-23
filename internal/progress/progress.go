@@ -64,6 +64,20 @@ func (w *Writer) SetBackend(b string) {
 	w.mu.Unlock()
 }
 
+// LastBackend returns whichever backend was last reported via SetBackend —
+// read by cmd/hopreach right after a tier's raster finishes, to record
+// which backend served it in the analytics run history. For a chunked tier
+// (Precision/Calibrated Precision) individual tiles can fall back between
+// backends, so this reports whichever was reported *last*, a reasonable
+// "what actually served most of this tier" approximation rather than a
+// precise per-tile breakdown — the same simplification the live progress
+// bar itself already makes.
+func (w *Writer) LastBackend() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.currentBackend
+}
+
 // Update writes the current progress, including an ETA for the current
 // stage. The ETA uses an exponentially-weighted recent rate sampled at
 // most every minSampleInterval, rather than a cumulative since-stage-start

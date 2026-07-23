@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"hopreach/internal/gpujob"
+)
 
 func TestBrokerProgressTracking(t *testing.T) {
 	b := &gpuBroker{
@@ -69,9 +73,9 @@ func TestBrokerAvailableBytesResetsOnNewConnection(t *testing.T) {
 		t.Fatalf("getAvailableBytes() on a fresh broker = %d, want 0 (unknown)", got)
 	}
 
-	b.setAvailableBytes(4_700_000_000)
+	b.setHello(gpujob.Hello{AvailableBytes: 4_700_000_000})
 	if got := b.getAvailableBytes(); got != 4_700_000_000 {
-		t.Fatalf("getAvailableBytes() after setAvailableBytes = %d, want 4700000000", got)
+		t.Fatalf("getAvailableBytes() after setHello = %d, want 4700000000", got)
 	}
 
 	// A new connection (setConn) — whether it's the same worker

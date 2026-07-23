@@ -1,0 +1,127 @@
+/* style.css's #app assumes the map page's fixed-viewport layout (height:
+   100%, children internally scrolling) — this page is a normal scrolling
+   document instead, so let it grow with its content rather than clipping
+   an-content to whatever's left of the viewport. */
+#app {
+  height: auto;
+  min-height: 100%;
+}
+
+#an-content {
+  padding: 1.25rem;
+  display: grid;
+  gap: 1rem;
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+#an-top-stats {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: right;
+}
+
+.an-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+.an-card h2 {
+  margin: 0 0 0.75rem 0;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.an-empty {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.an-chart {
+  overflow-x: auto;
+}
+
+.an-chart svg {
+  display: block;
+  max-width: 100%;
+}
+
+.an-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.an-table th, .an-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.an-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.an-summary-row {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.an-summary-row div {
+  color: var(--text-muted);
+}
+
+.an-summary-row strong {
+  color: var(--text);
+  font-size: 1.1rem;
+  display: block;
+}
+
+.an-legend {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.an-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.an-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.an-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+}
+
+#an-back {
+  display: block;
+  text-align: center;
+  padding: 0.75rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-top: 1px solid var(--border);
+}
+
+#an-back:hover {
+  color: var(--text);
+}

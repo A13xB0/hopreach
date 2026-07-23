@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"hopreach/internal/analytics"
 	"hopreach/internal/buildinfo"
 	"hopreach/internal/calibration"
 	"hopreach/internal/compute"
@@ -20,6 +21,7 @@ import (
 	"hopreach/internal/geo"
 	"hopreach/internal/progress"
 	"hopreach/internal/propagation"
+	"hopreach/internal/sysinfo"
 )
 
 // selectRepeaters keeps nodes that have coordinates, fall within the
@@ -92,8 +94,61 @@ func cleanStaleGridScratch(demCacheDir string) {
 	}
 }
 
-func run(cfg appConfig) error {
+// recordLocalHardwareInfo records this box's static specs (CPU model, total
+// RAM, and — if engine picked up a usable local GPU during Setup — its
+// adapter string) for the analytics page's hardware panel. Recorded once per
+// run rather than continuously: hardware doesn't change underneath a live
+// deployment, so the analytics endpoint just needs whatever was recorded
+// most recently. Uses analytics.Append with maxLines=1 (rather than a plain
+// overwrite) purely to reuse the existing tmp-then-rename-safe write path —
+// only ever one entry is kept. Best-effort: failures are logged, never fatal
+// to the run itself.
+func recordLocalHardwareInfo(outputDir string, engine *compute.Engine) {
+	info := analytics.HardwareInfo{Box: "website", GPUAdapter: engine.LocalAdapterID()}
+	if v, err := sysinfo.CPUModel(); err == nil {
+		info.CPUModel = v
+	}
+	if v, err := sysinfo.TotalMemoryBytes(); err == nil {
+		info.TotalBytes = v
+	}
+	path := filepath.Join(outputDir, "..", "analytics", "hardware_website.jsonl")
+	if err := analytics.Append(path, info, 1); err != nil {
+		log.Printf("analytics: could not record hardware info: %v", err)
+	}
+}
+
+func run(cfg appConfig) (err error) {
 	ctx := context.Background()
+	startedAt := time.Now()
+	var tierRecords []analytics.TierRecord
+	didRun := false // set true only once past the "nothing to do yet" skip check — that path isn't a real run worth recording
+
+	// Records this run's outcome (success or failure, whichever return
+	// path fired) to analytics/runs.jsonl — a defer with a named return so
+	// every one of run()'s several early-return points is covered by one
+	// recording site instead of needing its own. Best-effort: a failure to
+	// record analytics is logged, never allowed to mask or replace the
+	// real return error from run() itself.
+	defer func() {
+		if !didRun {
+			return
+		}
+		rec := analytics.RunRecord{
+			StartedAt:  startedAt,
+			FinishedAt: time.Now(),
+			DurationS:  time.Since(startedAt).Seconds(),
+			Success:    err == nil,
+			Version:    buildinfo.Version,
+			Tiers:      tierRecords,
+		}
+		if err != nil {
+			rec.Error = err.Error()
+		}
+		runsPath := filepath.Join(cfg.outputDir, "..", "analytics", "runs.jsonl")
+		if aerr := analytics.Append(runsPath, rec, 2000); aerr != nil {
+			log.Printf("analytics: could not record run history: %v", aerr)
+		}
+	}()
 
 	// Always safe here, even before deciding whether a real pass is due:
 	// the cross-process lock (see lock.go, held by the caller for the
@@ -115,6 +170,7 @@ func run(cfg appConfig) error {
 			}
 		}
 	}
+	didRun = true
 
 	engine := compute.New()
 	engine.Setup(cfg.gpuMode)
@@ -122,6 +178,7 @@ func run(cfg appConfig) error {
 	if cfg.coveragePrecisionChunkBudgetMB > 0 {
 		engine.SetChunkBudgetBytes(float64(cfg.coveragePrecisionChunkBudgetMB) * 1_000_000)
 	}
+	recordLocalHardwareInfo(cfg.outputDir, engine)
 
 	httpClient := &http.Client{Timeout: cfg.timeout}
 	if err := os.MkdirAll(cfg.outputDir, 0o755); err != nil {
@@ -232,16 +289,22 @@ func run(cfg appConfig) error {
 		RepeatersInRegion:     len(features),
 		Counts:                counts,
 		Version:               buildinfo.Version,
+		// Seeded from whatever the last run wrote (nil on a genuine first
+		// run) so meta.json keeps showing real, servable coverage for the
+		// whole time this run is still computing its own — each tier below
+		// only overwrites its own entry once it's actually ready, so a
+		// tier this run skips (GPU-gated and unavailable, say) or hasn't
+		// gotten to yet still shows its last known-good tiles instead of
+		// briefly vanishing for anyone loading the page mid-run.
+		Coverage: previousCoverage(cfg.outputDir),
 	}
 	metaPath := filepath.Join(cfg.outputDir, "meta.json")
 	writeMeta := func() error {
 		return writeJSONFile(metaPath, m)
 	}
-	// Written now (coverage still nil at this point for a first-ever run,
-	// or still describing the *previous* run's tiles otherwise) so the
-	// repeater list and its calibration data show up immediately, without
-	// waiting for any coverage tier — the tiers below each rewrite this
-	// same file as soon as they're individually ready.
+	// Written now so the repeater list and its calibration data show up
+	// immediately, without waiting for any coverage tier — the tiers below
+	// each rewrite this same file as soon as they're individually ready.
 	if err := writeMeta(); err != nil {
 		prog.Update("error", 0, 0, err.Error())
 		return fmt.Errorf("writing %s: %w", metaPath, err)
@@ -268,8 +331,21 @@ func run(cfg appConfig) error {
 		return writeMeta()
 	}
 
+	// recordTier appends one tier's timing/backend to the analytics run
+	// record — called only for a tier that actually computed (not one
+	// skipped by GPU gating, which has no meaningful backend/duration of
+	// its own to report).
+	recordTier := func(name string, start time.Time) {
+		tierRecords = append(tierRecords, analytics.TierRecord{
+			Name:      name,
+			Backend:   prog.LastBackend(),
+			DurationS: time.Since(start).Seconds(),
+		})
+	}
+
 	if haveBounds {
 		if !cfg.standardRequiresGPU || engine.Available() {
+			tierStart := time.Now()
 			prog.Update("computing_coverage", 0, 1, "Computing terrain-aware coverage")
 			raster := coverage.Raster(engine, grid, sites, bounds, cfg.coverageImageWidth, cfg.propagation, cfg.coverageMaxAlpha,
 				func(done, total int) {
@@ -282,6 +358,7 @@ func run(cfg appConfig) error {
 				prog.Update("error", 0, 0, err.Error())
 				return err
 			}
+			recordTier("standard", tierStart)
 		} else {
 			log.Printf("coverage: coverage.standard_requires_gpu=true but no GPU (local or remote) is available — skipping standard coverage raster")
 		}
@@ -293,6 +370,7 @@ func run(cfg appConfig) error {
 		// the raster itself (which goes through engine.Margins/GPU) is
 		// gated.
 		if !cfg.calibratedRequiresGPU || engine.Available() {
+			tierStart := time.Now()
 			prog.Update("computing_coverage_calibrated", 0, 1, "Computing coverage from calibrated positions")
 			calibratedRaster := coverage.Raster(engine, grid, calibratedSites, bounds, cfg.coverageImageWidth, cfg.propagation, cfg.coverageMaxAlpha,
 				func(done, total int) {
@@ -305,6 +383,7 @@ func run(cfg appConfig) error {
 				prog.Update("error", 0, 0, err.Error())
 				return err
 			}
+			recordTier("calibrated", tierStart)
 		} else {
 			log.Printf("coverage: coverage.calibrated_requires_gpu=true but no GPU (local or remote) is available — skipping calibrated coverage raster")
 		}
@@ -350,6 +429,7 @@ func run(cfg appConfig) error {
 			}
 
 			if precisionAllowed {
+				tierStart := time.Now()
 				precisionSites := make([]propagation.Site, len(selected))
 				for i, n := range selected {
 					groundM := siteGrid.At(*n.Lat, *n.Lon)
@@ -378,9 +458,11 @@ func run(cfg appConfig) error {
 					prog.Update("error", 0, 0, err.Error())
 					return err
 				}
+				recordTier("precision", tierStart)
 			}
 
 			if calibratedPrecisionAllowed {
+				tierStart := time.Now()
 				precisionCalibratedSites := make([]propagation.Site, len(selected))
 				for i := range selected {
 					groundM := siteGrid.At(calibratedSites[i].Lat, calibratedSites[i].Lon)
@@ -408,6 +490,7 @@ func run(cfg appConfig) error {
 					prog.Update("error", 0, 0, err.Error())
 					return err
 				}
+				recordTier("calibrated_precision", tierStart)
 			} else {
 				siteGrid.Close()
 			}
