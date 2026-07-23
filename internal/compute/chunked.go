@@ -194,11 +194,37 @@ type tile struct {
 	loadBounds          propagation.Bounds
 }
 
+// maxPlanTiles bounds how many tiles planTiles will ever actually build,
+// independent of budgetBytes' own per-tile sizing target — the regression
+// test/fix for a real production OOM. The per-tile budget can't always be
+// satisfied by splitting alone: a tile's *padding* (rangeKm on every edge,
+// mandatory for correctness near any tile boundary — see padBounds) stays
+// roughly constant in real terrain-tile terms as a tile shrinks, while only
+// its own content shrinks, so footprint approaches a floor no amount of
+// splitting can get under — confirmed in production at zoom 13 with a
+// ~78km range, that floor is itself ~4,200 DEM tiles' worth (~1.1GB), which
+// can easily be *larger* than a legitimately tiny auto-sized local budget
+// (a box with little real headroom auto-sizes down toward
+// minAutoChunkBudgetBytes, a few hundred MB). Without this cap, the growth
+// loop below — unable to ever satisfy an unreachable budget — keeps
+// growing tile counts every iteration with nothing to stop it short of the
+// absolute per-axis maximum (one tile per output pixel), and the resulting
+// buildTiles call is a single make([]tile, ...) sized by the *product* of
+// both axes: tens of millions of tile structs, an instant OOM entirely
+// separate from (and unprotected by) the per-tile memory budget this whole
+// file exists to enforce. Bounded here instead: once a few thousand tiles
+// still aren't enough, accept that each one will end up somewhat over the
+// nominal per-tile target rather than let the tile *count* explode — a
+// bounded overage on a bounded number of tiles is safe; an unbounded count
+// is not, no matter how small each individual tile nominally is.
+const maxPlanTiles = 4000
+
 // planTiles splits bounds into a 2D grid of geographic tiles, each sized so
 // its own padded elevation grid (loadBounds) stays around budgetBytes at
-// zoom (see Engine.effectiveChunkBudgetBytes for how a caller picks that).
-// supersample must evenly divide imageWidth/imageHeight (1 means no
-// downsampling at all, the common case) — see buildTiles for why.
+// zoom (see Engine.effectiveChunkBudgetBytes for how a caller picks that;
+// see maxPlanTiles for why that target isn't always reachable). supersample
+// must evenly divide imageWidth/imageHeight (1 means no downsampling at
+// all, the common case) — see buildTiles for why.
 //
 // Both axes are chunked, not just latitude: for a propagation range that's
 // a meaningful fraction of the region's own size (a realistic MeshCore
@@ -238,6 +264,7 @@ func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int,
 	}
 	numRowTiles := clampTileCount(int(math.Ceil(totalHeightDeg/sideDeg)), maxRowTiles)
 	numColTiles := clampTileCount(int(math.Ceil(totalWidthDeg/sideDeg)), maxColTiles)
+	numRowTiles, numColTiles = clampTileProduct(numRowTiles, numColTiles, maxPlanTiles)
 
 	// Verify against the real (Mercator) tile math and grow both axes
 	// together by whatever factor the worst *actual* tile is still over
@@ -263,12 +290,14 @@ func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int,
 		if maxFootprint <= tilesPerChunkBudget {
 			return candidates
 		}
-		if numRowTiles >= maxRowTiles && numColTiles >= maxColTiles {
-			return candidates // can't split any finer without violating the supersample-alignment invariant above
+		reachedTileCap := numRowTiles*numColTiles >= maxPlanTiles
+		if (numRowTiles >= maxRowTiles && numColTiles >= maxColTiles) || reachedTileCap {
+			return candidates // can't split any finer without violating the supersample-alignment invariant above, or would exceed maxPlanTiles
 		}
 		growth := math.Sqrt(maxFootprint / tilesPerChunkBudget)
 		numRowTiles = clampTileCount(int(math.Ceil(float64(numRowTiles)*growth)), maxRowTiles)
 		numColTiles = clampTileCount(int(math.Ceil(float64(numColTiles)*growth)), maxColTiles)
+		numRowTiles, numColTiles = clampTileProduct(numRowTiles, numColTiles, maxPlanTiles)
 	}
 	return buildTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, numRowTiles, numColTiles, supersample)
 }
@@ -343,6 +372,26 @@ func clampTileCount(n, maxDim int) int {
 		return maxDim // never split finer than one output row/column per tile
 	}
 	return n
+}
+
+// clampTileProduct scales rowTiles/colTiles down together, preserving their
+// aspect ratio, so their product never exceeds maxProduct — see
+// maxPlanTiles for why this exists (a per-axis cap alone doesn't bound the
+// *product*, which is what buildTiles actually allocates on).
+func clampTileProduct(rowTiles, colTiles, maxProduct int) (int, int) {
+	if rowTiles*colTiles <= maxProduct {
+		return rowTiles, colTiles
+	}
+	scale := math.Sqrt(float64(maxProduct) / float64(rowTiles*colTiles))
+	r := int(float64(rowTiles) * scale)
+	c := int(float64(colTiles) * scale)
+	if r < 1 {
+		r = 1
+	}
+	if c < 1 {
+		c = 1
+	}
+	return r, c
 }
 
 // sitesNear returns the subset of sites within rangeKm of bounds — a tile
@@ -497,11 +546,14 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 
 	outWidth, outHeight := imageWidth/supersample, imageHeight/supersample
 
-	// Temporary diagnostic logging: a real production OOM recurred here
-	// twice after two separate fixes that each looked sufficient on paper
-	// (shrinking the whole-pass buffer to served resolution, then setting
-	// GOMEMLIMIT), so this traces the actual real numbers from a live,
-	// failing process rather than guessing further from static analysis.
+	// One line per tier logged unconditionally (cheap — once per call, not
+	// once per tile): tile count and the planned budget are exactly the
+	// numbers that would have caught a real production OOM immediately —
+	// planTiles kept growing tile counts trying to satisfy a budget smaller
+	// than the mandatory padding floor could ever reach, right up to tens
+	// of millions of tiles, before maxPlanTiles capped it. Worth keeping
+	// permanently for the same reason: cheap, and the first thing worth
+	// checking if a future pass is unexpectedly slow or memory-hungry.
 	if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
 		log.Printf("chunked margins: %d tiles planned (budget=%.0fMB, out=%dx%d=%.0fMB), %.0fMB available before allocating out",
 			len(tiles), budgetBytes/1e6, outWidth, outHeight, float64(outWidth*outHeight*4)/1e6, float64(avail)/1e6)
@@ -590,11 +642,6 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 		base := doneWork
 		colCount := tl.colCount
 		sitesForWeight := wt.weight / (tl.rowCount * colCount) // == max(1, len(tileSites)), recovered rather than recomputed
-		// Temporary diagnostic logging — see the log call after planTiles above.
-		if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
-			log.Printf("chunked margins: tile %d/%d: %dx%d compute px, %d sites, %.0fMB available before Margins()",
-				i+1, len(tiles), colCount, tl.rowCount, len(tileSites), float64(avail)/1e6)
-		}
 		tileMargins := e.Margins(grid, tileSites, tl.outputBounds, colCount, tl.rowCount, rangeKm, p, func(done, total int) {
 			if progress != nil {
 				// done/total from Margins are rows within this tile;
@@ -605,9 +652,6 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 			}
 		})
 		grid.Close()
-		if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
-			log.Printf("chunked margins: tile %d/%d: %.0fMB available after Margins(), before downsample+copy", i+1, len(tiles), float64(avail)/1e6)
-		}
 
 		// Downsampled right here, per tile, at (at most) a few tens of MB —
 		// never the whole region at once — before ever touching out. Tile

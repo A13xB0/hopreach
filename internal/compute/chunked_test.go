@@ -72,6 +72,55 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 	}
 }
 
+// TestPlanTilesCapsTileCountWhenBudgetUnreachable is the regression test
+// for a real production OOM: a legitimately tiny auto-sized local budget
+// (a box with little real headroom auto-sizes down toward
+// minAutoChunkBudgetBytes, a few hundred MB) can be *smaller* than the
+// mandatory padding floor a tile can't shrink below (confirmed in
+// production: ~1.1GB at zoom 13 with a ~78km range) — so the per-tile
+// budget can never be satisfied no matter how many times a tile is split,
+// and without a hard cap, the growth loop keeps splitting every iteration
+// with nothing to stop it short of the absolute per-axis maximum (one tile
+// per output pixel). buildTiles then allocates a single slice sized by the
+// *product* of both axes — confirmed to reach tens of millions of tile
+// structs in this exact scenario, an instant OOM entirely separate from
+// (and unprotected by) the per-tile memory budget this file exists to
+// enforce.
+func TestPlanTilesCapsTileCountWhenBudgetUnreachable(t *testing.T) {
+	// Real Scotland-at-zoom-13-with-78km-range dimensions and budget — this
+	// exact combination reached tens of millions of planned tiles in
+	// production before this cap existed.
+	const imageWidth, imageHeight = 12000, 24248
+	const tinyBudgetBytes = 300_000_000 // minAutoChunkBudgetBytes — smaller than the ~1.1GB mandatory padding floor
+	bounds := propagation.Bounds{South: 54.5, North: 60.9, West: -8.7, East: -0.7}
+
+	tiles := planTiles(bounds, 13, imageWidth, imageHeight, 78, tinyBudgetBytes, 1)
+
+	if len(tiles) > maxPlanTiles {
+		t.Fatalf("planTiles returned %d tiles, want at most maxPlanTiles (%d) — an unreachable budget must cap the tile *count*, not just each tile's own nominal size", len(tiles), maxPlanTiles)
+	}
+	if len(tiles) < 2 {
+		t.Fatalf("expected multiple tiles (a tiny budget should still split some), got %d", len(tiles))
+	}
+
+	// Every output pixel must still be covered by exactly one tile, same
+	// invariant as the unclamped case — capping the count must not leave
+	// gaps or overlaps in the output raster.
+	totalPixels := 0
+	for i, tl := range tiles {
+		if tl.rowOffset < 0 || tl.rowOffset+tl.rowCount > imageHeight {
+			t.Fatalf("tile %d: rows [%d,%d) out of [0,%d)", i, tl.rowOffset, tl.rowOffset+tl.rowCount, imageHeight)
+		}
+		if tl.colOffset < 0 || tl.colOffset+tl.colCount > imageWidth {
+			t.Fatalf("tile %d: cols [%d,%d) out of [0,%d)", i, tl.colOffset, tl.colOffset+tl.colCount, imageWidth)
+		}
+		totalPixels += tl.rowCount * tl.colCount
+	}
+	if totalPixels != imageWidth*imageHeight {
+		t.Fatalf("tiles cover %d pixels total, want %d", totalPixels, imageWidth*imageHeight)
+	}
+}
+
 func TestPlanTilesSmallRegionStaysOneTile(t *testing.T) {
 	bounds := propagation.Bounds{South: 56.0, North: 56.1, West: -4.3, East: -4.1}
 	tiles := planTiles(bounds, 11, 40, 40, 5, 1_400_000_000, 1)
