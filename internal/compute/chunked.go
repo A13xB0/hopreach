@@ -97,6 +97,17 @@ func (e *Engine) localChunkBudgetBytes() float64 {
 	return float64(defaultChunkGridBudgetBytes)
 }
 
+// remoteBudgetExtraSafetyDivisor further shrinks remoteChunkBudgetBytes'
+// output on top of budgetFromAvailable's own reserve/divisor — because
+// budgetFromAvailable only reasons about the terrain grid, but the remote
+// worker's real per-job footprint for one geographic tile also includes a
+// GPU-side staging copy of that grid *and* the full compute-resolution
+// output margins array, both roughly grid-sized for the tiles this project
+// plans. Confirmed via systemd's own peak-memory accounting in production:
+// a tile planned against the raw (undivided) remote budget OOM-killed the
+// worker, with its real peak landing around 2.4x that nominal figure.
+const remoteBudgetExtraSafetyDivisor = 1.8
+
 // remoteChunkBudgetBytes is a connected remote worker's own per-tile memory
 // budget, 0 if no worker is connected or its available memory is unknown
 // (predates gpujob.Hello) — callers should treat 0 as "not usable for
@@ -106,38 +117,27 @@ func (e *Engine) remoteChunkBudgetBytes() float64 {
 	if !connected || remoteAvail == 0 {
 		return 0
 	}
-	return budgetFromAvailable(remoteAvail)
+	return budgetFromAvailable(remoteAvail) / remoteBudgetExtraSafetyDivisor
 }
 
 // planningChunkBudgetBytes picks the budget MarginsChunked plans tile sizes
 // against: an explicit override (SetChunkBudgetBytes) always wins;
-// otherwise the *smaller* of this box's own budget and a connected remote
-// worker's — deliberately not just the remote worker's own (typically much
-// larger) budget, even though a connected worker serves the vast majority
-// of tiles and never needs this box's own memory for them (see
-// computeTile's stub-grid path): tried planning for remote alone in
-// production and it traded one real problem for another — the remote
-// worker's own per-job footprint for one such larger tile (terrain grid +
-// its GPU-side staging copy + the full compute-resolution output array,
-// not just the grid alone that remoteChunkBudgetBytes' own budget targets)
-// OOM-killed *it* instead, confirmed via systemd's own peak-memory
-// accounting landing around 2.4x the nominal per-tile budget. Smaller,
-// more numerous tiles cost more dispatch round trips (confirmed
-// acceptable: well under the interval before the next scheduled
-// recompute), which is a real but bounded and known-safe cost, unlike an
-// intermittent worker crash. A tile that still can't reach the remote
-// worker re-splits itself further down to localChunkBudgetBytes right at
-// that point — see computeTileLocal.
+// otherwise the remote worker's own budget when one is connected, since it
+// serves the vast majority of tiles and never needs this box's own memory
+// for them at all (see computeTile's stub-grid path) — sizing every tile
+// down to this box's own (typically much smaller) budget "just in case"
+// costs real, confirmed-unacceptable dispatch overhead (thousands of tiny
+// tiles instead of a few dozen). A tile that can't actually reach the
+// remote worker re-splits itself down to localChunkBudgetBytes right at
+// that point instead — see computeTileLocal.
 func (e *Engine) planningChunkBudgetBytes() float64 {
 	if e.chunkBudgetBytes > 0 {
 		return e.chunkBudgetBytes
 	}
-	localBudget := e.localChunkBudgetBytes()
-	remoteBudget := e.remoteChunkBudgetBytes()
-	if remoteBudget > 0 && remoteBudget < localBudget {
+	if remoteBudget := e.remoteChunkBudgetBytes(); remoteBudget > 0 {
 		return remoteBudget
 	}
-	return localBudget
+	return e.localChunkBudgetBytes()
 }
 
 // demTileBytes is one decoded 256x256 terrarium tile's footprint in the
