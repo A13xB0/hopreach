@@ -2,6 +2,7 @@ package compute
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"runtime"
@@ -491,9 +492,23 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 	if supersample < 1 {
 		supersample = 1
 	}
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, e.effectiveChunkBudgetBytes(), supersample)
+	budgetBytes := e.effectiveChunkBudgetBytes()
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, budgetBytes, supersample)
 
 	outWidth, outHeight := imageWidth/supersample, imageHeight/supersample
+
+	// Temporary diagnostic logging: a real production OOM recurred here
+	// twice after two separate fixes that each looked sufficient on paper
+	// (shrinking the whole-pass buffer to served resolution, then setting
+	// GOMEMLIMIT), so this traces the actual real numbers from a live,
+	// failing process rather than guessing further from static analysis.
+	if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
+		log.Printf("chunked margins: %d tiles planned (budget=%.0fMB, out=%dx%d=%.0fMB), %.0fMB available before allocating out",
+			len(tiles), budgetBytes/1e6, outWidth, outHeight, float64(outWidth*outHeight*4)/1e6, float64(avail)/1e6)
+	} else {
+		log.Printf("chunked margins: %d tiles planned (budget=%.0fMB, out=%dx%d=%.0fMB)",
+			len(tiles), budgetBytes/1e6, outWidth, outHeight, float64(outWidth*outHeight*4)/1e6)
+	}
 
 	// out is the one genuinely large, whole-pass-lifetime allocation this
 	// function makes — sized at *served* (post-downsample) resolution, not
@@ -575,6 +590,11 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 		base := doneWork
 		colCount := tl.colCount
 		sitesForWeight := wt.weight / (tl.rowCount * colCount) // == max(1, len(tileSites)), recovered rather than recomputed
+		// Temporary diagnostic logging — see the log call after planTiles above.
+		if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
+			log.Printf("chunked margins: tile %d/%d: %dx%d compute px, %d sites, %.0fMB available before Margins()",
+				i+1, len(tiles), colCount, tl.rowCount, len(tileSites), float64(avail)/1e6)
+		}
 		tileMargins := e.Margins(grid, tileSites, tl.outputBounds, colCount, tl.rowCount, rangeKm, p, func(done, total int) {
 			if progress != nil {
 				// done/total from Margins are rows within this tile;
@@ -585,6 +605,9 @@ func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, t
 			}
 		})
 		grid.Close()
+		if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
+			log.Printf("chunked margins: tile %d/%d: %.0fMB available after Margins(), before downsample+copy", i+1, len(tiles), float64(avail)/1e6)
+		}
 
 		// Downsampled right here, per tile, at (at most) a few tens of MB —
 		// never the whole region at once — before ever touching out. Tile
