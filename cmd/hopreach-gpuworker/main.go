@@ -25,6 +25,7 @@ import (
 	"hopreach/internal/gpucompute"
 	"hopreach/internal/gpujob"
 	"hopreach/internal/propagation"
+	"hopreach/internal/sysinfo"
 )
 
 func getEnv(key, fallback string) string {
@@ -108,6 +109,24 @@ func runConnection(wsURL, token, cacheDir string, be *gpucompute.Backend, httpCl
 	}
 	defer conn.Close()
 	log.Printf("gpuworker: connected to broker at %s", wsURL)
+
+	// Report available memory once up front so the batch job can size
+	// MarginsChunked's per-tile budget against this box's actual RAM
+	// instead of a fixed guess — see gpujob.Hello. Best-effort: if this
+	// box isn't Linux (sysinfo.AvailableMemoryBytes fails) or the send
+	// itself fails, AvailableBytes just stays 0/unknown and the batch job
+	// falls back to its own default, same as if this worker predated the
+	// Hello message entirely.
+	availableBytes, err := sysinfo.AvailableMemoryBytes()
+	if err != nil {
+		log.Printf("gpuworker: could not determine available memory (%v), reporting unknown", err)
+		availableBytes = 0
+	}
+	if helloBody, err := json.Marshal(gpujob.Hello{Kind: gpujob.KindHello, AvailableBytes: availableBytes}); err == nil {
+		if err := conn.WriteMessage(websocket.TextMessage, helloBody); err != nil {
+			log.Printf("gpuworker: sending hello failed: %v", err)
+		}
+	}
 
 	for {
 		msgType, data, err := conn.ReadMessage()

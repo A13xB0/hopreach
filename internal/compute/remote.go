@@ -25,21 +25,33 @@ func (e *Engine) remoteConfigured() bool {
 // needs to know before committing to a whole pass, not just after a submit
 // attempt already failed.
 func (e *Engine) remoteAvailable() bool {
+	connected, _ := e.remoteStatus()
+	return connected
+}
+
+// remoteStatus queries the broker's /gpu/status once, returning whether a
+// worker is connected and (if so) its self-reported available memory (see
+// gpujob.Hello) — split out from remoteAvailable so MarginsChunked's
+// chunk-budget auto-sizing can get both in one round trip instead of two.
+// AvailableBytes is 0 if no worker is connected or the connected one
+// predates Hello (unknown, not "zero RAM").
+func (e *Engine) remoteStatus() (connected bool, availableBytes uint64) {
 	if !e.remoteConfigured() {
-		return false
+		return false, 0
 	}
 	resp, err := http.Get(fmt.Sprintf("http://%s/gpu/status", e.brokerAddr))
 	if err != nil {
-		return false
+		return false, 0
 	}
 	defer resp.Body.Close()
 	var status struct {
-		WorkerConnected bool `json:"worker_connected"`
+		WorkerConnected bool   `json:"worker_connected"`
+		AvailableBytes  uint64 `json:"available_bytes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return false
+		return false, 0
 	}
-	return status.WorkerConnected
+	return status.WorkerConnected, status.AvailableBytes
 }
 
 func (e *Engine) nextJobID() string {

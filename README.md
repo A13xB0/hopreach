@@ -237,23 +237,26 @@ always uses CPU — zero risk, zero behaviour change.
 
 Measured on a mid-range discrete GPU (AMD RX 5700 XT): roughly 50x faster
 than CPU for the same raster, including at `coverage.precision_dem_zoom`'s
-full default (13) — a whole-Scotland elevation grid at that zoom is several
-GB, comfortably past WebGPU's own ~2GB single-buffer ceiling (an API/spec
-limit baked into `wgpu-native` even for this native, non-browser build —
-confirmed via `vulkaninfo` that the actual Vulkan device supports far more),
-so it's uploaded across multiple buffer bindings
-(`internal/gpucompute`) rather than avoiding the GPU for large grids. Two
-other real failure modes turned up and were fixed during development, both
-worth knowing about if you're tuning `coverage.precision_dem_zoom` /
-`coverage.precision_supersample` further: large dispatches are internally
-split into small row-chunks so a single GPU submission never runs long
-enough to trip the driver's own hang-detection watchdog (crossing that
-threshold aborts the whole process with an uncatchable native panic, not a
-normal Go error); and the elevation grid's scratch file must live on
-genuinely disk-backed storage (`terrain.dem_cache_dir`) rather than the OS
-default temp directory, which is `tmpfs` (RAM-backed) on some hosts and
-would silently defeat the point of memory-mapping a multi-GB grid in the
-first place.
+full default (13). A single geographic tile's elevation grid (see
+"Map detail" above) can still exceed WebGPU's own ~2GB single-buffer ceiling
+(an API/spec limit baked into `wgpu-native` even for this native,
+non-browser build — confirmed via `vulkaninfo` that the actual Vulkan
+device supports far more) depending on the auto-sized memory budget, so
+it's uploaded across multiple buffer bindings (`internal/gpucompute`)
+rather than avoiding the GPU for large tiles. A few other real failure
+modes turned up and were fixed during development, worth knowing about if
+you're tuning `coverage.precision_dem_zoom` / `coverage.precision_supersample`
+/ `coverage.precision_chunk_budget_mb` further: large dispatches are
+internally split into small row-chunks, scaled down further for a
+site-dense tile (the shader loops over every site for every pixel, so a
+cluster of repeaters costs far more per pixel than a sparse area), so a
+single GPU submission never runs long enough to trip the driver's own
+hang-detection watchdog (crossing that threshold aborts the whole process
+with an uncatchable native panic, not a normal Go error); and the
+elevation grid's scratch file must live on genuinely disk-backed storage
+(`terrain.dem_cache_dir`) rather than the OS default temp directory, which
+is `tmpfs` (RAM-backed) on some hosts and would silently defeat the point
+of memory-mapping a grid in the first place.
 
 The progress bar shows which backend actually served each coverage pass —
 `CPU`, `GPU`, or `Remote GPU` — so it's always visible at a glance whether a
@@ -490,11 +493,17 @@ tiles and are compute-only.
 
 The Precision elevation grid at the default zoom (13) needs ~22,700 tiles on
 first run for all of Scotland (a few GB on disk, cached in the
-`hopreach-dem-cache` volume afterwards) and is several GB in memory while in
-use — memory-mapped to a scratch file under that same volume rather than a
-plain heap allocation, so it degrades to slower (disk-paged) rather than
-crashing under memory pressure. `coverage.precision_dem_zoom` in
-`config.example.yaml` has reference points for lighter/heavier settings.
+`hopreach-dem-cache` volume afterwards). It's never all loaded into memory at
+once: Precision/Calibrated Precision are computed in geographic tiles, each
+loading only its own (much smaller) slice of that grid before moving on, sized
+to stay within a memory budget that auto-detects real available memory on
+whichever box actually loads a tile — this process's own, or a connected
+remote GPU worker's, whichever is smaller (a tile has to be safe for either,
+since a dropped remote connection falls back to computing locally
+mid-pass). `coverage.precision_chunk_budget_mb` in `config.example.yaml` can
+override that auto-sizing if it ever picks a value your setup doesn't like.
+`coverage.precision_dem_zoom` there also has reference points for
+lighter/heavier zoom settings.
 
 ## Configuration
 

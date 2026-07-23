@@ -51,3 +51,35 @@ func TestBrokerProgressTracking(t *testing.T) {
 		t.Error("expected progress entry to be cleared after failAllPending")
 	}
 }
+
+// TestBrokerAvailableBytesResetsOnNewConnection is the regression test for
+// a real correctness concern in the memory-auto-sizing feature: a worker's
+// self-reported available memory (gpujob.Hello) must not linger past that
+// specific connection, since a replacement worker connecting later could be
+// an entirely different box with different RAM — stale data here would
+// size tiles against the wrong box's memory, exactly the kind of mismatch
+// this feature exists to prevent.
+func TestBrokerAvailableBytesResetsOnNewConnection(t *testing.T) {
+	b := &gpuBroker{
+		pending:  make(map[string]chan gpuJobResult),
+		progress: make(map[string]jobProgress),
+	}
+
+	if got := b.getAvailableBytes(); got != 0 {
+		t.Fatalf("getAvailableBytes() on a fresh broker = %d, want 0 (unknown)", got)
+	}
+
+	b.setAvailableBytes(4_700_000_000)
+	if got := b.getAvailableBytes(); got != 4_700_000_000 {
+		t.Fatalf("getAvailableBytes() after setAvailableBytes = %d, want 4700000000", got)
+	}
+
+	// A new connection (setConn) — whether it's the same worker
+	// reconnecting or a genuinely different box — must not carry the old
+	// figure forward until (if ever) that new connection sends its own
+	// Hello.
+	b.setConn(nil)
+	if got := b.getAvailableBytes(); got != 0 {
+		t.Errorf("getAvailableBytes() after setConn = %d, want reset to 0 (unknown)", got)
+	}
+}

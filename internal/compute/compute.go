@@ -45,6 +45,11 @@ type Engine struct {
 	// current pass without needing the progress callback's own signature to
 	// carry that.
 	progress *progress.Writer
+
+	// chunkBudgetBytes overrides defaultChunkGridBudgetBytes for
+	// MarginsChunked — see SetChunkBudgetBytes. Zero (the default) means
+	// "use the built-in default".
+	chunkBudgetBytes float64
 }
 
 // New returns an unconfigured Engine. Call Setup (and optionally SetRemote,
@@ -66,6 +71,17 @@ func (e *Engine) SetProgress(w *progress.Writer) {
 func (e *Engine) SetRemote(brokerAddr, demTileURLBase string) {
 	e.brokerAddr = brokerAddr
 	e.demTileURLBase = demTileURLBase
+}
+
+// SetChunkBudgetBytes overrides MarginsChunked's automatic per-tile memory
+// budget sizing (see Engine.effectiveChunkBudgetBytes) with an explicit
+// value. Optional — bytes <= 0 (the zero value, i.e. never called) leaves
+// auto-sizing in effect, which is the right default for most deployments;
+// this exists for a deployment that needs to force a specific value (e.g.
+// a box whose real headroom isn't accurately reflected by available
+// memory alone), not as something every config needs to set.
+func (e *Engine) SetChunkBudgetBytes(bytes float64) {
+	e.chunkBudgetBytes = bytes
 }
 
 func (e *Engine) reportBackend(label string) {

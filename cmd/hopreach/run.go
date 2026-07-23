@@ -118,6 +118,9 @@ func run(cfg appConfig) error {
 	engine := compute.New()
 	engine.Setup(cfg.gpuMode)
 	engine.SetRemote(cfg.gpuBrokerAddr, cfg.demTileURLBase)
+	if cfg.coveragePrecisionChunkBudgetMB > 0 {
+		engine.SetChunkBudgetBytes(float64(cfg.coveragePrecisionChunkBudgetMB) * 1_000_000)
+	}
 
 	httpClient := &http.Client{Timeout: cfg.timeout}
 	if err := os.MkdirAll(cfg.outputDir, 0o755); err != nil {

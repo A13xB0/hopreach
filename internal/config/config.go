@@ -147,6 +147,16 @@ type CoverageConfig struct {
 	CalibratedRequiresGPU          bool `yaml:"calibrated_requires_gpu"`
 	PrecisionRequiresGPU           bool `yaml:"precision_requires_gpu"`
 	CalibratedPrecisionRequiresGPU bool `yaml:"calibrated_precision_requires_gpu"`
+
+	// PrecisionChunkBudgetMB overrides compute.Engine's automatic per-tile
+	// memory budget for the chunked Precision/Calibrated Precision tiers
+	// (see compute.Engine.SetChunkBudgetBytes) — normal deployments should
+	// leave this at 0 and let it auto-size from whichever box (this one, or
+	// a connected remote GPU worker) will actually load a tile's elevation
+	// grid, based on real available memory. Only worth setting if
+	// auto-sizing picks a value that doesn't suit a specific box for some
+	// reason auto-detection can't see.
+	PrecisionChunkBudgetMB int `yaml:"precision_chunk_budget_mb"`
 }
 
 // CalibrationConfig controls the position-calibration search — see
@@ -365,6 +375,9 @@ func (c Config) Validate() error {
 	}
 	if c.Coverage.PrecisionWidth <= 0 {
 		return fmt.Errorf("coverage.precision_width must be positive")
+	}
+	if c.Coverage.PrecisionChunkBudgetMB < 0 {
+		return fmt.Errorf("coverage.precision_chunk_budget_mb must not be negative (0 means auto-size)")
 	}
 	switch c.GPU.Mode {
 	case "auto", "cpu", "gpu":

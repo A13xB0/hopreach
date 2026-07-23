@@ -41,6 +41,13 @@ type appConfig struct {
 	coveragePrecisionSupersample int
 	coverageMaxAlpha             uint8
 
+	// coveragePrecisionChunkBudgetMB overrides compute.Engine's automatic
+	// per-tile memory budget for the chunked Precision/Calibrated Precision
+	// tiers — see compute.Engine.SetChunkBudgetBytes. 0 (the default) means
+	// "auto-size from real available memory", which is right for almost
+	// every deployment.
+	coveragePrecisionChunkBudgetMB int
+
 	// "auto" (default): use the GPU if a compatible Vulkan device is found
 	// and its output verifies against the CPU path, otherwise CPU. "cpu":
 	// skip the GPU probe entirely. "gpu": force GPU, hard error instead of
@@ -119,11 +126,12 @@ func toAppConfig(yc yconfig.Config) appConfig {
 			MarginGreenDB:   yc.Propagation.MarginGreenDB,
 		},
 
-		coverageImageWidth:           yc.Coverage.ImageWidth,
-		coveragePrecisionWidth:       yc.Coverage.PrecisionWidth,
-		coveragePrecisionDemZoom:     yc.Coverage.PrecisionDEMZoom,
-		coveragePrecisionSupersample: yc.Coverage.PrecisionSupersample,
-		coverageMaxAlpha:             uint8(yc.Coverage.MaxAlpha),
+		coverageImageWidth:             yc.Coverage.ImageWidth,
+		coveragePrecisionWidth:         yc.Coverage.PrecisionWidth,
+		coveragePrecisionDemZoom:       yc.Coverage.PrecisionDEMZoom,
+		coveragePrecisionSupersample:   yc.Coverage.PrecisionSupersample,
+		coverageMaxAlpha:               uint8(yc.Coverage.MaxAlpha),
+		coveragePrecisionChunkBudgetMB: yc.Coverage.PrecisionChunkBudgetMB,
 
 		gpuMode:       yc.GPU.Mode,
 		gpuBrokerAddr: yc.GPU.Remote.BrokerAddr,

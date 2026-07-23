@@ -8,38 +8,110 @@ import (
 
 	"hopreach/internal/demgrid"
 	"hopreach/internal/propagation"
+	"hopreach/internal/sysinfo"
 )
 
 // chunkGridBudgetBytes bounds how much elevation grid memory a single
 // geographic tile's demgrid.Load call is allowed to need — see
-// MarginsChunked. A whole-Scotland grid at the Precision tier's DEM zoom
-// runs into several GB loaded all at once, which is what OOM-killed the
-// remote GPU worker in production before this existed.
+// MarginsChunked and Engine.effectiveChunkBudgetBytes, which computes this
+// per pass rather than using one fixed value. A whole-Scotland grid at the
+// Precision tier's DEM zoom runs into several GB loaded all at once, which
+// is what OOM-killed the remote GPU worker in production before per-tile
+// chunking existed.
 //
-// 500MB was the original target, but at Scotland's latitude and a
-// realistic ~78km link-budget range, the *padding* a single tile needs
-// around its own edges (see padBounds) — required for correctness near any
-// tile boundary, not a tunable safety margin — already costs ~1.1GB on its
-// own at zoom 13, before any real tile content: no amount of splitting can
-// get a tile smaller than that floor.
+// At Scotland's latitude and a realistic ~78km link-budget range, the
+// *padding* a single tile needs around its own edges (see padBounds) —
+// required for correctness near any tile boundary, not a tunable safety
+// margin — already costs ~1.1GB on its own at zoom 13, before any real tile
+// content: no amount of splitting can get a tile smaller than that floor.
 //
-// 1.4GB (leaving some genuine core area beyond that floor) was the first
-// value that fit safely, but it produces ~420 tiles for a real Precision
-// pass — each one its own broker round trip, worker-side terrain
-// fetch/cache-lookup, and GPU dispatch — and that per-tile overhead,
-// multiplied by hundreds of tiles, is what made a real run take well over
-// an hour per tier instead of the roughly a minute a single whole-raster
-// job used to take before per-tile chunking existed. Raised to 2.5GB:
-// empirically, real peak RSS at the 1.4GB budget only ever reached
-// ~2.5-2.8GB (not the far more conservative ~3x-of-nominal ceiling this
-// comment originally assumed), so 2.5GB-nominal tiles (~4.8GB real, by
-// that same ratio) still leave comfortable headroom under the GPU worker's
-// 7.3GB — while cutting a real Precision pass to ~49 tiles, roughly an
-// 8.6x reduction in per-tile overhead.
-// A var, not a const, so tests can shrink it to exercise multi-tile
-// behaviour against a small synthetic region instead of a real
-// whole-Scotland fetch.
-var chunkGridBudgetBytes float64 = 2_500_000_000
+// This used to be one fixed value, hand-picked and re-picked by hand every
+// time either box's RAM changed during a real production incident (the
+// same "how much RAM does this box actually have free right now" question,
+// answered manually each time) — and picking it too small has a real,
+// separate cost: a tile budget small enough to be safe but far below what
+// the box could actually support means hundreds of unnecessarily tiny
+// tiles, each paying its own broker round trip, worker-side terrain
+// fetch/cache-lookup, and GPU dispatch overhead — which is what made a
+// real run take well over an hour per tier instead of the roughly a
+// minute a single whole-raster job used to take before per-tile chunking
+// existed at all. effectiveChunkBudgetBytes auto-sizes this from whichever
+// box will actually load a tile's grid instead.
+//
+// defaultChunkGridBudgetBytes is only the fallback for when auto-sizing
+// can't determine any box's available memory at all (sysinfo fails, and no
+// remote worker is connected or has reported yet) — chosen to match what
+// this project's own boxes have needed in practice.
+const defaultChunkGridBudgetBytes = 1_400_000_000
+
+// chunkBudgetReserveBytes/chunkBudgetSafetyDivisor turn a box's raw
+// available-memory figure into a nominal per-tile budget:
+// chunkBudgetReserveBytes is set aside up front for fixed overhead (the Go
+// runtime, the OS, and — for the GPU worker specifically — the
+// Vulkan/Mesa driver's own baseline footprint, none of which scales with
+// tile size), and the remainder is divided by chunkBudgetSafetyDivisor to
+// account for the *transient* extra memory a tile's grid needs beyond its
+// own nominal size while actually being processed (the mmap'd grid plus a
+// CPU-side upload copy for the GPU path). Chosen conservatively — safe
+// (more, smaller tiles; slower) over aggressive (fewer, bigger tiles; a
+// real OOM risk if this guess is wrong) — because getting this wrong is a
+// production outage, not just a slow pass.
+const chunkBudgetReserveBytes = 1_500_000_000
+const chunkBudgetSafetyDivisor = 2.0
+
+// minAutoChunkBudgetBytes floors auto-sizing so a box that's nearly out of
+// memory still gets a workable (if very conservative) budget instead of
+// one so small planTiles' own per-DEM-tile floor dominates every decision.
+const minAutoChunkBudgetBytes = 300_000_000
+
+// budgetFromAvailable turns a box's available-memory figure into a nominal
+// per-tile chunk budget — see chunkBudgetReserveBytes/
+// chunkBudgetSafetyDivisor. Only meaningful for availableBytes > 0 (the
+// caller should treat 0 as "unknown" and fall back to
+// defaultChunkGridBudgetBytes instead of calling this).
+func budgetFromAvailable(availableBytes uint64) float64 {
+	usable := float64(availableBytes) - chunkBudgetReserveBytes
+	if usable < 0 {
+		usable = 0
+	}
+	budget := usable / chunkBudgetSafetyDivisor
+	if budget < minAutoChunkBudgetBytes {
+		budget = minAutoChunkBudgetBytes
+	}
+	return budget
+}
+
+// effectiveChunkBudgetBytes decides the per-tile memory budget for this
+// pass: an explicit override (SetChunkBudgetBytes) always wins; otherwise
+// auto-size from whichever box will actually load each tile's grid.
+//
+// A tile can fall back from remote to local/CPU mid-pass if the remote
+// worker drops out (a real, observed production scenario — see
+// MarginsChunked's own per-tile local/remote choice), so the auto-sized
+// budget is the *smaller* of what's safe for this process's own box and
+// what's safe for a connected remote worker's box, not just whichever one
+// is expected to serve most tiles: a tile sized only for a large remote
+// worker's RAM could OOM this process's own, much smaller box if it ends
+// up having to load that same tile locally.
+func (e *Engine) effectiveChunkBudgetBytes() float64 {
+	if e.chunkBudgetBytes > 0 {
+		return e.chunkBudgetBytes
+	}
+
+	localBudget := float64(defaultChunkGridBudgetBytes)
+	if avail, err := sysinfo.AvailableMemoryBytes(); err == nil {
+		localBudget = budgetFromAvailable(avail)
+	}
+
+	connected, remoteAvail := e.remoteStatus()
+	if !connected || remoteAvail == 0 {
+		return localBudget
+	}
+	if remoteBudget := budgetFromAvailable(remoteAvail); remoteBudget < localBudget {
+		return remoteBudget
+	}
+	return localBudget
+}
 
 // demTileBytes is one decoded 256x256 terrarium tile's footprint in the
 // in-memory grid (float32 per pixel) — used only to estimate how many
@@ -122,8 +194,8 @@ type tile struct {
 }
 
 // planTiles splits bounds into a 2D grid of geographic tiles, each sized so
-// its own padded elevation grid (loadBounds) stays around
-// chunkGridBudgetBytes at zoom.
+// its own padded elevation grid (loadBounds) stays around budgetBytes at
+// zoom (see Engine.effectiveChunkBudgetBytes for how a caller picks that).
 //
 // Both axes are chunked, not just latitude: for a propagation range that's
 // a meaningful fraction of the region's own size (a realistic MeshCore
@@ -133,8 +205,8 @@ type tile struct {
 // considered, making width-spanning bands unable to shrink no matter how
 // short they are. Splitting columns too keeps a tile's *padded* footprint,
 // not just its raw output slice, bounded by the budget.
-func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64) []tile {
-	tilesPerChunkBudget := chunkGridBudgetBytes / demTileBytes
+func planTiles(bounds propagation.Bounds, zoom int, imageWidth, imageHeight int, rangeKm float64, budgetBytes float64) []tile {
+	tilesPerChunkBudget := budgetBytes / demTileBytes
 	totalHeightDeg := bounds.North - bounds.South
 	totalWidthDeg := bounds.East - bounds.West
 
@@ -320,7 +392,7 @@ func tileWeight(tl tile, tileSites []propagation.Site) int {
 // This is the entry point Precision-tier rendering uses instead of
 // Margins; the caller no longer loads a grid up front at all.
 func (e *Engine) MarginsChunked(bounds propagation.Bounds, zoom int, cacheDir, tileURLBase string, client *http.Client, sites []propagation.Site, imageWidth, imageHeight int, rangeKm float64, p propagation.Params, progress func(done, total int)) ([]float32, error) {
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, e.effectiveChunkBudgetBytes())
 
 	// out is the one genuinely large, whole-pass-lifetime allocation this
 	// function makes (imageWidth*imageHeight float32s — order of a

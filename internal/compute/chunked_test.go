@@ -27,8 +27,9 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 	// large relative to the region is also what makes 2D tiling necessary
 	// in the first place — see the planTiles comment.
 	const imageWidth, imageHeight = 12000, 24248
+	const budgetBytes = 1_400_000_000
 	bounds := propagation.Bounds{South: 54.5, North: 60.9, West: -8.7, East: -0.7}
-	tiles := planTiles(bounds, 13, imageWidth, imageHeight, 78)
+	tiles := planTiles(bounds, 13, imageWidth, imageHeight, 78, budgetBytes)
 	if len(tiles) < 2 {
 		t.Fatalf("expected multiple tiles for a whole-Scotland zoom-13 region, got %d", len(tiles))
 	}
@@ -62,7 +63,7 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 	// for the "never finer than one DEM tile" floor and the fact this
 	// verifies against every real constructed tile, not just the one the
 	// sizing loop itself converged against.
-	budgetTiles := chunkGridBudgetBytes / demTileBytes
+	budgetTiles := float64(budgetBytes) / demTileBytes
 	for i, tl := range tiles {
 		got := tileFootprint(tl.loadBounds, 13)
 		if got > budgetTiles*1.1 {
@@ -73,7 +74,7 @@ func TestPlanTilesSplitsLargeRegion(t *testing.T) {
 
 func TestPlanTilesSmallRegionStaysOneTile(t *testing.T) {
 	bounds := propagation.Bounds{South: 56.0, North: 56.1, West: -4.3, East: -4.1}
-	tiles := planTiles(bounds, 11, 40, 40, 5)
+	tiles := planTiles(bounds, 11, 40, 40, 5, 1_400_000_000)
 	if len(tiles) != 1 {
 		t.Fatalf("expected a single tile for a small region well under budget, got %d", len(tiles))
 	}
@@ -113,9 +114,7 @@ func flatTerrainServer(t *testing.T, elevM float64) *httptest.Server {
 // small synthetic tiles, so this stays fast regardless of how the real
 // Precision tier's zoom/region would size in production.
 func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
-	oldBudget := chunkGridBudgetBytes
-	chunkGridBudgetBytes = 250 * demTileBytes // force several small tiles over a tiny region, without exploding into hundreds given real padding math
-	defer func() { chunkGridBudgetBytes = oldBudget }()
+	const testBudgetBytes = 250 * demTileBytes // force several small tiles over a tiny region, without exploding into hundreds given real padding math
 
 	srv := flatTerrainServer(t, 100)
 	defer srv.Close()
@@ -141,9 +140,9 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 
 	client := &http.Client{}
 
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes)
 	if len(tiles) < 3 {
-		t.Fatalf("test setup: expected several tiles, got %d — tighten chunkGridBudgetBytes further", len(tiles))
+		t.Fatalf("test setup: expected several tiles, got %d — tighten testBudgetBytes further", len(tiles))
 	}
 
 	refGrid, err := demgrid.Load(demgrid.Bounds{South: bounds.South, North: bounds.North, West: bounds.West, East: bounds.East}, zoom, t.TempDir(), srv.URL, client, nil)
@@ -153,6 +152,7 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 	defer refGrid.Close()
 
 	e := New() // no local GPU, no remote broker configured — forces the CPU path both sides go through
+	e.SetChunkBudgetBytes(testBudgetBytes)
 	want := e.Margins(refGrid, sites, bounds, imageWidth, imageHeight, rangeKm, p, nil)
 
 	got, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, nil)
@@ -192,9 +192,7 @@ func TestMarginsChunkedMatchesUnchunked(t *testing.T) {
 // enough to OOM the process. This asserts the local DEM tile server is
 // never actually hit once a remote worker is connected.
 func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
-	oldBudget := chunkGridBudgetBytes
-	chunkGridBudgetBytes = 10 * demTileBytes
-	defer func() { chunkGridBudgetBytes = oldBudget }()
+	const testBudgetBytes = 10 * demTileBytes
 
 	var localTileHits int32
 	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +215,7 @@ func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
 		{Lat: 56.25, Lon: -4.4, GroundM: 100, TxHeightM: 101.6},
 	}
 
-	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
+	tiles := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes)
 	if len(tiles) < 3 {
 		t.Fatalf("test setup: expected several tiles, got %d", len(tiles))
 	}
@@ -243,6 +241,7 @@ func TestMarginsChunkedSkipsLocalGridWhenRemoteAvailable(t *testing.T) {
 
 	e := New()
 	e.SetRemote(strings.TrimPrefix(broker.URL, "http://"), localSrv.URL)
+	e.SetChunkBudgetBytes(testBudgetBytes)
 
 	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), localSrv.URL, &http.Client{}, sites, imageWidth, imageHeight, rangeKm, p, nil)
 	if err != nil {
@@ -281,9 +280,7 @@ func TestTileWeight(t *testing.T) {
 // proportionally larger than a same-size sparse tile's, matching real
 // compute cost instead of raw pixel count.
 func TestMarginsChunkedProgressWeightedBySiteDensity(t *testing.T) {
-	oldBudget := chunkGridBudgetBytes
-	chunkGridBudgetBytes = 250 * demTileBytes
-	defer func() { chunkGridBudgetBytes = oldBudget }()
+	const testBudgetBytes = 250 * demTileBytes
 
 	srv := flatTerrainServer(t, 100)
 	defer srv.Close()
@@ -309,6 +306,7 @@ func TestMarginsChunkedProgressWeightedBySiteDensity(t *testing.T) {
 
 	client := &http.Client{}
 	e := New()
+	e.SetChunkBudgetBytes(testBudgetBytes)
 
 	var calls [][2]int
 	_, err := e.MarginsChunked(bounds, zoom, t.TempDir(), srv.URL, client, sites, imageWidth, imageHeight, rangeKm, p, func(done, total int) {
@@ -348,8 +346,104 @@ func TestMarginsChunkedProgressWeightedBySiteDensity(t *testing.T) {
 	// totals from this call sequence alone isn't reliable. This only
 	// checks the calling contract every caller (run.go's progress.Writer)
 	// depends on: monotonic, bounded, terminates exactly at total.
-	tilesInRegion := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm)
+	tilesInRegion := planTiles(bounds, zoom, imageWidth, imageHeight, rangeKm, testBudgetBytes)
 	if len(tilesInRegion) < 3 {
 		t.Fatalf("test setup: expected several tiles so this exercises a real skip/dense mix, got %d", len(tilesInRegion))
 	}
+}
+
+func TestBudgetFromAvailable(t *testing.T) {
+	// Below the reserve entirely: floors to the minimum rather than going
+	// negative.
+	if got := budgetFromAvailable(1_000_000_000); got != minAutoChunkBudgetBytes {
+		t.Errorf("budgetFromAvailable(1GB) = %.0f, want the %d floor (below chunkBudgetReserveBytes)", got, minAutoChunkBudgetBytes)
+	}
+	// A concrete real case: this project's own GPU worker, 7.3GB total,
+	// ~4.7GB "available" per free -h during the incident this exists to
+	// fix. (4.7GB - 1.5GB reserve) / 2 ≈ 1.6GB.
+	got := budgetFromAvailable(4_700_000_000)
+	if got < 1_400_000_000 || got > 1_800_000_000 {
+		t.Errorf("budgetFromAvailable(4.7GB) = %.0f, want roughly 1.6GB (in [1.4GB,1.8GB])", got)
+	}
+	// Monotonically increasing in available memory.
+	prev := 0.0
+	for _, avail := range []uint64{2e9, 4e9, 8e9, 16e9, 32e9} {
+		b := budgetFromAvailable(avail)
+		if b < prev {
+			t.Errorf("budgetFromAvailable(%d) = %.0f is less than a smaller available figure's result %.0f", avail, b, prev)
+		}
+		prev = b
+	}
+}
+
+func TestEffectiveChunkBudgetBytesOverrideWins(t *testing.T) {
+	e := New()
+	e.SetChunkBudgetBytes(999_999_999)
+	if got := e.effectiveChunkBudgetBytes(); got != 999_999_999 {
+		t.Errorf("effectiveChunkBudgetBytes() = %.0f, want the explicit override 999999999 regardless of auto-sizing", got)
+	}
+}
+
+func TestEffectiveChunkBudgetBytesNoRemoteUsesLocal(t *testing.T) {
+	e := New() // no remote configured at all
+	got := e.effectiveChunkBudgetBytes()
+	if got <= 0 {
+		t.Errorf("effectiveChunkBudgetBytes() with no remote and no override = %.0f, want a positive local-derived budget", got)
+	}
+}
+
+// TestEffectiveChunkBudgetBytesPicksSmallerOfLocalAndRemote is the
+// regression test for the actual safety property this design exists for: a
+// tile can fall back from remote to local/CPU mid-pass if the remote
+// worker drops out (a real, observed production scenario), so a tile sized
+// only for a large remote worker's RAM could OOM this process's own,
+// smaller box if it ends up loading that same tile locally. The budget
+// must never exceed what's safe for *this* process's own box, no matter
+// how much RAM a connected remote worker reports.
+func TestEffectiveChunkBudgetBytesPicksSmallerOfLocalAndRemote(t *testing.T) {
+	localOnly := New().effectiveChunkBudgetBytes() // no remote configured — pure local sizing, for comparison
+
+	statusServer := func(availableBytes uint64) *httptest.Server {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/gpu/status", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{"worker_connected": true, "available_bytes": availableBytes})
+		})
+		return httptest.NewServer(mux)
+	}
+
+	t.Run("remote reports far less than local", func(t *testing.T) {
+		srv := statusServer(2_000_000_000) // budgetFromAvailable(2GB) = 250MB, floored to minAutoChunkBudgetBytes
+		defer srv.Close()
+		e := New()
+		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
+		got := e.effectiveChunkBudgetBytes()
+		if got > localOnly {
+			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want <= the local-only budget %.0f when remote reports much less RAM", got, localOnly)
+		}
+		if got != minAutoChunkBudgetBytes {
+			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want the %d floor for a 2GB remote report", got, minAutoChunkBudgetBytes)
+		}
+	})
+
+	t.Run("remote reports far more than local", func(t *testing.T) {
+		srv := statusServer(1_000_000_000_000) // 1TB — budgetFromAvailable would be huge
+		defer srv.Close()
+		e := New()
+		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
+		got := e.effectiveChunkBudgetBytes()
+		if got != localOnly {
+			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want exactly the local-only budget %.0f when remote reports far more RAM than local (must never pick a budget only safe for the remote box)", got, localOnly)
+		}
+	})
+
+	t.Run("remote connected but reports unknown (0)", func(t *testing.T) {
+		srv := statusServer(0)
+		defer srv.Close()
+		e := New()
+		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
+		got := e.effectiveChunkBudgetBytes()
+		if got != localOnly {
+			t.Errorf("effectiveChunkBudgetBytes() = %.0f, want the local-only budget %.0f when remote's report is unknown (0)", got, localOnly)
+		}
+	})
 }

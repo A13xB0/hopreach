@@ -146,6 +146,17 @@ coverage:
   precision_supersample: 2
   # Max alpha (0-255) of the coverage overlay.
   max_alpha: 190
+  # Precision/Calibrated Precision load their elevation grid in geographic
+  # tiles, not all at once (a whole-region grid at precision_dem_zoom can
+  # run into several GB) — this bounds how much memory a single tile is
+  # allowed to need. Leave at 0 (the default) to auto-size from real
+  # available memory on whichever box actually loads a tile — this
+  # process's own, or a connected remote GPU worker's, whichever is
+  # smaller, since a tile has to be safe for either. Only set this if
+  # auto-sizing picks something that doesn't suit a specific box for a
+  # reason auto-detection can't see (e.g. other big processes sharing the
+  # same box that /proc/meminfo can't account for).
+  precision_chunk_budget_mb: 0
   # The whole fetch+compute pipeline is skipped entirely (logged, not an
   # error) if the last successful run finished less than this many hours
   # ago — checked against the existing meta.json's generated_at. This

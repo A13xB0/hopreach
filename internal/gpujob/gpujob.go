@@ -44,17 +44,30 @@ type Job struct {
 	DemTileURLBase string             `json:"dem_tile_url_base"`
 }
 
-// KindProgress/KindResult discriminate the two JSON text-frame shapes the
-// worker sends over its one WebSocket connection to the broker: Progress
-// (below) zero or more times while a job is in flight, then exactly one
-// Result when it finishes. Kind is omitted (empty) on Result when it's
-// used as the HTTP-level error envelope from POST /gpu/submit instead of a
-// WS frame — that context only ever has one possible shape, so there's
-// nothing to discriminate there.
+// KindHello/KindProgress/KindResult discriminate the JSON text-frame shapes
+// the worker sends over its one WebSocket connection to the broker: exactly
+// one Hello right after connecting, then zero or more Progress frames while
+// a job is in flight, then exactly one Result when it finishes. Kind is
+// omitted (empty) on Result when it's used as the HTTP-level error envelope
+// from POST /gpu/submit instead of a WS frame — that context only ever has
+// one possible shape, so there's nothing to discriminate there.
 const (
+	KindHello    = "hello"
 	KindProgress = "progress"
 	KindResult   = "result"
 )
+
+// Hello is sent once by the worker immediately after connecting, reporting
+// its own available memory (see internal/sysinfo) so the batch job can size
+// MarginsChunked's per-tile memory budget to whatever box will actually
+// load each tile's elevation grid, instead of a fixed guess that has to be
+// hand-tuned again every time either box's RAM changes. AvailableBytes is 0
+// if the worker couldn't determine it (e.g. not running on Linux) — callers
+// should treat that the same as "unknown", not "zero RAM available".
+type Hello struct {
+	Kind           string `json:"kind"`
+	AvailableBytes uint64 `json:"available_bytes"`
+}
 
 // Result is sent back by the worker once a job completes. Margins is the
 // row-major imageWidth*imageHeight float32 array, NaN-encoded as
