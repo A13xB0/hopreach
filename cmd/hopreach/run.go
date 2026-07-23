@@ -47,6 +47,36 @@ func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig)
 	return selected
 }
 
+// inferRepeaterScopes fetches CoreScope's full node directory and a real
+// window's worth of packet traffic, then resolves each of the given
+// repeaters' dominant channel (treated as its real scope) — see
+// internal/corescope's ScopeInference/FetchChannelParticipation doc
+// comments for why this observes real relay behavior instead of trusting
+// each node's own (frequently absent) self-reported default_scope. Errors
+// are logged and treated as "no scope data available" rather than fatal:
+// this is an enrichment nothing downstream depends on.
+func inferRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) map[string]string {
+	allNodes, err := client.FetchAllNodes(ctx)
+	if err != nil {
+		log.Printf("scope inference: fetching node directory failed, skipping: %v", err)
+		return nil
+	}
+	since := time.Now().Add(-time.Duration(windowHours * float64(time.Hour)))
+	counts, err := client.FetchChannelParticipation(ctx, since, allNodes)
+	if err != nil {
+		log.Printf("scope inference: fetching channel participation failed, skipping: %v", err)
+		return nil
+	}
+	scopes := make(map[string]string, len(selected))
+	for _, n := range selected {
+		scope, _, ok := corescope.DominantScope(counts[strings.ToLower(n.PublicKey)])
+		if ok {
+			scopes[strings.ToLower(n.PublicKey)] = scope
+		}
+	}
+	return scopes
+}
+
 // loadLocalGrid loads a small demgrid covering just the given points
 // (padded slightly for bilinear interpolation neighbours), for one-off
 // ground-elevation lookups at a specific point — e.g. Precision-zoom site
@@ -337,7 +367,22 @@ func run(cfg appConfig) (err error) {
 		sites = make([]propagation.Site, len(selected))
 	}
 
-	features := buildFeatures(selected, sites, calResults, cfg)
+	// Optional: real per-repeater scope, inferred from which channel each
+	// one actually relays most (see internal/corescope's ScopeInference
+	// doc comment for why this exists instead of trusting each node's
+	// sparse self-reported default_scope). A failure here degrades
+	// gracefully — every repeater just goes without an inferred_scope
+	// property, same as if the feature were disabled — rather than
+	// failing the whole run over what's fundamentally an enrichment, not
+	// something anything downstream depends on.
+	var inferredScopes map[string]string
+	if cfg.scopeInferenceEnabled {
+		prog.Update("inferring_scopes", 0, 1, "Inferring repeater scopes from CoreScope channel traffic")
+		inferredScopes = inferRepeaterScopes(ctx, client, selected, cfg.scopeInferenceWindowHours)
+		prog.Update("inferring_scopes", 1, 1, fmt.Sprintf("Inferred scope for %d/%d repeaters", len(inferredScopes), len(selected)))
+	}
+
+	features := buildFeatures(selected, sites, calResults, inferredScopes, cfg)
 	fc := featureCollection{Type: "FeatureCollection", Features: features}
 
 	counts := map[string]int{"active": 0, "degraded": 0, "silent": 0}

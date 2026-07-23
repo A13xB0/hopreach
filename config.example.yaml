@@ -64,6 +64,19 @@ corescope:
   api_url: https://scotmesh-corescope.mm7roq.compute.oarc.uk
   request_timeout_seconds: 30
 
+  scope_inference:
+    # Tags each repeater with the channel it actually relays most
+    # (inferred_scope, shown in its map popup alongside the site's own
+    # default_scope) — real observed behaviour, not each node's own
+    # self-reported default_scope, which in practice is unset for most
+    # repeaters. Off by default: it means fetching (and resolving) a real
+    # window's worth of raw packet traffic from CoreScope on every run —
+    # real extra load, worth opting into deliberately.
+    enabled: false
+    # How far back to look when tallying channel participation.
+    # 168 = 7 days.
+    window_hours: 168
+
 terrain:
   # Elevation tiles (Mapzen/AWS "terrarium" format, global coverage, no API
   # key) are downloaded once per area and cached — terrain doesn't change,

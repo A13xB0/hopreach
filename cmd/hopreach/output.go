@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"hopreach/internal/calibration"
@@ -54,7 +55,9 @@ type featureCollection struct {
 // by calibration.Position) and adds calibrated_lat/lon plus offset/score
 // properties for the frontend's Standard/Calibrated dropdown; nil (the
 // default, calibration disabled) omits those properties entirely.
-func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, cfg appConfig) []feature {
+// inferredScopes (pubkey, lowercase -> channel name), if non-nil, adds
+// inferred_scope wherever a repeater has one — see inferRepeaterScopes.
+func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, inferredScopes map[string]string, cfg appConfig) []feature {
 	features := make([]feature, 0, len(nodes))
 	for i, n := range nodes {
 		name := "Unnamed repeater"
@@ -80,6 +83,15 @@ func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults 
 			// (public/app.js) — not used for server-side filtering
 			// unless REQUIRED_SCOPE is also set.
 			"default_scope": n.DefaultScope,
+		}
+		if scope, ok := inferredScopes[strings.ToLower(n.PublicKey)]; ok {
+			// Which channel this repeater actually relays most, observed
+			// from real traffic — see corescope.ScopeInference. Distinct
+			// from default_scope (self-reported, sparse in practice) —
+			// shown alongside it in the frontend popup, not merged, since
+			// they can legitimately disagree and that's itself useful
+			// information.
+			props["inferred_scope"] = scope
 		}
 		if calResults != nil {
 			cr := calResults[i]

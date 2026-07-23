@@ -491,9 +491,7 @@
 
   function setShowAllNeighbors(enabled) {
     showAllNeighborsEnabled = enabled;
-    const btn = document.getElementById("plan-show-all-neighbors");
-    btn.classList.toggle("active", enabled);
-    btn.textContent = enabled ? "Hide all neighbours" : "Show all neighbours";
+    document.getElementById("plan-show-all-neighbors").checked = enabled;
     if (enabled) {
       allNeighborsLayer.addTo(map);
       renderAllPlannedNeighbors();
@@ -502,8 +500,8 @@
     }
   }
 
-  document.getElementById("plan-show-all-neighbors").addEventListener("click", () => {
-    setShowAllNeighbors(!showAllNeighborsEnabled);
+  document.getElementById("plan-show-all-neighbors").addEventListener("change", (e) => {
+    setShowAllNeighbors(e.target.checked);
   });
 
   // Real repeaters: neighbours come from CoreScope's own observed reach

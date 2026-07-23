@@ -127,28 +127,15 @@
     redrawNodeMarkers();
   }
 
-  // The workspace covers most of the viewport by design (see
-  // .sim-workspace's own comment) — there's nowhere left to click on the
-  // map underneath it. Entering companion placement steps the whole panel
-  // + backdrop aside (hidden, not closed — sim-open/layer state is
-  // untouched) and shows a small floating hint instead, restored the
-  // moment placement ends (either by placing one, or Cancel/toggling the
-  // button again). setSimPanelOpen(false) resets placementMode directly
-  // rather than through here when the whole simulator is closing, so that
-  // path never fights with this one over the panel's visibility.
   function setPlacementMode(next) {
     placementMode = placementMode === next ? "off" : next;
-    const placing = placementMode === "companion";
-    document.getElementById("sim-add-companion").classList.toggle("active", placing);
-    document.getElementById("sim-placement-hint").classList.toggle("hidden", !placing);
-    document.getElementById("sim-panel").classList.toggle("hidden", placing);
-    document.getElementById("sim-backdrop").classList.toggle("hidden", placing);
+    document.getElementById("sim-add-companion").classList.toggle("active", placementMode === "companion");
+    document.getElementById("sim-companion-hint").classList.toggle("hidden", placementMode !== "companion");
   }
 
   map.on("click", (e) => {
     if (placementMode === "companion") {
       addCompanionAt(e.latlng.lat, e.latlng.lng);
-      setPlacementMode("companion"); // toggles back off (see above) and restores the panel
     }
   });
 
@@ -1118,32 +1105,24 @@
 
   function setSimPanelOpen(open) {
     document.getElementById("sim-panel").classList.toggle("hidden", !open);
-    document.getElementById("sim-backdrop").classList.toggle("hidden", !open);
     document.getElementById("map-wrap").classList.toggle("sim-open", open);
     if (open) {
       if (window.HopReachPlanner) window.HopReachPlanner.closePanel();
       simNodesLayer.addTo(map);
       simResultsLayer.addTo(map);
     } else {
-      // Reset placement state directly rather than through
-      // setPlacementMode — that would also try to un-hide the panel/
-      // backdrop we just hid above, fighting with this close.
-      placementMode = "off";
-      document.getElementById("sim-add-companion").classList.remove("active");
-      document.getElementById("sim-placement-hint").classList.add("hidden");
+      setPlacementMode("off");
       stopReplay();
       map.removeLayer(simNodesLayer);
       map.removeLayer(simResultsLayer);
     }
-    // Unlike the docked plan panel, the simulator overlays the map instead
-    // of resizing its container — no invalidateSize() needed.
+    map.invalidateSize();
   }
 
   document.getElementById("sim-toggle").addEventListener("click", () => {
     setSimPanelOpen(document.getElementById("sim-panel").classList.contains("hidden"));
   });
   document.getElementById("sim-panel-close").addEventListener("click", () => setSimPanelOpen(false));
-  document.getElementById("sim-backdrop").addEventListener("click", () => setSimPanelOpen(false));
   // Clicking into Plan mode should always leave Simulate closed — see
   // HopReachPlanner.closePanel's own comment for why this is one-directional
   // rather than a shared toggle-coordinator module.
@@ -1152,7 +1131,6 @@
   document.getElementById("sim-load-planned").addEventListener("click", loadPlannedRepeaters);
   document.getElementById("sim-load-real").addEventListener("click", loadRealRepeaters);
   document.getElementById("sim-add-companion").addEventListener("click", () => setPlacementMode("companion"));
-  document.getElementById("sim-placement-cancel").addEventListener("click", () => setPlacementMode("companion"));
   document.getElementById("sim-nodes-clear").addEventListener("click", clearNodes);
   document.getElementById("sim-build-links").addEventListener("click", buildLinks);
   document.getElementById("sim-message-add").addEventListener("click", addMessage);

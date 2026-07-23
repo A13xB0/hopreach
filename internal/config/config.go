@@ -100,8 +100,22 @@ type RegionConfig struct {
 // CoreScopeConfig points at the CoreScope instance to pull repeater nodes
 // and reach data from.
 type CoreScopeConfig struct {
-	APIURL                string  `yaml:"api_url"`
-	RequestTimeoutSeconds float64 `yaml:"request_timeout_seconds"`
+	APIURL                string         `yaml:"api_url"`
+	RequestTimeoutSeconds float64        `yaml:"request_timeout_seconds"`
+	ScopeInference        ScopeInference `yaml:"scope_inference"`
+}
+
+// ScopeInference controls the optional real-scope-tagging pass: which
+// channel each repeater actually relays most, inferred from CoreScope's own
+// packet data (decoded_json.channel) rather than each node's own
+// self-reported default_scope, which in production is empty for roughly
+// three quarters of real repeaters. Off by default — it means fetching
+// (and prefix-resolving) a real window's worth of raw packet traffic from
+// CoreScope, real extra load neither every deployment needs nor every
+// CoreScope instance may welcome.
+type ScopeInference struct {
+	Enabled     bool    `yaml:"enabled"`
+	WindowHours float64 `yaml:"window_hours"`
 }
 
 // TerrainConfig controls elevation data fetching for the standard-tier
@@ -248,6 +262,10 @@ func Default() Config {
 		CoreScope: CoreScopeConfig{
 			APIURL:                "https://scotmesh-corescope.mm7roq.compute.oarc.uk",
 			RequestTimeoutSeconds: 30,
+			ScopeInference: ScopeInference{
+				Enabled:     false,
+				WindowHours: 168, // 7 days
+			},
 		},
 		Terrain: TerrainConfig{
 			DEMZoom:        11,
@@ -369,6 +387,9 @@ func (c Config) Validate() error {
 	}
 	if c.CoreScope.APIURL == "" {
 		return fmt.Errorf("corescope.api_url must not be empty")
+	}
+	if c.CoreScope.ScopeInference.Enabled && c.CoreScope.ScopeInference.WindowHours <= 0 {
+		return fmt.Errorf("corescope.scope_inference.window_hours must be positive when scope_inference.enabled is true")
 	}
 	if c.Coverage.ImageWidth <= 0 {
 		return fmt.Errorf("coverage.image_width must be positive")

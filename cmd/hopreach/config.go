@@ -21,6 +21,13 @@ type appConfig struct {
 	// default_scope matches "#"+requiredScope. Empty disables this filter.
 	requiredScope string
 
+	// scopeInferenceEnabled/scopeInferenceWindowHours: the optional real
+	// per-repeater scope tagging pass (see internal/corescope's own doc
+	// comment on ScopeInference for why this exists instead of trusting
+	// each node's self-reported default_scope). Disabled by default.
+	scopeInferenceEnabled     bool
+	scopeInferenceWindowHours float64
+
 	// regionBoundaryPath/regionBoundaryURL configure geo.LoadBoundary — a
 	// local file, a downloaded GeoJSON, or (both empty, the default) the
 	// embedded Scotland boundary. regionBoundaryLabel is what's written to
@@ -104,6 +111,9 @@ func toAppConfig(yc yconfig.Config) appConfig {
 		timeout:       time.Duration(yc.CoreScope.RequestTimeoutSeconds * float64(time.Second)),
 
 		requiredScope: strings.TrimPrefix(yc.Region.RequiredScope, "#"),
+
+		scopeInferenceEnabled:     yc.CoreScope.ScopeInference.Enabled,
+		scopeInferenceWindowHours: yc.CoreScope.ScopeInference.WindowHours,
 
 		regionBoundaryPath:  yc.Region.BoundaryPath,
 		regionBoundaryURL:   yc.Region.BoundaryURL,

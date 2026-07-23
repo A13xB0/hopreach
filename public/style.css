@@ -83,19 +83,28 @@ header .subtitle {
   inset: 0;
 }
 
-/* The plan panel docks to the full right edge — shift Leaflet's own
-   right-side controls (basemap/layers up top, legend down below) left by
-   its width so they stay reachable instead of disappearing underneath it.
-   The simulator is a centered overlay with its own backdrop instead (see
-   #sim-panel/#sim-backdrop below), so it has no equivalent need. */
+/* Both panels dock to the full right edge — shift Leaflet's own right-side
+   controls (basemap/layers up top, legend down below) left by whichever
+   panel's own width so they stay reachable instead of disappearing
+   underneath it. The simulator used to be a centered overlay covering the
+   whole map — reverted (see #sim-panel below): covering the map entirely
+   defeated the point of a spatial tool, worse than the cramped-sidebar
+   problem it was meant to fix. */
 #map-wrap.plan-open .leaflet-top.leaflet-right,
 #map-wrap.plan-open .leaflet-bottom.leaflet-right {
   right: 320px;
   transition: right 0.15s ease;
 }
+#map-wrap.sim-open .leaflet-top.leaflet-right,
+#map-wrap.sim-open .leaflet-bottom.leaflet-right {
+  right: 480px;
+  transition: right 0.15s ease;
+}
 @media (max-width: 500px) {
   #map-wrap.plan-open .leaflet-top.leaflet-right,
-  #map-wrap.plan-open .leaflet-bottom.leaflet-right {
+  #map-wrap.plan-open .leaflet-bottom.leaflet-right,
+  #map-wrap.sim-open .leaflet-top.leaflet-right,
+  #map-wrap.sim-open .leaflet-bottom.leaflet-right {
     right: 90vw;
   }
 }
@@ -358,36 +367,6 @@ header .subtitle {
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
 }
 
-/* Shown in place of the (much bigger) simulator workspace while placing a
-   companion location — see setPlacementMode's own comment for why the
-   panel has to step aside for this specifically, unlike everything else
-   in the workspace. */
-#sim-placement-hint {
-  position: fixed;
-  bottom: 1.25rem;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 1150;
-  max-width: 420px;
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-  border-radius: 8px;
-  padding: 0.6rem 0.75rem;
-}
-#sim-placement-hint.hidden { display: none; }
-#sim-placement-hint button {
-  margin-top: 0.5rem;
-  background: var(--surface1, #0a1929);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.78rem;
-  cursor: pointer;
-}
-#sim-placement-hint button:hover { border-color: var(--accent); }
-
 #plan-panel {
   position: absolute;
   top: 0;
@@ -405,53 +384,33 @@ header .subtitle {
 }
 #plan-panel.hidden { display: none; }
 
-/* The simulator is its own workspace, not a docked tool drawer — a real
-   plan (dozens of loaded repeaters, a full results log, a per-repeater
-   prediction breakdown) needs more room than a 320px sidebar can give
-   without everything fighting for the same cramped vertical scroll. A
-   centered, wide overlay with an internal two-column grid (setup | results)
-   lets both sides breathe independently. */
-#sim-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(3,4,20,0.6);
-  z-index: 1099;
-}
-#sim-backdrop.hidden { display: none; }
-
+/* Docked to the right edge, same as #plan-panel — a full-viewport overlay
+   was tried and reverted: it left no map visible at all while the
+   simulator was open, which defeats a tool that's fundamentally about
+   node positions and links. Noticeably wider than #plan-panel's 320px
+   (dozens of loaded repeaters, a full results log, and a per-repeater
+   prediction breakdown need more room than that), while still leaving the
+   majority of a normal-width screen as visible map. */
 #sim-panel {
-  position: fixed;
-  top: 4vh;
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(1180px, 94vw);
-  height: 92vh;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 92vw;
   background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  border-left: 1px solid var(--border);
   z-index: 1100;
-  padding: 0.9rem 1rem;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.55);
-  display: flex;
-  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.75rem;
+  box-shadow: -4px 0 16px rgba(0,0,0,0.4);
 }
 #sim-panel.hidden { display: none; }
 
 .sim-workspace {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(300px, 380px) 1fr;
-  gap: 1.25rem;
-}
-.sim-col {
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 0.35rem;
-}
-@media (max-width: 900px) {
-  .sim-workspace { grid-template-columns: 1fr; overflow-y: auto; }
-  .sim-col { overflow-y: visible; }
+  display: flex;
+  flex-direction: column;
 }
 
 .plan-panel-header {
@@ -542,6 +501,20 @@ header .subtitle {
   background: #a855f7;
   border-color: #a855f7;
   color: #fff;
+}
+
+.plan-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text);
+  cursor: pointer;
+}
+.plan-checkbox-row input[type="checkbox"] {
+  width: auto;
+  cursor: pointer;
 }
 
 .plan-hint {

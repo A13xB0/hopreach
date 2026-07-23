@@ -198,9 +198,27 @@
       <div class="popup-row"><span>Relays (1h / 24h)</span><span>${props.relay_count_1h ?? "–"} / ${props.relay_count_24h ?? "–"}</span></div>
       <div class="popup-row"><span>Adverts seen</span><span>${props.advert_count ?? "–"}</span></div>
       <div class="popup-row"><span>Elevation</span><span>${props.elevation_m ?? "–"} m</span></div>
+      ${scopeRowsHtml(props)}
       <div class="popup-row"><span>Key</span><span>${escapeHtml((props.public_key || "").slice(0, 12))}</span></div>
       ${calibrationRowHtml(props)}
     `;
+  }
+
+  // default_scope (self-reported, often absent — see the map's own scope
+  // filter above) and inferred_scope (observed from real channel traffic
+  // — see corescope.scope_inference, off by default) are shown separately,
+  // not merged: they can legitimately disagree, and that disagreement is
+  // itself useful information, not noise to hide.
+  function scopeRowsHtml(props) {
+    if (!props.default_scope && !props.inferred_scope) return "";
+    const rows = [];
+    if (props.default_scope) {
+      rows.push(`<div class="popup-row"><span>Scope (reported)</span><span>${escapeHtml(props.default_scope)}</span></div>`);
+    }
+    if (props.inferred_scope) {
+      rows.push(`<div class="popup-row"><span>Scope (observed)</span><span>${escapeHtml(props.inferred_scope)}</span></div>`);
+    }
+    return rows.join("");
   }
 
   // Shown whenever the server computed a calibration score for this

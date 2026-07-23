@@ -105,40 +105,28 @@ test("clear all removes loaded nodes and hides results", async ({ page }) => {
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(0);
 });
 
-test("places a virtual companion location by clicking the map; the panel steps aside and returns", async ({ page }) => {
+test("places a virtual companion location by clicking the map, and stops when toggled off", async ({ page }) => {
   await page.click("#sim-toggle");
   await page.click("#sim-add-companion");
   await expect(page.locator("#sim-add-companion")).toHaveClass(/active/);
-  await expect(page.locator("#sim-placement-hint")).toBeVisible();
-  // The workspace covers most of the viewport (see .sim-workspace), so it
-  // has to step aside for the map to be clickable at all while placing.
-  await expect(page.locator("#sim-panel")).toBeHidden();
-  await expect(page.locator("#sim-backdrop")).toBeHidden();
+  await expect(page.locator("#sim-companion-hint")).toBeVisible();
+  // Docked (like the plan panel), not a full-viewport overlay — the map
+  // stays visible/clickable the whole time.
+  await expect(page.locator("#sim-panel")).toBeVisible();
 
   const map = page.locator("#map");
   const box = await map.boundingBox();
   if (!box) throw new Error("map has no bounding box");
   await map.click({ position: { x: box.width / 2, y: box.height / 2 } });
-
-  // Placing one node exits placement mode and brings the panel back.
-  await expect(page.locator("#sim-placement-hint")).toBeHidden();
-  await expect(page.locator("#sim-panel")).toBeVisible();
-  await expect(page.locator("#sim-add-companion")).not.toHaveClass(/active/);
   await expect(page.locator("#sim-node-list")).toContainText("Companion 1");
   await expect(page.locator(".sim-marker-companion")).toHaveCount(1);
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(1);
-});
 
-test("companion placement can be cancelled without placing anything", async ({ page }) => {
-  await page.click("#sim-toggle");
+  // Toggling placement off means further map clicks don't add more nodes.
   await page.click("#sim-add-companion");
-  await expect(page.locator("#sim-panel")).toBeHidden();
-
-  await page.click("#sim-placement-cancel");
-  await expect(page.locator("#sim-placement-hint")).toBeHidden();
-  await expect(page.locator("#sim-panel")).toBeVisible();
   await expect(page.locator("#sim-add-companion")).not.toHaveClass(/active/);
-  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(0);
+  await map.click({ position: { x: box.width / 4, y: box.height / 4 } });
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBe(1);
 });
 
 test("runs a replay after a simulation and can skip to the final state", async ({ page }) => {

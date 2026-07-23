@@ -79,7 +79,10 @@
       <div id="plan-repeater-section">
         <div class="plan-section-title">Planned repeaters</div>
         <div id="plan-repeater-list" class="plan-list"></div>
-        <button id="plan-show-all-neighbors" class="plan-full-width-btn">Show all neighbours</button>
+        <label class="plan-checkbox-row">
+          <input type="checkbox" id="plan-show-all-neighbors">
+          Show all neighbours
+        </label>
       </div>
 
       <div id="plan-override-section">
@@ -122,11 +125,6 @@
       <div id="plan-coverage-status" class="plan-hint hidden"></div>
     </div>
 
-    <div id="sim-backdrop" class="hidden"></div>
-    <div id="sim-placement-hint" class="plan-hint hidden">
-      Click the map to place a virtual companion device (originates/receives traffic like a handheld, but doesn't relay) — the simulator panel steps aside so the map's clickable. Click once to place it and return.
-      <button id="sim-placement-cancel" class="plan-full-width-btn">Cancel</button>
-    </div>
     <div id="sim-panel" class="hidden">
       <div class="plan-panel-header">
         <span>LoRa flood simulator</span>
@@ -149,6 +147,9 @@
           <div class="plan-row">
             <button id="sim-add-companion" title="Click the map to place a virtual handheld/companion device">📱 Add companion location</button>
             <button id="sim-nodes-clear">Clear all</button>
+          </div>
+          <div id="sim-companion-hint" class="plan-hint hidden">
+            Click the map to place a virtual companion device (originates/receives traffic like a handheld, but doesn't relay). Drag it to move; click the button again to stop placing.
           </div>
           <div id="sim-node-list" class="plan-list"></div>
 

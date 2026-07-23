@@ -184,19 +184,19 @@ approximation — compiled to the same shared WASM module as the
 [planning tools](#planning-tools) (`wasm/meshsim.go`; see
 [WASM shared core](#wasm-shared-core)).
 
-Opens as a wide centered workspace (not a docked sidebar like Plan) with
-its own backdrop — a loaded node list, a full results log, and a
-per-repeater prediction breakdown all need real room, not one cramped
-320px column everything has to take turns scrolling through.
+Docks to the right edge like Plan, but noticeably wider (480px vs Plan's
+320px) — a loaded node list, a full results log, and a per-repeater
+prediction breakdown need more room than that, while still leaving the
+map itself visible and usable alongside it (an earlier full-viewport
+overlay version traded the cramped-sidebar problem for a worse one — no
+map visible at all — and was reverted).
 
 1. **Load nodes** — pull in this browser's currently active plan's
    repeaters, the site's real repeaters, or both, plus (**📱 Add companion
    location**) any number of virtual handheld/companion devices at
    arbitrary points you click on the map — draggable afterward, and, unlike
    a repeater, never relays traffic (originates/receives only, matching a
-   real MeshCore companion app). Placing one temporarily steps the whole
-   workspace aside (there'd be nowhere left to click on the map otherwise)
-   and brings it back the moment you place it or hit Cancel.
+   real MeshCore companion app).
 2. **Build connectivity** — choose how links between nodes are decided:
    the propagation model (terrain-aware, works for planned repeaters and
    companion locations too), CoreScope's own observed reach data (real
@@ -277,6 +277,28 @@ additionally require CoreScope's reported `default_scope` (the node's most
 recently observed MeshCore hashtag scope) to match a given region tag —
 useful if a CoreScope instance's operators consistently self-tag, but off by
 default since not every repeater broadcasts one.
+
+### Inferring real scope from channel traffic
+
+`default_scope` is self-reported and, in practice, sparse — on a real
+production CoreScope instance, roughly three quarters of repeaters have
+none set at all. `corescope.scope_inference` (off by default) fills that
+gap by observing real behaviour instead: it walks a real window
+(`window_hours`, default 7 days) of CoreScope's own packet traffic, reads
+the plaintext channel name CoreScope decodes for any packet whose channel
+key it knows (`decoded_json.channel` — present for ordinary regional/
+community channels, not private ones), and tallies which channel each
+repeater relays most as a flood participant. The result — `inferred_scope`
+— is written alongside (not merged with) `default_scope` in
+`repeaters.geojson`, since the two can legitimately disagree, and shown in
+the map popup for both.
+
+Real relay-path hops are recorded as short public-key prefixes (MeshCore
+trims each hop to that node's own configured `hash_size`), resolved back
+to a full key against CoreScope's complete node directory
+(`internal/corescope.FetchAllNodes`) — an ambiguous prefix (shared by more
+than one real node) is dropped rather than guessed, so a wrong attribution
+never silently happens.
 
 ## How the coverage estimate works
 
@@ -628,7 +650,7 @@ field within each):
 | `site` | Frontend branding, active/degraded/silent status thresholds, scope-filter checkboxes |
 | `map` | Initial Leaflet view (center, zoom) |
 | `region` | [Region boundary](#region-not-just-scotland), required CoreScope scope |
-| `corescope` | Which CoreScope instance to query, request timeout |
+| `corescope` | Which CoreScope instance to query, request timeout, [real scope inference](#inferring-real-scope-from-channel-traffic) |
 | `terrain` | DEM zoom/cache/tile source |
 | `propagation` | Link-budget/RF model inputs — see [How the coverage estimate works](#how-the-coverage-estimate-works) |
 | `coverage` | Raster resolution, [per-tier GPU gating](#remote-gpu-worker), recompute interval |
