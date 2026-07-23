@@ -68,8 +68,43 @@ func loadLocalGrid(points []coverage.Point, zoom int, cacheDir, tileURLBase stri
 	return demgrid.Load(demgrid.Bounds{South: b.South, North: b.North, West: b.West, East: b.East}, zoom, cacheDir, tileURLBase, client, nil)
 }
 
+// cleanStaleGridScratch removes any leftover demgrid mmap scratch files
+// (see internal/demgrid's mmapFloat32) from a previous run that never
+// reached grid.Close() — see its call site in run() for why this is
+// always safe. Missing directory (nothing ever cached yet) or a file that
+// won't remove for some other reason are both logged-and-ignored rather
+// than failing the run: this is disk hygiene, not correctness.
+func cleanStaleGridScratch(demCacheDir string) {
+	dir := filepath.Join(demCacheDir, "grid-scratch")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if err := os.Remove(path); err != nil {
+			log.Printf("coverage: could not remove stale grid-scratch file %s: %v", path, err)
+		}
+	}
+}
+
 func run(cfg appConfig) error {
 	ctx := context.Background()
+
+	// Always safe here, even before deciding whether a real pass is due:
+	// the cross-process lock (see lock.go, held by the caller for the
+	// entirety of run()) guarantees only one run() is ever active at a
+	// time, so nothing left in grid-scratch could still be in use by
+	// another process. Left uncleaned, these accumulate — a crashed run
+	// (OOM, kill, panic) never reaches grid.Close(), and a single
+	// Precision-tier grid can be a gigabyte or more — silently filling the
+	// host's disk over repeated crashes (confirmed in production: 13
+	// orphaned files, 17GB total, from one night of debugging GPU
+	// dispatch issues).
+	cleanStaleGridScratch(cfg.demCacheDir)
 
 	if !cfg.forceRecompute {
 		if last, ok := lastGeneratedAt(cfg.outputDir); ok {
