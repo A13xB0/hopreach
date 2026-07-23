@@ -91,8 +91,12 @@
 
   // Persistent (survives basemap switches, unlike each layer's own
   // attribution) link to the source repo, so anyone looking at the map can
-  // find where it comes from.
-  map.attributionControl.addAttribution('<a href="https://github.com/A13xB0/hopreach" target="_blank" rel="noopener">HopReach on GitHub</a>');
+  // find where it comes from. version-tag starts empty and is filled in by
+  // loadMeta() once meta.json's own Version field is known — always
+  // obvious at a glance which release actually generated what's on screen.
+  map.attributionControl.addAttribution(
+    '<a href="https://github.com/A13xB0/hopreach" target="_blank" rel="noopener">HopReach on GitHub</a> <span id="version-tag"></span>'
+  );
 
   const statusColor = { active: "#4ade80", degraded: "#facc15", silent: "#64748b" };
 
@@ -417,6 +421,8 @@
         document.getElementById("count-silent").textContent = meta.counts.silent;
         document.getElementById("last-updated").textContent =
           `Last updated: ${new Date(meta.generated_at).toLocaleString()}`;
+        const versionTag = document.getElementById("version-tag");
+        if (versionTag && meta.version) versionTag.textContent = `(${meta.version})`;
 
         if (meta.coverage) {
           ensurePositionModeControl(meta.coverage);

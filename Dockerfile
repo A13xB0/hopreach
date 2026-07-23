@@ -5,13 +5,18 @@
 # target glibc. The runtime stage below has to follow suit for the same
 # reason.
 FROM golang:1.23-bookworm AS build
+# VERSION is passed by .github/workflows/release.yml as the git tag that
+# triggered this build (e.g. v0.1.8) — "dev" (buildinfo's own default,
+# unmistakable in the UI/analytics page) if built some other way, e.g.
+# `docker compose up --build` locally with no --build-arg.
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-RUN CGO_ENABLED=1 go build -o /app/hopreach ./cmd/hopreach \
-  && CGO_ENABLED=0 go build -o /app/hopreach-shareapi ./cmd/hopreach-shareapi
+RUN CGO_ENABLED=1 go build -ldflags "-X hopreach/internal/buildinfo.Version=${VERSION}" -o /app/hopreach ./cmd/hopreach \
+  && CGO_ENABLED=0 go build -ldflags "-X hopreach/internal/buildinfo.Version=${VERSION}" -o /app/hopreach-shareapi ./cmd/hopreach-shareapi
 
 # --- build the WASM module shared by the browser-side planning tools ---
 # Compiles internal/propagation + internal/demgrid — the exact code the

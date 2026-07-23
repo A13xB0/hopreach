@@ -52,6 +52,8 @@ jobs:
           context: .
           file: Dockerfile
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: |
             ghcr.io/${{ steps.image.outputs.name }}:${{ github.ref_name }}
             ghcr.io/${{ steps.image.outputs.name }}:latest
@@ -65,6 +67,8 @@ jobs:
           context: .
           file: docker/gpuworker.Dockerfile
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
           tags: |
             ghcr.io/${{ steps.image.outputs.name }}-gpuworker:${{ github.ref_name }}
             ghcr.io/${{ steps.image.outputs.name }}-gpuworker:latest

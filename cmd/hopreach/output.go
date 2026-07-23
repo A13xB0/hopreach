@@ -175,6 +175,11 @@ type meta struct {
 	// partway through (crash, OOM, kill) instead of only ever being
 	// overwritten by a later, complete run.
 	Complete bool `json:"complete"`
+	// Version is this binary's own buildinfo.Version — "dev" outside a
+	// real release build. Shown in the frontend footer so it's always
+	// obvious at a glance which release actually generated the data on
+	// screen.
+	Version string `json:"version"`
 }
 
 func writeJSONFile(path string, v any) error {

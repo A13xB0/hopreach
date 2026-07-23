@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"hopreach/internal/buildinfo"
 	"hopreach/internal/calibration"
 	"hopreach/internal/compute"
 	"hopreach/internal/corescope"
@@ -230,6 +231,7 @@ func run(cfg appConfig) error {
 		TotalRepeatersFetched: len(nodes),
 		RepeatersInRegion:     len(features),
 		Counts:                counts,
+		Version:               buildinfo.Version,
 	}
 	metaPath := filepath.Join(cfg.outputDir, "meta.json")
 	writeMeta := func() error {

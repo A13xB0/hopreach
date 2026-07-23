@@ -7,12 +7,15 @@
 # wgpu-native's prebuilt static libs, which target glibc, so both build and
 # runtime stages have to follow suit.
 FROM golang:1.23-bookworm AS build
+# VERSION is passed by .github/workflows/release.yml as the git tag that
+# triggered this build — see the main Dockerfile's own ARG VERSION comment.
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY internal/ ./internal/
 COPY cmd/hopreach-gpuworker/ ./cmd/hopreach-gpuworker/
-RUN CGO_ENABLED=1 go build -o /app/hopreach-gpuworker ./cmd/hopreach-gpuworker
+RUN CGO_ENABLED=1 go build -ldflags "-X hopreach/internal/buildinfo.Version=${VERSION}" -o /app/hopreach-gpuworker ./cmd/hopreach-gpuworker
 
 # --- runtime: just the worker binary, needs real GPU/Vulkan access ---
 FROM debian:bookworm-slim
