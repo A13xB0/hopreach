@@ -1,5 +1,6 @@
 // @ts-check
 const { test, expect } = require("@playwright/test");
+const { gotoReady } = require("./helpers");
 
 // Two close-together points (~500m apart, well within simulator.js's
 // SIM_MAX_RANGE_KM) near Loch Lomond — real Scottish terrain, so DEM tiles
@@ -21,12 +22,14 @@ const TEST_PLAN = {
   notes: "",
 };
 
+// This file's tests all use "Load planned repeaters" (client-only, from
+// the seeded plan above), never "Load real repeaters" — no need to wait
+// on the live CoreScope fetch (see helpers.js).
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((plan) => {
     localStorage.setItem("hopreach.plans", JSON.stringify({ [plan.id]: plan }));
   }, TEST_PLAN);
-  await page.goto("/");
-  await expect(page.locator("#count-active")).not.toHaveText("–", { timeout: 60_000 });
+  await gotoReady(page);
 });
 
 test("simulate panel opens and is mutually exclusive with the plan panel", async ({ page }) => {

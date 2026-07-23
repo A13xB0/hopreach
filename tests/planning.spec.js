@@ -1,9 +1,13 @@
 // @ts-check
 const { test, expect } = require("@playwright/test");
+const { gotoReady } = require("./helpers");
 
+// None of this file's tests touch real repeater data (add-repeater/LOS are
+// client-only bookkeeping, companion pin is pure UI state) — see
+// helpers.js for why readiness here doesn't wait on the live CoreScope
+// fetch.
 test.beforeEach(async ({ page }) => {
-  await page.goto("/");
-  await expect(page.locator("#count-active")).not.toHaveText("–", { timeout: 60_000 });
+  await gotoReady(page);
 });
 
 test("plan panel opens, add-repeater places markers via map clicks, closes", async ({ page }) => {
