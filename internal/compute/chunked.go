@@ -111,25 +111,33 @@ func (e *Engine) remoteChunkBudgetBytes() float64 {
 
 // planningChunkBudgetBytes picks the budget MarginsChunked plans tile sizes
 // against: an explicit override (SetChunkBudgetBytes) always wins;
-// otherwise the remote worker's own (typically much larger) budget when one
-// is connected, since a connected worker serves the vast majority of tiles
-// and never needs this box's own memory at all for them — sizing every
-// tile down to this box's own tiny budget "just in case" it might someday
-// need to fall back paid enormous, unnecessary dispatch overhead for a
-// fallback that, in the common case, never happens (confirmed in
-// production: a real Precision pass that fits in ~15 tiles at a sane
-// remote-sized budget needed ~3,960 at this box's own tiny budget instead —
-// each one its own broker round trip). A tile that does need to fall back
-// gets re-split down to localChunkBudgetBytes right at that point instead
-// of paying for it up front — see computeTileLocal.
+// otherwise the *smaller* of this box's own budget and a connected remote
+// worker's — deliberately not just the remote worker's own (typically much
+// larger) budget, even though a connected worker serves the vast majority
+// of tiles and never needs this box's own memory for them (see
+// computeTile's stub-grid path): tried planning for remote alone in
+// production and it traded one real problem for another — the remote
+// worker's own per-job footprint for one such larger tile (terrain grid +
+// its GPU-side staging copy + the full compute-resolution output array,
+// not just the grid alone that remoteChunkBudgetBytes' own budget targets)
+// OOM-killed *it* instead, confirmed via systemd's own peak-memory
+// accounting landing around 2.4x the nominal per-tile budget. Smaller,
+// more numerous tiles cost more dispatch round trips (confirmed
+// acceptable: well under the interval before the next scheduled
+// recompute), which is a real but bounded and known-safe cost, unlike an
+// intermittent worker crash. A tile that still can't reach the remote
+// worker re-splits itself further down to localChunkBudgetBytes right at
+// that point — see computeTileLocal.
 func (e *Engine) planningChunkBudgetBytes() float64 {
 	if e.chunkBudgetBytes > 0 {
 		return e.chunkBudgetBytes
 	}
-	if remoteBudget := e.remoteChunkBudgetBytes(); remoteBudget > 0 {
+	localBudget := e.localChunkBudgetBytes()
+	remoteBudget := e.remoteChunkBudgetBytes()
+	if remoteBudget > 0 && remoteBudget < localBudget {
 		return remoteBudget
 	}
-	return e.localChunkBudgetBytes()
+	return localBudget
 }
 
 // demTileBytes is one decoded 256x256 terrarium tile's footprint in the

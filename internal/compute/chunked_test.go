@@ -553,20 +553,27 @@ func statusServer(t *testing.T, availableBytes uint64) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-// TestPlanningChunkBudgetBytesPrefersRemoteWhenAvailable is the regression
-// test for the fix to a real production performance problem: tiles used to
-// be planned against whichever of the local/remote budgets was *smaller*,
-// on the theory that a tile might fall back to local/CPU mid-pass and
-// needed to be safe for that case too — but the terrain grid for a tile a
-// connected remote worker serves is never loaded on this box at all (see
-// computeTile), so that safety margin cost real dispatch overhead
-// (confirmed in production: ~15 tiles at a sane remote-sized budget vs.
-// ~3,960 at this box's own tiny budget) for a fallback that, in the common
-// case, never happens. A tile that does need to fall back now gets
-// re-split down to the local budget right at that point instead (see
-// TestComputeTileFallsBackAndResplitsWhenRemoteFails) — planning itself
-// should now prefer the remote budget outright whenever one is known.
-func TestPlanningChunkBudgetBytesPrefersRemoteWhenAvailable(t *testing.T) {
+// TestPlanningChunkBudgetBytesPicksSmallerOfLocalAndRemote is the
+// regression test for the actual safety property this design exists for.
+// Planning tiles against the remote worker's own (typically much larger)
+// budget was tried in production — the terrain grid for a tile a connected
+// remote worker serves is never loaded on this box at all (see
+// computeTile), so in theory that safety margin only ever cost dispatch
+// overhead — but it traded one real problem for another: the remote
+// worker's own per-job footprint for one such larger tile (terrain grid +
+// its GPU-side staging copy + the full compute-resolution output array, not
+// just the grid alone) OOM-killed *it* instead, confirmed via systemd's own
+// peak-memory accounting landing around 2.4x the nominal per-tile budget.
+// Planning now goes back to the smaller of the two budgets — slower
+// (confirmed acceptable: well under the interval before the next scheduled
+// recompute) but proven safe for both boxes, rather than fast but capable
+// of crashing whichever box actually ends up doing the work. A tile that
+// still can't reach the remote worker re-splits itself further down (see
+// TestComputeTileFallsBackAndResplitsWhenRemoteFails), which stays
+// available as a defence in depth even though it should rarely trigger now
+// that tiles are never planned larger than what's already safe for either
+// side to begin with.
+func TestPlanningChunkBudgetBytesPicksSmallerOfLocalAndRemote(t *testing.T) {
 	localOnly := New().planningChunkBudgetBytes() // no remote configured — pure local sizing, for comparison
 
 	t.Run("remote reports far less than local", func(t *testing.T) {
@@ -575,8 +582,11 @@ func TestPlanningChunkBudgetBytesPrefersRemoteWhenAvailable(t *testing.T) {
 		e := New()
 		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
 		got := e.planningChunkBudgetBytes()
+		if got > localOnly {
+			t.Errorf("planningChunkBudgetBytes() = %.0f, want <= the local-only budget %.0f when remote reports much less RAM", got, localOnly)
+		}
 		if got != minAutoChunkBudgetBytes {
-			t.Errorf("planningChunkBudgetBytes() = %.0f, want the remote-derived %d floor even though it's smaller than local", got, minAutoChunkBudgetBytes)
+			t.Errorf("planningChunkBudgetBytes() = %.0f, want the %d floor for a 2GB remote report", got, minAutoChunkBudgetBytes)
 		}
 	})
 
@@ -586,8 +596,8 @@ func TestPlanningChunkBudgetBytesPrefersRemoteWhenAvailable(t *testing.T) {
 		e := New()
 		e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
 		got := e.planningChunkBudgetBytes()
-		if got <= localOnly {
-			t.Errorf("planningChunkBudgetBytes() = %.0f, want it to prefer the (much larger) remote budget over the local-only figure %.0f", got, localOnly)
+		if !closeEnough(got, localOnly) {
+			t.Errorf("planningChunkBudgetBytes() = %.0f, want approximately the local-only budget %.0f when remote reports far more RAM than local (must never pick a budget only safe for the remote box)", got, localOnly)
 		}
 	})
 
@@ -604,11 +614,15 @@ func TestPlanningChunkBudgetBytesPrefersRemoteWhenAvailable(t *testing.T) {
 }
 
 // TestComputeTileFallsBackAndResplitsWhenRemoteFails is the correctness
-// check for the other half of the performance fix above: a tile planned
-// against a large remote budget, that then can't actually reach the remote
-// worker, must still produce a correct result — by re-splitting itself down
-// to the local budget rather than either failing outright or (worse)
-// silently using the wrong terrain. Over flat (terrain-independent)
+// check for computeTileLocal's re-split fallback — kept as defence in
+// depth even though planning now picks the smaller of local/remote (so a
+// tile planned larger than the local budget should be rare), since it can
+// still happen (a box with more local RAM than a small remote worker, or
+// the remote budget shrinking between planning and dispatch). A tile
+// planned against a large remote budget that then can't actually reach the
+// remote worker must still produce a correct result — by re-splitting
+// itself down to the local budget rather than either failing outright or
+// (worse) silently using the wrong terrain. Over flat (terrain-independent)
 // synthetic elevation data, the re-split, CPU-computed result must exactly
 // match a plain unchunked reference pass.
 func TestComputeTileFallsBackAndResplitsWhenRemoteFails(t *testing.T) {
