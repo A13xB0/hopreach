@@ -64,6 +64,21 @@ async function clickMapUntilNodeCount(page, map, position, expectedCount) {
   }
 }
 
+// Same pre-existing Leaflet click-swallowing flakiness as
+// clickMapUntilNodeCount above, generalized for "click this marker, then
+// wait for some other element to become visible as a result" instead of a
+// node-count check — CI runners (slower/more resource-constrained than a
+// local dev machine) hit this more often than local runs did.
+async function clickUntilVisible(clickLocator, visibleLocator, clickOptions) {
+  await clickLocator.click(clickOptions);
+  try {
+    await expect(visibleLocator).toBeVisible({ timeout: 1500 });
+  } catch {
+    await clickLocator.click(clickOptions);
+    await expect(visibleLocator).toBeVisible({ timeout: 3000 });
+  }
+}
+
 test("simulate panel opens and is mutually exclusive with the plan panel", async ({ page }) => {
   await page.click("#sim-toggle");
   await expect(page.locator("#sim-panel")).toBeVisible();
@@ -219,8 +234,7 @@ test("clicking a repeater marker opens the repeaters modal, and applied settings
   await page.click("#sim-load-planned");
   await expect(page.locator("#sim-node-count-badge")).toHaveText("2");
 
-  await page.locator(".sim-marker-icon").first().click({ force: true });
-  await expect(page.locator("#sim-nodes-modal")).toBeVisible();
+  await clickUntilVisible(page.locator(".sim-marker-icon").first(), page.locator("#sim-nodes-modal"), { force: true });
   const firstRow = page.locator("#sim-nodes-modal-tbody tr").first();
   // txDelayFactor, directTxDelayFactor, rxDelayBase, txPowerDbm, hashSize
   // (number inputs) plus loopDetect (its own select, not matched here).
@@ -425,8 +439,7 @@ test("packet inspector: message details and clicking a repeater after a run both
   // the bottom-right playback control at this viewport size — pan the map
   // so the markers land somewhere clear of it before clicking.
   await page.evaluate(() => window.__hopreachSimulatorDebug.panBy(300, 300));
-  await page.locator(".sim-marker-icon").first().click();
-  await expect(page.locator("#sim-packet-modal")).toBeVisible();
+  await clickUntilVisible(page.locator(".sim-marker-icon").first(), page.locator("#sim-packet-modal"));
   await expect(page.locator("#sim-packet-modal-title")).toContainText("Packets at");
   await expect(page.locator("#sim-nodes-modal")).toBeHidden();
 
