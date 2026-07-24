@@ -6,6 +6,44 @@
 
   const map = L.map("map").setView(cfg.mapCenter, cfg.mapZoom);
 
+  // Shared collapsible-header pattern for the small custom controls
+  // stacked top-right (Map detail, region scope filter, and — added by
+  // simulator.js only while Simulate mode is open — the simulator's own
+  // view options). Exposed on window (app.js loads before simulator.js —
+  // see index.html's own script order) so both files build their controls
+  // the same way rather than each growing its own collapse logic. Each
+  // control's own collapsed state persists independently (keyed by
+  // storageKey) — having several of these stacked up at once was the
+  // whole reason to make each one collapsible, so leaving one collapsed
+  // shouldn't reset just because the page reloaded.
+  window.HopReachMapControls = {
+    collapsibleHtml(title, bodyHtml, storageKey) {
+      const collapsed = localStorage.getItem(`hopreach.mapControlCollapsed.${storageKey}`) === "1";
+      return `
+        <div class="map-control-header" data-storage-key="${storageKey}">
+          <span>${title}</span>
+          <span class="map-control-chevron">${collapsed ? "▸" : "▾"}</span>
+        </div>
+        <div class="map-control-body${collapsed ? " hidden" : ""}">${bodyHtml}</div>
+      `;
+    },
+    // Call once, right after setting a control div's innerHTML to
+    // collapsibleHtml's output, to wire up the header's click-to-toggle.
+    wireCollapsible(div) {
+      const header = div.querySelector(".map-control-header");
+      if (!header) return;
+      header.addEventListener("click", () => {
+        const key = header.dataset.storageKey;
+        const body = div.querySelector(".map-control-body");
+        const chevron = header.querySelector(".map-control-chevron");
+        const nowCollapsed = !body.classList.contains("hidden");
+        body.classList.toggle("hidden", nowCollapsed);
+        chevron.textContent = nowCollapsed ? "▸" : "▾";
+        localStorage.setItem(`hopreach.mapControlCollapsed.${key}`, nowCollapsed ? "1" : "0");
+      });
+    },
+  };
+
   const baseLayers = {
     // _nolabels (not _all): place names/roads are drawn separately, in the
     // "labels" pane below, which sits *above* the coverage overlay — see
@@ -101,6 +139,11 @@
   const statusColor = { active: "#4ade80", degraded: "#facc15", silent: "#64748b" };
 
   let clusters = null;
+  // Off by default (clustered) — see the general "Marker clustering" map
+  // control below. L.featureGroup (not plain layerGroup) so getBounds()
+  // still works for the initial fitBounds the same way markerClusterGroup
+  // already provides it.
+  let clusteringDisabled = false;
   let coverageLayer = null; // L.layerGroup wrapping the current set of tile overlays
   let coverageTileOverlays = []; // the individual L.imageOverlay instances, for opacity control (LayerGroup has no setOpacity)
   let legendControl = null;
@@ -121,7 +164,29 @@
     { value: "calibrated_precision", label: "Calibrated Precision" },
   ];
   const CALIBRATED_MODES = new Set(["calibrated", "calibrated_precision"]);
-  let positionMode = localStorage.getItem(POSITION_MODE_KEY) || "standard";
+
+  // Default "Map detail" is Calibrated Precision (the most accurate tier)
+  // when it's actually available — ensurePositionModeControl falls back to
+  // whatever the current instance does have if it isn't. Once a visitor
+  // has ever picked something themselves, that choice is saved and always
+  // wins over this default (see the change listener below).
+  const DEFAULT_POSITION_MODE = "calibrated_precision";
+  // One-time reset, keyed to this change: every visitor — including one
+  // with an older saved preference from before Calibrated Precision was
+  // the default — gets switched to it once. POSITION_MODE_MIGRATION_KEY
+  // itself is what remembers "already did this," so it never fires again
+  // for a given browser; any choice made after that (including switching
+  // straight back to their old preference) is saved and respected exactly
+  // as before.
+  const POSITION_MODE_MIGRATION_KEY = "hopreach.positionModeDefaultMigrated.2026-07-25";
+  let positionMode;
+  if (localStorage.getItem(POSITION_MODE_MIGRATION_KEY)) {
+    positionMode = localStorage.getItem(POSITION_MODE_KEY) || DEFAULT_POSITION_MODE;
+  } else {
+    positionMode = DEFAULT_POSITION_MODE;
+    localStorage.setItem(POSITION_MODE_KEY, positionMode);
+    localStorage.setItem(POSITION_MODE_MIGRATION_KEY, "1");
+  }
   let positionModeControl = null;
 
   function usesCalibratedPositions(mode) {
@@ -170,118 +235,49 @@
   // --- per-scope coverage overlays ----------------------------------
   //
   // Beyond filtering which markers show, each *checked* scope also gets
-  // its own coverage-raster overlay — computed client-side (the same WASM
-  // propagation model the planning tools use, via a dedicated Worker so
-  // it never janks the map), restricted to only the repeaters believed to
-  // actually be in that scope. Checking multiple scopes at once overlays
-  // their (semi-transparent, distinctly coloured) coverage together, so
-  // real per-region coverage can be visually compared, not just the
-  // marker set.
-  const SCOPE_COLORS = ["#38bdf8", "#f472b6", "#facc15", "#4ade80", "#a78bfa", "#fb923c", "#22d3ee", "#f87171"];
-  let scopeCoverageWorker = null;
-  let scopeCoverageGeneration = 0;
-  const scopeOverlays = new Map(); // scope name -> L.imageOverlay
-  let knownRegionNames = [];
-
-  function ensureScopeCoverageWorker() {
-    if (!scopeCoverageWorker) scopeCoverageWorker = new Worker("planner-worker.js");
-    return scopeCoverageWorker;
-  }
-
-  function colorForScope(name) {
-    const idx = Math.max(0, knownRegionNames.indexOf(name));
-    return SCOPE_COLORS[idx % SCOPE_COLORS.length];
-  }
-
-  function hexToRgb(hex) {
-    const n = parseInt(hex.slice(1), 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-  }
+  // its own coverage-raster overlay — pre-computed server-side, nightly,
+  // the same way the main "Estimated coverage" layer is (see run()'s
+  // "computing_scope_coverage" block and meta.json's scope_coverage
+  // field), restricted to only the repeaters actually observed in that
+  // scope. Checking multiple scopes at once overlays their tiles
+  // together, so real per-region reach can be visually compared, not
+  // just the marker set. Static tiles (not a client-side WASM
+  // computation) so this loads instantly and matches the main coverage
+  // layer's own reliability, rather than depending on the browser's own
+  // compute for a potentially slow live raster.
+  const scopeOverlayGroups = new Map(); // scope name -> L.layerGroup (of its own tiles)
 
   function clearScopeOverlay(name) {
-    const overlay = scopeOverlays.get(name);
-    if (overlay) {
-      map.removeLayer(overlay);
-      layersControl.removeLayer(overlay);
-      scopeOverlays.delete(name);
+    const group = scopeOverlayGroups.get(name);
+    if (group) {
+      map.removeLayer(group);
+      layersControl.removeLayer(group);
+      scopeOverlayGroups.delete(name);
     }
   }
 
-  function renderScopeOverlay(name, msg) {
-    const { bounds, imageWidth, imageHeight, marginGreenDb } = msg;
-    const margins = new Float32Array(msg.margins);
-    const canvas = document.createElement("canvas");
-    canvas.width = imageWidth;
-    canvas.height = imageHeight;
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.createImageData(imageWidth, imageHeight);
-
-    const rgb = hexToRgb(colorForScope(name));
-    for (let i = 0; i < margins.length; i++) {
-      const m = margins[i];
-      const p = i * 4;
-      if (Number.isNaN(m)) {
-        imgData.data[p + 3] = 0;
-        continue;
-      }
-      let t = m / marginGreenDb;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      imgData.data[p] = rgb[0];
-      imgData.data[p + 1] = rgb[1];
-      imgData.data[p + 2] = rgb[2];
-      // Even marginal coverage (t near 0) stays visibly tinted rather than
-      // fading to near-nothing — comparing *which* scope reaches an area
-      // at all matters here more than the fine margin gradient a single
-      // scope's own preview cares about.
-      imgData.data[p + 3] = Math.round(70 + 90 * t);
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    const llBounds = [
-      [bounds.south, bounds.west],
-      [bounds.north, bounds.east],
-    ];
-    const overlay = L.imageOverlay(canvas.toDataURL("image/png"), llBounds, { interactive: false }).addTo(map);
-    layersControl.addOverlay(overlay, `Scope coverage: ${name}`);
-    scopeOverlays.set(name, overlay);
-  }
-
-  function computeScopeCoverage(name) {
+  function renderScopeOverlay(name) {
     clearScopeOverlay(name);
-    if (!currentGeojson) return;
-    const sites = currentGeojson.features
-      .filter((f) => repeaterScopesOf(f.properties).includes(name))
-      .map((f) => ({ lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
-    if (sites.length === 0) return;
-
-    const generation = ++scopeCoverageGeneration;
-    const worker = ensureScopeCoverageWorker();
-
-    function onMessage(e) {
-      const msg = e.data;
-      if (msg.scopeId !== name || msg.generation !== generation) return;
-      if (msg.type === "scope-result") {
-        worker.removeEventListener("message", onMessage);
-        if (!msg.empty) renderScopeOverlay(name, msg);
-      } else if (msg.type === "scope-error") {
-        worker.removeEventListener("message", onMessage);
-        console.error(`scope coverage (${name}):`, msg.message);
-      }
-    }
-    worker.addEventListener("message", onMessage);
-    worker.postMessage({
-      kind: "scope-coverage",
-      generation,
-      scopeId: name,
-      sites,
-      config: { demTileURLBase: cfg.demTileURLBase, demZoom: cfg.demZoom, propagation: cfg.propagation },
-      // Deliberately coarser than the planning preview's own 320px-ish
-      // scale would suggest for a single site — a scope's repeaters can
-      // span a whole region, and the raster loop is O(pixels × sites), so
-      // a smaller image keeps that tractable for potentially dozens of
-      // sites. This is a rough per-region overview, not a precise map.
-      imageWidth: 400,
+    const cm = currentMeta && currentMeta.scope_coverage && currentMeta.scope_coverage[name];
+    if (!cm || !cm.tiles || cm.tiles.length === 0) return;
+    const tileLayers = cm.tiles.map((t) => {
+      const b = t.bounds;
+      const overlay = L.imageOverlay(`data/${t.image}?t=${Date.parse(currentMeta.generated_at)}`, [[b.South, b.West], [b.North, b.East]], {
+        interactive: false,
+      });
+      // Nearest-neighbour, same as the main coverage layer (see
+      // applyCoverageLayer) and for the same reason — a smoothly-scaled
+      // Standard-tier raster overlapping a sharp one can visually appear
+      // shifted relative to it.
+      overlay.on("add", () => {
+        const img = overlay.getElement();
+        if (img) img.classList.add("coverage-crisp");
+      });
+      return overlay;
     });
+    const group = L.layerGroup(tileLayers).addTo(map);
+    layersControl.addOverlay(group, `Scope coverage: ${name}`);
+    scopeOverlayGroups.set(name, group);
   }
 
   async function initScopeFilterControl() {
@@ -309,7 +305,6 @@
     }
     if (regionNames.length === 0) return; // nothing to filter by yet, on this instance
 
-    knownRegionNames = regionNames;
     for (const name of regionNames) scopeFilterState[name] = false;
     scopeFilterState["unscoped"] = false;
 
@@ -319,15 +314,16 @@
       const rows =
         regionNames.map((name) => `<label><input type="checkbox" data-scope="${escapeHtml(name)}"> ${escapeHtml(name)}</label>`).join("") +
         `<label><input type="checkbox" data-scope="unscoped"> Unscoped</label>`;
-      div.innerHTML = `<div class="scope-filter-title">Filter by region scope</div>${rows}`;
+      div.innerHTML = window.HopReachMapControls.collapsibleHtml("Filter by region scope", rows, "region-scope-filter");
       L.DomEvent.disableClickPropagation(div);
+      window.HopReachMapControls.wireCollapsible(div);
       div.querySelectorAll("input[type=checkbox]").forEach((input) => {
         input.addEventListener("change", (e) => {
           const name = e.target.dataset.scope;
           scopeFilterState[name] = e.target.checked;
           renderFilteredRepeaters();
           if (name !== "unscoped") {
-            if (e.target.checked) computeScopeCoverage(name);
+            if (e.target.checked) renderScopeOverlay(name);
             else clearScopeOverlay(name);
           }
         });
@@ -337,6 +333,46 @@
     scopeFilterControl.addTo(map);
   }
   initScopeFilterControl();
+
+  // Always available, regardless of mode (Plan/Simulate/neither) — unlike
+  // the Plan panel's own "show all neighbours" (planned repeaters'
+  // predicted links only, see planner.js's allNeighborsLayer), this draws
+  // every REAL repeater's actual CoreScope-observed reach at once: the
+  // union of every currently-known real link, not a prediction. Both
+  // start unchecked — a busy region drawing every link/marker
+  // individually at once is a lot of visual noise to default to.
+  function initMapDisplayControl() {
+    // Starts collapsed (unlike collapsibleHtml's own default) — this is a
+    // secondary/advanced control, and expanded-by-default was pushing the
+    // topright control stack tall enough to visually overlap the
+    // bottom-right legend on a typical viewport. Only seeds the default
+    // once; a user's own explicit expand/collapse (see wireCollapsible)
+    // still persists and wins from then on.
+    const MAP_DISPLAY_COLLAPSE_KEY = "hopreach.mapControlCollapsed.map-display";
+    if (localStorage.getItem(MAP_DISPLAY_COLLAPSE_KEY) === null) {
+      localStorage.setItem(MAP_DISPLAY_COLLAPSE_KEY, "1");
+    }
+    const displayControl = L.control({ position: "topright" });
+    displayControl.onAdd = function () {
+      const div = L.DomUtil.create("div", "map-display-control");
+      const body = `
+        <label><input type="checkbox" id="show-all-real-neighbors-toggle"> Show all neighbours (observed)</label>
+        <label><input type="checkbox" id="disable-clustering-toggle"> Disable marker clustering</label>
+      `;
+      div.innerHTML = window.HopReachMapControls.collapsibleHtml("Map display", body, "map-display");
+      L.DomEvent.disableClickPropagation(div);
+      window.HopReachMapControls.wireCollapsible(div);
+      div.querySelector("#show-all-real-neighbors-toggle").addEventListener("change", (e) => {
+        if (window.HopReachPlanner) window.HopReachPlanner.setShowAllRealNeighbors(e.target.checked);
+      });
+      div.querySelector("#disable-clustering-toggle").addEventListener("change", (e) => {
+        setClusteringDisabled(e.target.checked);
+      });
+      return div;
+    };
+    displayControl.addTo(map);
+  }
+  initMapDisplayControl();
 
   function relativeTime(iso) {
     if (!iso) return "never";
@@ -456,7 +492,7 @@
     if (clusters) {
       map.removeLayer(clusters);
     }
-    clusters = L.markerClusterGroup({ maxClusterRadius: 45 });
+    clusters = clusteringDisabled ? L.featureGroup() : L.markerClusterGroup({ maxClusterRadius: 45 });
     const layer = L.geoJSON(filtered, {
       pointToLayer: (feature, latlng) =>
         L.circleMarker(displayedLatLng(feature.properties, latlng), {
@@ -483,6 +519,11 @@
     if (typeof window.onRepeatersLoaded === "function") {
       window.onRepeatersLoaded(filtered, layer);
     }
+  }
+
+  function setClusteringDisabled(disabled) {
+    clusteringDisabled = disabled;
+    renderFilteredRepeaters(false); // rebuild in the new mode, keeping the current view
   }
 
   function loadRepeaters() {
@@ -527,14 +568,18 @@
       map.removeLayer(coverageLayer);
     }
 
-    // Precision/Calibrated Precision are genuinely higher-resolution
-    // rasters — smooth (bilinear) upscaling when zoomed in blurs that real
-    // per-pixel detail into a soft gradient that reads as "not actually
-    // sharper." Standard/Calibrated keep the browser's smooth default,
-    // since at their coarser native resolution smoothing looks nicer than
-    // visibly blocky pixels.
-    const crisp = positionMode.includes("precision");
-
+    // Always crisp (nearest-neighbour), regardless of tier. This used to be
+    // smooth (bilinear) for Standard/Calibrated and crisp only for
+    // Precision/Calibrated Precision, on the theory that a coarser raster
+    // looks nicer smoothed — but bilinear upscaling doesn't just blur a
+    // layer's own detail, it also shifts *where* a boundary visually
+    // appears to sit relative to any other, sharply-rendered layer
+    // overlapping it (a real repeater-observed case: Standard coverage
+    // visibly sat "too high" next to Precision detail, and the same
+    // effect showed switching Standard<->Precision on their own). Uniform
+    // nearest-neighbour rendering keeps every tier's boundary at its real,
+    // unshifted position relative to every other — worth the coarser
+    // tiers looking blockier when zoomed in past their native resolution.
     coverageTileOverlays = cm.tiles.map((t) => {
       const b = t.bounds;
       const overlay = L.imageOverlay(`data/${t.image}?t=${Date.parse(currentMeta.generated_at)}`, [[b.South, b.West], [b.North, b.East]], {
@@ -543,7 +588,7 @@
       });
       overlay.on("add", () => {
         const img = overlay.getElement();
-        if (img) img.classList.toggle("coverage-crisp", crisp);
+        if (img) img.classList.add("coverage-crisp");
       });
       return overlay;
     });
@@ -578,11 +623,9 @@
     positionModeControl.onAdd = function () {
       const div = L.DomUtil.create("div", "position-mode-control");
       const options = available.map((o) => `<option value="${o.value}">${o.label}</option>`).join("");
-      div.innerHTML = `
-        <div class="position-mode-title">Map detail</div>
-        <select id="position-mode-select">${options}</select>
-      `;
+      div.innerHTML = window.HopReachMapControls.collapsibleHtml("Map detail", `<select id="position-mode-select">${options}</select>`, "map-detail");
       L.DomEvent.disableClickPropagation(div);
+      window.HopReachMapControls.wireCollapsible(div);
       const select = div.querySelector("#position-mode-select");
       select.value = positionMode;
       select.addEventListener("change", (e) => {
@@ -613,6 +656,13 @@
         if (meta.coverage) {
           ensurePositionModeControl(meta.coverage);
           applyCoverageLayer();
+        }
+        // Re-render any currently-checked scope overlay too — meta.json's
+        // scope_coverage tiles can go from absent to present (or get
+        // replaced by a fresher run) mid-poll, same as the main coverage
+        // layer above.
+        for (const name of Object.keys(scopeFilterState)) {
+          if (scopeFilterState[name] && name !== "unscoped") renderScopeOverlay(name);
         }
       })
       .catch((err) => console.error("meta.json load failed", err));
@@ -692,5 +742,6 @@
     getPositionMode: () => positionMode,
     usesCalibratedPositions,
     currentCoverageMeta,
+    setClusteringDisabled,
   };
 })();

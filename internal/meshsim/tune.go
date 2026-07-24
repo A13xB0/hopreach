@@ -62,13 +62,22 @@ type TuneResult struct {
 // entry point: callers pick from TuneResult.Suggestions (typically just the
 // top one, or the top one per rule category) rather than trusting a single
 // blind recommendation.
-func Suggest(req TuneRequest) TuneResult {
+//
+// progress, if non-nil, is called after the baseline and after every
+// candidate is evaluated — (1, total) through (total, total) — so a caller
+// driving this from a Web Worker (see wasm/meshsim.go's jsSimSuggest and
+// public/meshsim-worker.js) can show real search progress instead of a
+// plain "please wait": a real scenario's candidate grid (with Attrs
+// provided) is well over a hundred rules, each evaluated across req.Trials
+// full simulation runs, and this whole call was previously fully
+// synchronous on whichever thread invoked it — on the browser's main
+// thread that meant a genuinely frozen page for the entire search, not
+// just a slow one.
+func Suggest(req TuneRequest, progress func(done, total int)) TuneResult {
 	trials := req.Trials
 	if trials < 1 {
 		trials = 1
 	}
-
-	baseline := evaluate(req, ConfigRule{}, trials)
 
 	var candidates []ConfigRule
 	for _, td := range txDelayCandidates {
@@ -139,9 +148,22 @@ func Suggest(req TuneRequest) TuneResult {
 		}
 	}
 
+	total := len(candidates) + 1 // +1 for the baseline
+	done := 0
+	report := func() {
+		done++
+		if progress != nil {
+			progress(done, total)
+		}
+	}
+
+	baseline := evaluate(req, ConfigRule{}, trials)
+	report()
+
 	suggestions := make([]Suggestion, 0, len(candidates))
 	for _, c := range candidates {
 		suggestions = append(suggestions, Suggestion{Rule: c, CollisionRate: evaluate(req, c, trials)})
+		report()
 	}
 	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].CollisionRate < suggestions[j].CollisionRate })
 

@@ -13,8 +13,8 @@
 // Works in both the main thread and a Web Worker — see terrain.js's header
 // comment for why everything hangs off `self`.
 (function () {
-  function call(fnName, requestObj) {
-    const resultJSON = self.__hopreachWasm[fnName](JSON.stringify(requestObj));
+  function call(fnName, requestObj, ...extraArgs) {
+    const resultJSON = self.__hopreachWasm[fnName](JSON.stringify(requestObj), ...extraArgs);
     const result = JSON.parse(resultJSON);
     if (result && result.error) {
       throw new Error(`MeshSim.${fnName}: ${result.error}`);
@@ -29,11 +29,19 @@
     return call("simRun", { scenario, messages, seed, maxSimTimeMs });
   }
 
-  // suggest(tuneRequest) -> TuneResult
+  // suggest(tuneRequest[, onProgress]) -> TuneResult
   // tuneRequest: {scenario, messages, attrs, maxSimTimeMs, trials, seed}
   // attrs (optional): [{altitudeM, neighborCount}] parallel to scenario.nodes
-  function suggest(tuneRequest) {
-    return call("simSuggest", tuneRequest);
+  // onProgress (optional): (done, total) => void, called after the baseline
+  // and after every candidate rule is evaluated — see wasm/meshsim.go's
+  // jsSimSuggest/internal/meshsim.Suggest. This call can genuinely take
+  // seconds to tens of seconds for a real scenario (a real candidate grid
+  // is easily 100+ rules, each Trials full simulation runs) — see
+  // public/meshsim-worker.js, which is what actually calls this off the
+  // main thread so onProgress can drive a real progress bar without the
+  // page itself freezing for the whole search.
+  function suggest(tuneRequest, onProgress) {
+    return call("simSuggest", tuneRequest, onProgress);
   }
 
   self.MeshSim = {

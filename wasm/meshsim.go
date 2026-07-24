@@ -47,15 +47,28 @@ func jsSimRun(this js.Value, args []js.Value) any {
 	return string(out)
 }
 
-// jsSimSuggest(requestJSON) -> resultJSON. requestJSON decodes directly to
-// a meshsim.TuneRequest; resultJSON encodes a meshsim.TuneResult.
+// jsSimSuggest(requestJSON[, onProgress]) -> resultJSON. requestJSON
+// decodes directly to a meshsim.TuneRequest; resultJSON encodes a
+// meshsim.TuneResult. onProgress, if given and callable, is invoked as
+// onProgress(done, total) after the baseline and after every candidate —
+// see meshsim.Suggest's own doc comment for why this exists at all (a real
+// search is easily a hundred-plus candidates, each several simulation
+// runs, and this call used to give zero feedback for its entire duration).
 func jsSimSuggest(this js.Value, args []js.Value) any {
 	var req meshsim.TuneRequest
 	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
 		return jsErrorResult(err)
 	}
 
-	result := meshsim.Suggest(req)
+	var progress func(done, total int)
+	if len(args) > 1 && args[1].Type() == js.TypeFunction {
+		onProgress := args[1]
+		progress = func(done, total int) {
+			onProgress.Invoke(done, total)
+		}
+	}
+
+	result := meshsim.Suggest(req, progress)
 
 	out, err := json.Marshal(result)
 	if err != nil {

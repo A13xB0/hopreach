@@ -33,7 +33,7 @@
 
     <div id="map-tools">
       <button id="plan-toggle" title="Planning tools">Plan</button>
-      <button id="sim-toggle" title="LoRa flood simulator">📡 Simulate</button>
+      <button id="sim-toggle" title="LoRa flood simulator">📡 Simulate <span class="alpha-badge">ALPHA</span></button>
       <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
     </div>
     <div id="companion-pin-hint" class="plan-hint hidden">
@@ -132,120 +132,282 @@
       </div>
 
       <div class="sim-workspace">
-        <div class="sim-col sim-col-setup">
-          <div class="plan-hint">
-            Send simulated flood packets from chosen nodes and see where
-            floods collide, using MeshCore's real airtime/relay-delay
-            formulas (compiled from the same Go code as the server).
-          </div>
-
-          <div class="plan-section-title">Simulated nodes</div>
-          <div class="plan-row">
-            <button id="sim-load-planned">+ Load planned repeaters</button>
-            <button id="sim-load-real">+ Load real repeaters</button>
-          </div>
-          <div class="plan-row">
-            <button id="sim-add-companion" title="Click the map to place a virtual handheld/companion device">📱 Add companion location</button>
-            <button id="sim-nodes-clear">Clear all</button>
-          </div>
-          <div id="sim-companion-hint" class="plan-hint hidden">
-            Click the map to place a virtual companion device (originates/receives traffic like a handheld, but doesn't relay). Drag it to move; click the button again to stop placing.
-          </div>
-          <div id="sim-node-list" class="plan-list"></div>
-
-          <div class="plan-section-title">Connectivity source</div>
-          <div class="plan-row">
-            <select id="sim-connectivity-source">
-              <option value="model">Propagation model</option>
-              <option value="corescope">CoreScope observed (real repeaters only)</option>
-              <option value="blend">Blend (observed where available, else model)</option>
-            </select>
-            <button id="sim-build-links">Build links</button>
-          </div>
-          <div id="sim-links-status" class="plan-hint hidden"></div>
-
-          <div class="plan-section-title">Message schedule</div>
-          <div class="plan-row">
-            <select id="sim-message-node"></select>
-            <input type="number" id="sim-message-time" min="0" step="100" value="0" title="Send time (ms)">
-            <input type="number" id="sim-message-payload" min="1" max="255" step="1" value="20" title="Payload length (bytes)">
-            <button id="sim-message-add">+ Add send</button>
-          </div>
-          <div id="sim-message-list" class="plan-list"></div>
-
-          <div class="plan-section-title">Run</div>
-          <div class="plan-field-row">
-            <label for="sim-seed">Random seed</label>
-            <input type="number" id="sim-seed" min="0" step="1" value="1">
-          </div>
-          <div class="plan-field-row">
-            <label for="sim-max-time">Sim duration (ms)</label>
-            <input type="number" id="sim-max-time" min="1000" step="1000" value="60000">
-          </div>
-          <div class="plan-field-row">
-            <label for="sim-trials">Predict-settings trials</label>
-            <input type="number" id="sim-trials" min="1" max="100" step="1" value="20">
-          </div>
-          <div class="plan-row">
-            <button id="sim-run">▶ Run simulation</button>
-            <button id="sim-predict">🎯 Predict settings</button>
-          </div>
-          <div id="sim-status" class="plan-hint hidden"></div>
-
-          <div class="plan-section-title">Replay a real CoreScope packet</div>
-          <div class="plan-hint">
-            Paste a packet hash (or a CoreScope link containing one) to
-            reconstruct what actually happened: every relay CoreScope
-            observed proof of, alongside what our own model predicts
-            should have happened from the same origin — so a gap between
-            the two points at where a flood likely collided or got
-            blocked.
-          </div>
-          <div class="plan-row">
-            <input type="text" id="sim-replay-hash-input" placeholder="Packet hash or CoreScope link">
-            <button id="sim-replay-hash-go">🔗 Replay</button>
-          </div>
-          <div id="sim-replay-hash-status" class="plan-hint hidden"></div>
+        <div class="plan-hint">
+          Send simulated flood packets from chosen nodes and see where
+          floods collide, using MeshCore's real airtime/relay-delay
+          formulas (compiled from the same Go code as the server).
         </div>
 
-        <div class="sim-col sim-col-results">
-          <div id="sim-results-section" class="hidden">
-            <div class="plan-section-title">Results</div>
-            <div id="sim-results-summary" class="plan-hint"></div>
-            <div class="plan-row">
-              <button id="sim-replay" title="Watch the flood propagate again from the start">▶ Replay</button>
-              <button id="sim-skip-to-end" title="Jump straight to the final state">⏭ Skip to end</button>
-            </div>
-            <div id="sim-replay-status" class="plan-hint hidden"></div>
-            <div id="sim-results-log" class="plan-list"></div>
-          </div>
-
-          <div id="sim-bottleneck-section" class="hidden">
-            <div class="plan-section-title">Proven vs. predicted — possible bottlenecks</div>
-            <div id="sim-bottleneck-summary" class="plan-hint"></div>
-
-            <div class="sim-subsection-title">Predicted but never confirmed</div>
-            <div class="plan-hint">Our model expects this hop to work, but no real observation ever confirmed it — a candidate for where a collision or interference happened.</div>
-            <div id="sim-bottleneck-list" class="plan-list"></div>
-
-            <div class="sim-subsection-title">Real links our model doesn't predict</div>
-            <div class="plan-hint">CoreScope proved this hop actually happened, but our model never even considers it possible — likely means the real link is longer/better than this tool's default planning assumptions (range cap, antenna heights, terrain), not that anything is wrong with the real network.</div>
-            <div id="sim-unmodeled-list" class="plan-list"></div>
-          </div>
-
-          <div id="sim-per-node-section" class="hidden">
-            <div class="plan-section-title">Predicted settings per repeater</div>
-            <div class="plan-hint">Applying the top-ranked rule below to each node. A node the rule's condition doesn't cover keeps the baseline defaults.</div>
-            <div id="sim-per-node-list" class="plan-list"></div>
-          </div>
-
-          <div id="sim-suggestions-section" class="hidden">
-            <div class="plan-section-title">Suggested settings</div>
-            <div id="sim-suggestions-list" class="plan-list"></div>
-          </div>
+        <div class="plan-section-title">Saved setups</div>
+        <div class="plan-row">
+          <select id="sim-setup-select"></select>
+          <button id="sim-setup-new" title="Start a fresh setup">New</button>
         </div>
+        <div class="plan-row">
+          <input type="text" id="sim-setup-name" placeholder="Setup name">
+          <button id="sim-setup-save" title="Save nodes, links, senders and settings">Save</button>
+          <button id="sim-setup-delete" title="Delete this setup">Delete</button>
+        </div>
+        <div class="plan-row">
+          <button id="sim-setup-export">Export .json</button>
+          <button id="sim-setup-import-btn">Import .json</button>
+          <input type="file" id="sim-setup-import-file" accept="application/json" class="hidden">
+        </div>
+
+        <div class="plan-section-title">Simulated nodes</div>
+        <div class="plan-row">
+          <select id="sim-scope-filter" title="Only load real repeaters believed to be in this region">
+            <option value="">All regions</option>
+          </select>
+          <button id="sim-load-planned">+ Load planned repeaters</button>
+          <button id="sim-load-real">+ Load real repeaters</button>
+        </div>
+        <div class="plan-row">
+          <button id="sim-add-companion" title="Click the map to place a virtual handheld/companion device">📱 Add companion location</button>
+          <button id="sim-nodes-clear">Clear all</button>
+        </div>
+        <div id="sim-companion-hint" class="plan-hint hidden">
+          Click the map to place a virtual companion device (originates/receives traffic like a handheld, but doesn't relay). Drag it to move; click the button again to stop placing.
+        </div>
+        <button id="sim-open-nodes-modal" class="plan-full-width-btn">⚙ Repeaters &amp; settings (<span id="sim-node-count-badge">0</span>)</button>
+
+        <div class="plan-section-title">Connectivity source</div>
+        <div class="plan-row">
+          <select id="sim-connectivity-source">
+            <option value="model">Propagation model</option>
+            <option value="corescope">CoreScope observed (real repeaters only)</option>
+            <option value="blend">Blend (observed where available, else model)</option>
+          </select>
+          <button id="sim-build-links">Build links</button>
+        </div>
+        <div id="sim-links-status" class="plan-hint hidden"></div>
+
+        <button id="sim-open-messages-modal" class="plan-full-width-btn">✉ Message senders (<span id="sim-message-count-badge">0</span>)</button>
+
+        <div class="plan-section-title">Run</div>
+        <div class="plan-field-row">
+          <label for="sim-seed">Random seed</label>
+          <input type="number" id="sim-seed" min="0" step="1" value="1">
+        </div>
+        <div class="plan-field-row">
+          <label for="sim-max-time">Sim duration (ms)</label>
+          <input type="number" id="sim-max-time" min="1000" step="1000" value="60000">
+        </div>
+        <div class="plan-field-row">
+          <label for="sim-trials">Predict-settings trials</label>
+          <input type="number" id="sim-trials" min="1" max="100" step="1" value="20">
+        </div>
+        <div class="plan-row">
+          <button id="sim-run">▶ Run simulation</button>
+          <button id="sim-predict">🎯 Predict settings</button>
+        </div>
+        <div id="sim-status" class="plan-hint hidden"></div>
+        <div id="sim-predict-progress" class="hidden">
+          <div id="sim-predict-progress-text">Searching…</div>
+          <div class="progress-track"><div id="sim-predict-progress-fill"></div></div>
+        </div>
+
+        <div class="plan-row">
+          <button id="sim-open-results-modal" class="hidden">📊 Results</button>
+          <button id="sim-open-predictions-modal" class="hidden">🎯 Predicted settings</button>
+          <button id="sim-rankings-expand" class="hidden">🏆 Rankings</button>
+        </div>
+
+        <div class="plan-section-title">Replay a real CoreScope packet</div>
+        <div class="plan-hint">
+          Paste a packet hash (or a CoreScope link containing one) to
+          reconstruct what actually happened: every relay CoreScope
+          observed proof of, alongside what our own model predicts
+          should have happened from the same origin — so a gap between
+          the two points at where a flood likely collided or got
+          blocked.
+        </div>
+        <div class="plan-row">
+          <input type="text" id="sim-replay-hash-input" placeholder="Packet hash or CoreScope link">
+          <button id="sim-replay-hash-go">🔗 Replay</button>
+        </div>
+        <div id="sim-replay-hash-status" class="plan-hint hidden"></div>
+        <button id="sim-open-bottleneck-modal" class="plan-full-width-btn hidden">🔍 Bottleneck analysis</button>
       </div>
     </div>
+  </div>
+
+  <div id="sim-modal-backdrop" class="hidden">
+    <div id="sim-nodes-modal" class="sim-modal hidden">
+      <div class="sim-modal-header"><span>Repeaters &amp; settings</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div class="plan-hint">Edit a node's delay/power/loop-detect settings, then Apply. Changes take effect on the next run.</div>
+        <div class="sim-bulk-apply-row">
+          <span class="sim-bulk-apply-label">Set all repeaters to:</span>
+          <input type="number" step="0.05" min="0" max="2" id="sim-bulk-tx-delay" placeholder="Tx delay" title="Tx delay factor">
+          <input type="number" step="0.05" min="0" max="2" id="sim-bulk-direct-tx-delay" placeholder="Direct tx" title="Direct tx delay factor">
+          <input type="number" step="0.5" min="0" max="20" id="sim-bulk-rx-delay" placeholder="Rx delay" title="Rx delay base">
+          <input type="number" step="1" min="1" max="22" id="sim-bulk-tx-power" placeholder="Tx power" title="Tx power (dBm)">
+          <select id="sim-bulk-loop-detect" title="Loop detect">
+            <option value="">Loop detect: unchanged</option>
+            <option value="off">Loop detect: off</option>
+            <option value="minimal">Loop detect: minimal</option>
+            <option value="moderate">Loop detect: moderate</option>
+            <option value="strict">Loop detect: strict</option>
+          </select>
+          <input type="number" step="1" min="1" max="3" id="sim-bulk-hash-size" placeholder="Hash size" title="Hash size (bytes)">
+          <button id="sim-bulk-apply-fill" title="Fill every row below with whichever fields above have a value — still needs its own Apply to actually take effect">Fill all rows</button>
+        </div>
+        <div class="sim-config-table-scroll">
+          <table class="sim-config-table">
+            <thead><tr><th>Node</th><th>Tx delay</th><th>Direct tx</th><th>Rx delay</th><th>Tx power</th><th>Loop detect</th><th>Hash size</th><th></th></tr></thead>
+            <tbody id="sim-nodes-modal-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="sim-modal-footer">
+        <button id="sim-nodes-modal-apply">Apply</button>
+        <button data-close>Close</button>
+      </div>
+    </div>
+
+    <div id="sim-messages-modal" class="sim-modal hidden">
+      <div class="sim-modal-header"><span>Message senders</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div class="plan-hint">
+          Each sender fires a batch of messages: how many, how long each
+          one is, and how far apart they go out (a random gap picked
+          fresh between every consecutive pair, so a real, slightly
+          irregular stream instead of a metronome).
+        </div>
+        <div class="plan-row">
+          <select id="sim-message-node"></select>
+          <input type="number" id="sim-message-count" min="1" max="500" step="1" value="10" title="How many messages this sender sends">
+        </div>
+        <div class="plan-row">
+          <select id="sim-message-region" title="Send as this MeshCore region (mirrors 'region default') — only repeaters holding this region's key will relay it onward">
+            <option value="">Any region (unscoped)</option>
+          </select>
+        </div>
+        <div class="plan-field-row">
+          <label>Payload length (bytes)</label>
+          <input type="number" id="sim-message-payload-min" min="1" max="255" step="1" value="10" title="Shortest possible message">
+          <span>to</span>
+          <input type="number" id="sim-message-payload-max" min="1" max="255" step="1" value="50" title="Longest possible message">
+        </div>
+        <div class="plan-field-row">
+          <label>Gap between sends (ms)</label>
+          <input type="number" id="sim-message-gap-min" min="0" step="100" value="1000" title="Shortest possible gap">
+          <span>to</span>
+          <input type="number" id="sim-message-gap-max" min="0" step="100" value="5000" title="Longest possible gap">
+        </div>
+        <div id="sim-message-editing-hint" class="plan-hint hidden"></div>
+        <div class="plan-row">
+          <button id="sim-message-add">+ Add sender</button>
+          <button id="sim-message-cancel-edit" class="hidden">Cancel edit</button>
+        </div>
+        <div id="sim-message-list" class="plan-list"></div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <div id="sim-results-modal" class="sim-modal hidden">
+      <div class="sim-modal-header"><span>Results</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div id="sim-results-summary" class="plan-hint"></div>
+        <div class="plan-row">
+          <button id="sim-replay" title="Watch the flood propagate again from the start">▶ Replay</button>
+          <button id="sim-skip-to-end" title="Jump straight to the final state">⏭ Skip to end</button>
+        </div>
+        <div id="sim-replay-status" class="plan-hint hidden"></div>
+
+        <div class="sim-subsection-title">Sent messages</div>
+        <div class="plan-hint">In time order. Click a row to show its own path and collisions on the map — green where it arrived cleanly, red where it collided. Click "Details" for the full per-hop breakdown and flood time.</div>
+        <div id="sim-messages-sent-list" class="plan-list"></div>
+
+        <div class="sim-subsection-title">Reception log</div>
+        <div id="sim-results-log" class="plan-list"></div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <div id="sim-bottleneck-modal" class="sim-modal hidden">
+      <div class="sim-modal-header"><span>Proven vs. predicted — possible bottlenecks</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div id="sim-bottleneck-summary" class="plan-hint"></div>
+
+        <div id="sim-bottleneck-replay-section" class="hidden">
+          <div class="sim-subsection-title">Replay real activity (±30s)</div>
+          <div class="plan-hint">Every real packet CoreScope observed within 30 seconds either side of this one, played back in the order it actually happened — the replayed packet itself is highlighted; everything else is context for what else was going on at the time.</div>
+          <div class="plan-row">
+            <button id="sim-bottleneck-replay">▶ Replay</button>
+            <button id="sim-bottleneck-replay-skip">⏭ Skip to end</button>
+          </div>
+          <div id="sim-bottleneck-replay-status" class="plan-hint hidden"></div>
+        </div>
+
+        <div class="sim-subsection-title">Predicted but never confirmed</div>
+        <div class="plan-hint">Our model expects this hop to work, but no real observation ever confirmed it — a candidate for where a collision or interference happened.</div>
+        <div id="sim-bottleneck-list" class="plan-list"></div>
+
+        <div class="sim-subsection-title">Real links our model doesn't predict</div>
+        <div class="plan-hint">CoreScope proved this hop actually happened, but our model never even considers it possible — likely means the real link is longer/better than this tool's default planning assumptions (range cap, antenna heights, terrain), not that anything is wrong with the real network.</div>
+        <div id="sim-unmodeled-list" class="plan-list"></div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <div id="sim-predictions-modal" class="sim-modal hidden">
+      <div class="sim-modal-header"><span>Predicted settings</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div class="sim-subsection-title">Per repeater</div>
+        <div class="plan-hint">Applying the top-ranked rule below to each node. A node the rule's condition doesn't cover keeps the baseline defaults.</div>
+        <div id="sim-per-node-list" class="plan-list"></div>
+
+        <div class="sim-subsection-title">Every candidate tried, ranked</div>
+        <div id="sim-suggestions-list" class="plan-list"></div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <div id="sim-packet-modal" class="sim-modal hidden">
+      <div class="sim-modal-header">
+        <span>
+          <button id="sim-packet-modal-back" class="hidden" title="Back to the previous view">← Back</button>
+          <span id="sim-packet-modal-title">Packets</span>
+        </span>
+        <button data-close aria-label="Close">✕</button>
+      </div>
+      <div class="sim-modal-body">
+        <div id="sim-packet-modal-summary" class="plan-hint"></div>
+
+        <div class="plan-row">
+          <select id="sim-packet-filter-outcome">
+            <option value="">All outcomes</option>
+            <option value="tx">Sent (TX) only</option>
+            <option value="relayed">Relayed only</option>
+            <option value="collided">Collided only</option>
+            <option value="dropped">Dropped only</option>
+            <option value="received">Received (no further relay)</option>
+          </select>
+          <input type="text" id="sim-packet-filter-search" placeholder="Filter by node name…">
+        </div>
+        <div id="sim-packet-filter-count" class="plan-hint"></div>
+
+        <div id="sim-packet-modal-checklist-section" class="hidden">
+          <div class="sim-subsection-title">Delivery checklist</div>
+          <div class="plan-hint">Every repeater/companion/observer in this scenario — click one to see its own full history with this packet.</div>
+          <div id="sim-packet-modal-checklist" class="plan-list"></div>
+        </div>
+
+        <div class="sim-subsection-title" id="sim-packet-modal-received-title">Activity (TX/RX, time order)</div>
+        <div id="sim-packet-modal-list" class="plan-list"></div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+  </div>
+
+  <div id="sim-rankings-fullwindow" class="hidden">
+    <div class="sim-rankings-fullwindow-header">
+      <span>Repeater rankings</span>
+      <button id="sim-rankings-collapse" title="Close full-window view">✕ Close</button>
+    </div>
+    <div id="sim-rankings-fullwindow-body"></div>
   </div>
 </div>
 

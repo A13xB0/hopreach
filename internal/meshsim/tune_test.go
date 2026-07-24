@@ -38,7 +38,7 @@ func TestSuggestFindsLowerCollisionRateThanZeroDelayBaseline(t *testing.T) {
 		MaxSimTimeMs: 60_000,
 		Trials:       40,
 		Seed:         1,
-	})
+	}, nil)
 
 	if len(result.Suggestions) == 0 {
 		t.Fatal("expected at least one candidate suggestion")
@@ -66,8 +66,8 @@ func TestSuggestDeterministicForFixedSeed(t *testing.T) {
 		Seed:         42,
 	}
 
-	a := Suggest(req)
-	b := Suggest(req)
+	a := Suggest(req, nil)
+	b := Suggest(req, nil)
 
 	if a.Baseline != b.Baseline {
 		t.Errorf("baseline should be deterministic for a fixed seed: %.6f vs %.6f", a.Baseline, b.Baseline)
@@ -99,7 +99,7 @@ func TestSuggestUsesAltitudeRulesWhenAttrsProvided(t *testing.T) {
 		MaxSimTimeMs: 60_000,
 		Trials:       10,
 		Seed:         7,
-	})
+	}, nil)
 
 	foundAltitudeRule := false
 	for _, s := range result.Suggestions {
@@ -122,11 +122,48 @@ func TestSuggestOmitsConditionalRulesWhenAttrsNil(t *testing.T) {
 		MaxSimTimeMs: 60_000,
 		Trials:       5,
 		Seed:         3,
-	})
+	}, nil)
 
 	for _, s := range result.Suggestions {
 		if s.Rule.Condition.Kind != ConditionNone {
 			t.Errorf("did not expect a conditional rule %q when Attrs is nil", s.Rule.Name)
+		}
+	}
+}
+
+// TestSuggestReportsProgressForBaselineAndEveryCandidate is the regression
+// test for a real usability problem: Suggest's whole candidate grid (well
+// over a hundred rules with Attrs provided, each evaluated across Trials
+// full simulation runs) used to run with zero feedback, which on the
+// browser's main thread read as a frozen page for the entire search, not
+// just a slow one — see public/meshsim-worker.js, which relies on this
+// callback to drive a real progress bar.
+func TestSuggestReportsProgressForBaselineAndEveryCandidate(t *testing.T) {
+	scenario, messages := lockstepCollisionScenario()
+	attrs := []NodeAttrs{{AltitudeM: 100}, {AltitudeM: 900, NeighborCount: 2}, {AltitudeM: 950, NeighborCount: 2}, {AltitudeM: 920, NeighborCount: 2}, {AltitudeM: 100}}
+
+	var calls [][2]int
+	result := Suggest(TuneRequest{
+		Scenario:     scenario,
+		Messages:     messages,
+		Attrs:        attrs,
+		MaxSimTimeMs: 60_000,
+		Trials:       2,
+		Seed:         1,
+	}, func(done, total int) {
+		calls = append(calls, [2]int{done, total})
+	})
+
+	wantTotal := len(result.Suggestions) + 1 // +1 for the baseline
+	if len(calls) != wantTotal {
+		t.Fatalf("progress called %d times, want %d (one per candidate plus the baseline)", len(calls), wantTotal)
+	}
+	for i, c := range calls {
+		if c[0] != i+1 {
+			t.Errorf("call %d: done = %d, want %d (should count up monotonically from 1)", i, c[0], i+1)
+		}
+		if c[1] != wantTotal {
+			t.Errorf("call %d: total = %d, want %d (should stay constant across the whole search)", i, c[1], wantTotal)
 		}
 	}
 }

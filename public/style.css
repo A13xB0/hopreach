@@ -231,11 +231,6 @@ header .subtitle {
   flex-direction: column;
   gap: 0.25rem;
 }
-.scope-filter-title {
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  margin-bottom: 0.15rem;
-}
 .scope-filter-control label {
   display: flex;
   align-items: center;
@@ -259,11 +254,6 @@ header .subtitle {
   flex-direction: column;
   gap: 0.25rem;
 }
-.position-mode-title {
-  font-size: 0.68rem;
-  color: var(--text-muted);
-  margin-bottom: 0.15rem;
-}
 .position-mode-control select {
   background: var(--card-bg);
   color: var(--text);
@@ -271,6 +261,112 @@ header .subtitle {
   border-radius: 6px;
   padding: 0.2rem 0.3rem;
   font-size: 0.75rem;
+}
+
+.map-display-control {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.map-display-control label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.map-display-control input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+/* Shared collapsible-header pattern — see app.js's window.HopReachMapControls. */
+.map-control-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-bottom: 0.15rem;
+  cursor: pointer;
+  user-select: none;
+}
+.map-control-header:hover { color: var(--text); }
+.map-control-chevron { font-size: 0.6rem; flex-shrink: 0; }
+.map-control-body.hidden { display: none; }
+
+.sim-playback-control {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  width: 240px;
+}
+.sim-playback-buttons { margin-bottom: 0.4rem; }
+.sim-playback-buttons button {
+  flex: 1;
+  background: var(--surface1, #0a1929);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.sim-playback-buttons button:hover { border-color: var(--accent); }
+.sim-map-results-log {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Bottleneck-analysis map key (see ensureBottleneckLegendControl) — plain
+   static header, not collapsible like the other map controls, since it's
+   only ever a handful of short rows. */
+.sim-bottleneck-legend {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.72rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+.map-control-header-static {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+.sim-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.1rem 0;
+  white-space: nowrap;
+}
+.sim-legend-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.sim-legend-swatch.sim-legend-dashed {
+  background: none;
+  border-top: 3px dashed;
+  height: 0;
 }
 
 .leaflet-control-layers {
@@ -356,6 +452,26 @@ header .subtitle {
 #companion-pin-toggle.active {
   background: #f97316;
 }
+
+.alpha-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  color: #fff;
+  background: linear-gradient(120deg, #a855f7, #ec4899, #f97316, #a855f7);
+  background-size: 300% 100%;
+  animation: alpha-badge-shimmer 3s linear infinite;
+  box-shadow: 0 0 6px rgba(236,72,153,0.6);
+  vertical-align: middle;
+}
+@keyframes alpha-badge-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 300% 50%; }
+}
 #companion-pin-hint {
   position: absolute;
   bottom: 3.5rem;
@@ -407,6 +523,40 @@ header .subtitle {
   box-shadow: -4px 0 16px rgba(0,0,0,0.4);
 }
 #sim-panel.hidden { display: none; }
+
+#sim-predict-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+#sim-predict-progress.hidden { display: none; }
+#sim-predict-progress-text { white-space: nowrap; flex-shrink: 0; }
+#sim-predict-progress .progress-track { flex: 1; }
+#sim-predict-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #f97316, #22c55e);
+  transition: width 0.2s ease;
+}
+
+/* The four toolbar buttons that open a results modal (Results, Predicted
+   settings, Bottleneck analysis, Rankings) start with class="hidden" and
+   only lose it once there's real data to open (see
+   renderResults/renderSuggestions/renderBottleneckAnalysis/renderRankings)
+   — this is what makes that actually take effect. Without a matching
+   rule, class="hidden" alone does nothing and every one of them would sit
+   there clickable-but-empty from the moment Simulate mode opens, the same
+   bug this project already hit once with the old docked sections these
+   buttons replaced. */
+#sim-open-results-modal.hidden,
+#sim-open-predictions-modal.hidden,
+#sim-open-bottleneck-modal.hidden,
+#sim-rankings-expand.hidden {
+  display: none;
+}
 
 .sim-workspace {
   display: flex;
@@ -740,6 +890,57 @@ header .subtitle {
 .sim-node-badge.sim-badge-planned { background: rgba(74,222,128,0.18); color: #4ade80; }
 .sim-node-badge.sim-badge-real { background: rgba(56,189,248,0.18); color: #38bdf8; }
 .sim-node-badge.sim-badge-companion { background: rgba(251,146,60,0.18); color: #fb923c; }
+.sim-node-badge.sim-badge-region { background: rgba(168,85,247,0.18); color: #c084fc; }
+
+#sim-message-cancel-edit.hidden { display: none; }
+#sim-setup-import-file.hidden { display: none; }
+#sim-packet-modal-back.hidden { display: none; }
+#sim-packet-modal-back {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 0 0.5rem 0 0;
+  margin-right: 0.3rem;
+}
+#sim-packet-modal-back:hover { color: var(--text); }
+
+#sim-packet-modal-sent-section.hidden { display: none; }
+#sim-packet-modal-checklist-section.hidden { display: none; }
+#sim-bottleneck-replay-section.hidden { display: none; }
+
+.sim-checklist-row { cursor: pointer; }
+.sim-checklist-row:hover { background: rgba(255,255,255,0.08); }
+.sim-checklist-row.sim-checklist-yes { border-left: 3px solid #4ade80; }
+.sim-checklist-row.sim-checklist-no { border-left: 3px solid #f87171; }
+.sim-checklist-row.sim-checklist-origin { border-left: 3px solid #a855f7; }
+.sim-checklist-status {
+  margin-left: auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.sim-message-row { cursor: pointer; }
+.sim-message-row:hover { background: rgba(255,255,255,0.08); }
+.sim-message-row-selected {
+  background: rgba(74,222,128,0.12) !important;
+  border-left: 3px solid #4ade80;
+}
+
+.sim-message-details-btn {
+  margin-left: 0.5rem;
+  font-size: 0.62rem;
+  padding: 0.05rem 0.35rem;
+}
+
+.sim-packet-path {
+  font-weight: 400;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
 
 #sim-add-companion.active {
   background: #fb923c;
@@ -749,6 +950,50 @@ header .subtitle {
 
 .sim-list-item.sim-collided { border-left: 3px solid #f87171; }
 .sim-list-item.sim-clean { border-left: 3px solid #4ade80; }
+.sim-list-item.sim-dropped { border-left: 3px solid #facc15; }
+
+/* Packet inspector rows (see renderPacketReceptionRows) — a wider modal
+   than the shared 560px default (see #sim-nodes-modal above for the same
+   pattern) so the path, time/hop, and reason columns have room without
+   wrapping into each other. */
+#sim-packet-modal { width: min(920px, 100%); }
+
+.sim-packet-row { flex-direction: column; align-items: stretch; gap: 0.3rem; }
+.sim-packet-row-top { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.sim-packet-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+.sim-packet-context, .sim-packet-time, .sim-packet-hop { white-space: nowrap; }
+
+.sim-packet-reason {
+  margin-left: auto;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  cursor: help;
+}
+.sim-packet-reason.sim-reason-relayed { background: rgba(74,222,128,0.18); color: #4ade80; }
+.sim-packet-reason.sim-reason-received { background: rgba(56,189,248,0.18); color: #38bdf8; }
+.sim-packet-reason.sim-reason-dropped { background: rgba(250,204,21,0.18); color: #facc15; }
+.sim-packet-reason.sim-reason-collided { background: rgba(248,113,113,0.18); color: #f87171; }
+
+.sim-txrx-badge {
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.sim-txrx-badge.sim-txrx-tx { background: rgba(168,85,247,0.22); color: #c084fc; }
+.sim-txrx-badge.sim-txrx-rx { background: rgba(56,189,248,0.18); color: #38bdf8; }
 
 .sim-suggestion-rank {
   font-weight: 700;
@@ -779,4 +1024,193 @@ header .subtitle {
   transform: rotate(45deg);
   box-shadow: 0 0 0 2px rgba(251,146,60,0.45);
   cursor: grab;
+}
+
+/* --- repeater rankings table (docked + full-window "pop out") --------- */
+
+.sim-rankings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+.sim-rankings-table th, .sim-rankings-table td {
+  text-align: right;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.sim-rankings-table th:first-child, .sim-rankings-table td:first-child {
+  text-align: left;
+}
+.sim-rankings-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+}
+.sim-rankings-table th.sim-rank-sorted { color: var(--accent); }
+.sim-rankings-table tbody tr:hover { background: rgba(255,255,255,0.05); }
+.sim-rankings-table td.sim-rank-good { color: #4ade80; }
+.sim-rankings-table td.sim-rank-bad { color: #f87171; }
+
+#sim-rankings-section .plan-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+#sim-rankings-expand {
+  font-size: 0.68rem;
+  padding: 0.15rem 0.4rem;
+}
+#sim-rankings-table-container {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+#sim-rankings-fullwindow {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.5rem;
+}
+#sim-rankings-fullwindow.hidden { display: none; }
+.sim-rankings-fullwindow-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  font-size: 1rem;
+  margin-bottom: 0.75rem;
+}
+#sim-rankings-fullwindow-body {
+  flex: 1;
+  overflow-y: auto;
+}
+#sim-rankings-fullwindow-body .sim-rankings-table { font-size: 0.85rem; }
+#sim-rankings-fullwindow-body .sim-rankings-table th, #sim-rankings-fullwindow-body .sim-rankings-table td {
+  padding: 0.5rem 0.75rem;
+}
+
+/* --- sim modal system ---------------------------------------------------
+   Every heavier chunk of simulator output (repeater config, message
+   senders, results, bottleneck analysis, predicted settings) lives in one
+   of these instead of a permanently-docked panel section — keeps the side
+   panel itself a short, fixed list of controls. Centered dialogs, not a
+   full-viewport takeover (that's reserved for the rankings "Expand" view,
+   which explicitly wants the whole window — see #sim-rankings-fullwindow
+   above). One backdrop, several possible .sim-modal children; openModal
+   hides every other one first, so only one is ever visible at a time. */
+
+#sim-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+#sim-modal-backdrop.hidden { display: none; }
+
+.sim-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  width: min(560px, 100%);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.sim-modal.hidden { display: none; }
+
+/* Repeaters & settings has a wide table (label + 6 setting columns +
+   actions) that doesn't fit the shared 560px width without horizontal
+   scrolling — give it more room specifically, rather than widening every
+   modal. */
+#sim-nodes-modal { width: min(900px, 100%); }
+
+.sim-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.sim-modal-header button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+}
+.sim-modal-body {
+  padding: 0.75rem 1rem;
+  overflow-y: auto;
+}
+.sim-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* --- "Repeaters & settings" table (inside #sim-nodes-modal) ------------ */
+
+.sim-bulk-apply-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  background: rgba(255,255,255,0.04);
+  border-radius: 6px;
+}
+.sim-bulk-apply-label { font-size: 0.7rem; color: var(--text-muted); flex-shrink: 0; }
+.sim-bulk-apply-row input[type="number"] { width: 4.5rem; }
+.sim-bulk-apply-row input, .sim-bulk-apply-row select {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.3rem;
+}
+.sim-bulk-apply-row button { font-size: 0.72rem; padding: 0.25rem 0.5rem; }
+
+.sim-config-table-scroll { max-height: 50vh; overflow-y: auto; }
+
+.sim-config-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+.sim-config-table th, .sim-config-table td {
+  text-align: left;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+.sim-config-table th { color: var(--text-muted); font-weight: 600; }
+.sim-config-table input[type="number"] {
+  width: 3.6rem;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.25rem;
+}
+.sim-config-table select {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.25rem;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.sim-config-table tr.sim-row-highlight {
+  background: rgba(74,222,128,0.18);
+  transition: background 1.5s ease;
 }

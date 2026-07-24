@@ -32,6 +32,12 @@
   const neighborLayer = L.layerGroup().addTo(map); // transient, hover-driven
   const allNeighborsLayer = L.layerGroup(); // persistent, toggled — not added to map by default
   let showAllNeighborsEnabled = false;
+  // Real repeaters' own observed-neighbour lines, all at once — the
+  // general, always-available counterpart to allNeighborsLayer (which is
+  // planned-repeaters-only and lives inside the Plan panel). See
+  // renderAllRealNeighbors/setShowAllRealNeighbors below.
+  const allRealNeighborsLayer = L.layerGroup();
+  let showAllRealNeighborsEnabled = false;
   const pinnedNeighborLayer = L.layerGroup().addTo(map); // persistent, click-to-pin on a single real repeater
   let pinnedPubkey = null;
   // Separate layers: the marker persists across recomputes, while
@@ -504,6 +510,49 @@
     setShowAllNeighbors(e.target.checked);
   });
 
+  // Persistent "show all neighbours" overlay for REAL repeaters — every
+  // currently-loaded real repeater's actual CoreScope-observed reach at
+  // once, not just whichever one happens to be hovered. Off by default
+  // (a busy region could mean dozens of parallel reach fetches) and
+  // available regardless of mode — see app.js's general map control that
+  // drives this via window.HopReachPlanner.setShowAllRealNeighbors.
+  let renderAllRealNeighborsGeneration = 0;
+
+  async function renderAllRealNeighbors() {
+    const generation = ++renderAllRealNeighborsGeneration;
+    if (!showAllRealNeighborsEnabled) {
+      allRealNeighborsLayer.clearLayers();
+      return;
+    }
+    const repeaters = Object.values(realRepeatersById);
+    const results = await Promise.all(
+      repeaters.map(async (r) => {
+        try {
+          return { r, neighbors: await fetchRealNeighbors(r.id) };
+        } catch {
+          return { r, neighbors: [] }; // one repeater's fetch failing shouldn't blank out the rest
+        }
+      })
+    );
+    if (generation !== renderAllRealNeighborsGeneration) return; // toggled off/reloaded while fetching
+    allRealNeighborsLayer.clearLayers();
+    for (const { r, neighbors } of results) {
+      if (neighbors.length === 0) continue;
+      drawNeighborLines(allRealNeighborsLayer, L.latLng(r.lat, r.lon), neighbors, true);
+    }
+  }
+
+  function setShowAllRealNeighbors(enabled) {
+    showAllRealNeighborsEnabled = enabled;
+    if (enabled) {
+      allRealNeighborsLayer.addTo(map);
+      renderAllRealNeighbors();
+    } else {
+      renderAllRealNeighborsGeneration++; // discard any fetch still in flight
+      map.removeLayer(allRealNeighborsLayer);
+    }
+  }
+
   // Real repeaters: neighbours come from CoreScope's own observed reach
   // data (real radio traffic), not a prediction — there's no need to guess
   // when the network has already told us who actually hears whom. Windowed
@@ -583,8 +632,20 @@
         label: f.properties.name,
         lat: useCalibrated ? f.properties.calibrated_lat : f.geometry.coordinates[1],
         lon: useCalibrated ? f.properties.calibrated_lon : f.geometry.coordinates[0],
+        // Every region this repeater is believed to be in (inferred_scopes
+        // union default_scope) — lets other tools (the simulator's own
+        // region filter) reuse the same "which scopes is this repeater in"
+        // logic as the main map's, see app.js's repeaterScopesOf.
+        scopes: Array.from(new Set([...(f.properties.inferred_scopes || []), ...(f.properties.default_scope ? [f.properties.default_scope] : [])])),
+        // This repeater's own real configured path-hash size (1-3 bytes,
+        // `set` via MeshCore's own hash_size setting) — the simulator's
+        // loop.detect modeling (see internal/meshsim's own HashSize doc
+        // comment) needs this to reproduce real collision-prone-at-small-
+        // sizes behavior, not a guess.
+        hashSize: f.properties.hash_size || null,
       };
     }
+    renderAllRealNeighbors(); // keep the "show all real neighbours" overlay in sync with whatever's now loaded/filtered
     layer.eachLayer((marker) => {
       const props = marker.feature && marker.feature.properties;
       if (!props || !props.public_key) return;
@@ -1700,6 +1761,8 @@
   window.HopReachPlanner = {
     getActivePlan: () => plan,
     getRealRepeaters: () => realRepeatersById,
+    setShowAllRealNeighbors,
+    getShowAllRealNeighbors: () => showAllRealNeighborsEnabled,
     // Lets simulator.js keep the two full-height right-side panels mutually
     // exclusive (both are pinned to the same edge at the same width, so
     // having both open at once would just overlap) without planner.js

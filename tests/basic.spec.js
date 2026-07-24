@@ -51,14 +51,12 @@ test("repeater stats eventually populate from real data", async ({ page }) => {
 
 // Also genuinely network-dependent (CoreScope's own GET /api/scope-stats,
 // fetched client-side — see app.js's initScopeFilterControl), kept
-// isolated the same way. Deliberately doesn't check a coverage overlay
-// here: computing one for a real, densely-populated scope can take on the
-// order of a minute (see planner-worker.js's handleScopeCoverage) — fine
-// for a manually-triggered interaction, too slow to be worth the CI time
-// for what the simulator's own packet-replay/CoreScope-links tests
-// already establish (that the client-side WASM coverage machinery
-// works). This only checks that the control itself renders with a real,
-// live region list and that toggling one filters markers.
+// isolated the same way. This only checks that the control itself renders
+// with a real, live region list and that toggling one filters markers —
+// see the test below for actually checking a per-scope coverage overlay
+// renders (skipped here since that needs corescope.scope_inference to be
+// enabled, off by default, so meta.json's scope_coverage may legitimately
+// be empty on a given instance).
 test("scope filter control renders real CoreScope regions and filters markers", async ({ page }) => {
   test.slow();
   await page.goto("/");
@@ -77,4 +75,71 @@ test("scope filter control renders real CoreScope regions and filters markers", 
   for (const s of scopes) {
     expect(s === "unscoped" || /^#/.test(s), `unexpected scope option ${JSON.stringify(s)}`).toBeTruthy();
   }
+});
+
+// Per-scope coverage tiles (run()'s "computing_scope_coverage" block) are
+// pre-rendered server-side, nightly — same reliability as the main
+// coverage layer, unlike an earlier version of this feature that computed
+// live client-side WASM rasters on every tick. Skips (rather than fails)
+// when scope_coverage is empty: corescope.scope_inference is off by
+// default, so a CI instance running the image's built-in config
+// legitimately has none — this only verifies real rendering behaviour
+// when real per-scope tiles do exist.
+test("checking a region with real coverage tiles renders that region's own overlay", async ({ page, request }) => {
+  await page.goto("/");
+  const metaResp = await request.get("/data/meta.json");
+  expect(metaResp.ok()).toBeTruthy();
+  const meta = await metaResp.json();
+  const scopeNames = Object.keys(meta.scope_coverage || {});
+  test.skip(scopeNames.length === 0, "no scope_coverage on this instance (scope_inference disabled, or no region has any member repeater yet)");
+
+  const name = scopeNames[0];
+  const control = page.locator(".scope-filter-control");
+  await expect(control).toBeVisible({ timeout: 60_000 });
+  await page.locator(`.scope-filter-control input[data-scope="${name}"]`).check();
+
+  const overlay = page.locator('.leaflet-image-layer[src*="coverage-scope-"]').first();
+  await expect(overlay).toBeVisible({ timeout: 10_000 });
+
+  // Unchecking removes it again — not just adds and forgets.
+  await page.locator(`.scope-filter-control input[data-scope="${name}"]`).uncheck();
+  await expect(page.locator('.leaflet-image-layer[src*="coverage-scope-"]')).toHaveCount(0);
+});
+
+// "Map detail" defaults to Calibrated Precision when it's available (see
+// app.js's POSITION_MODE_MIGRATION_KEY), including a one-time reset for a
+// visitor with an older saved preference from before that was the default
+// — but only once: a choice made after that reset is saved and respected
+// normally, same as before this default even existed.
+test("map detail defaults to Calibrated Precision, resetting an old saved preference once", async ({ page }) => {
+  test.slow(); // waits on the real meta.json coverage tiers to know what's actually available
+
+  // A genuinely fresh visitor gets the new default, saved.
+  await page.goto("/");
+  await page.waitForSelector("#position-mode-select", { timeout: 60_000 });
+  const available = await page.locator("#position-mode-select option").evaluateAll((els) => els.map((el) => el.value));
+  test.skip(!available.includes("calibrated_precision"), "this instance doesn't have a calibrated_precision tier to default to");
+
+  await expect(page.locator("#position-mode-select")).toHaveValue("calibrated_precision");
+  expect(await page.evaluate(() => localStorage.getItem("hopreach.positionMode"))).toBe("calibrated_precision");
+  const migrationKey = await page.evaluate(() =>
+    Object.keys(localStorage).find((k) => k.startsWith("hopreach.positionModeDefaultMigrated"))
+  );
+  expect(migrationKey).toBeTruthy();
+
+  // A returning visitor with an old saved preference, predating the
+  // migration flag, gets reset to the new default exactly once.
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem("hopreach.positionMode", "standard");
+  });
+  await page.reload();
+  await page.waitForSelector("#position-mode-select", { timeout: 60_000 });
+  await expect(page.locator("#position-mode-select")).toHaveValue("calibrated_precision");
+
+  // Once migrated, explicitly choosing something else sticks across a reload.
+  await page.selectOption("#position-mode-select", "standard");
+  await page.reload();
+  await page.waitForSelector("#position-mode-select", { timeout: 60_000 });
+  await expect(page.locator("#position-mode-select")).toHaveValue("standard");
 });

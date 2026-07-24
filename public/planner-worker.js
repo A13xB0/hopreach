@@ -23,7 +23,6 @@ self.onmessage = async (e) => {
   await Propagation.ready; // wasm/main.go's exports must be registered before any handler below touches them
   if (e.data.kind === "connect") return handleConnect(e.data);
   if (e.data.kind === "area-coverage") return handleAreaCoverage(e.data);
-  if (e.data.kind === "scope-coverage") return handleScopeCoverage(e.data);
   return handlePreview(e.data);
 };
 
@@ -144,109 +143,6 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
     );
   } catch (err) {
     self.postMessage({ generation, type: "error", message: err.message || String(err) });
-  }
-}
-
-// A scope's repeaters can span a much larger area than a single plan
-// (potentially the whole configured region) — fetching terrain at
-// PREVIEW_ZOOM_CAP for that whole area can mean requesting on the order
-// of a thousand DEM tiles at once (confirmed directly: a real ~61-repeater
-// scope spanning most of Scotland took 60+ seconds and still hadn't
-// finished loading terrain). Step the zoom coarser, capped to a fixed
-// tile-count budget, rather than fetching an unbounded number of tiles —
-// the same fix already applied to the simulator's own connectivity
-// builder (public/simulator.js) for the same underlying problem.
-const SCOPE_COVERAGE_MAX_GRID_TILES = 400;
-
-function estimateTileCount(bounds, zoom) {
-  const minTileX = Math.floor(Terrain.lonToTileX(bounds.west, zoom));
-  const maxTileX = Math.floor(Terrain.lonToTileX(bounds.east, zoom));
-  const minTileY = Math.floor(Terrain.latToTileY(bounds.north, zoom));
-  const maxTileY = Math.floor(Terrain.latToTileY(bounds.south, zoom));
-  return (maxTileX - minTileX + 1) * (maxTileY - minTileY + 1);
-}
-
-// --- scope coverage: best-margin raster over an arbitrary repeater set --
-//
-// Reuses the same raster-generation approach as handlePreview (best
-// server per pixel, each site bounded to its own real link-budget range),
-// but for a caller-supplied repeater set (e.g. "every repeater CoreScope
-// believes is in scope #fif") rather than a plan's own sites — see
-// app.js's scope-filter control, which drives this. Each pixel's
-// candidate sites are pre-filtered by a cheap bounding-box check before
-// the real (haversine + terrain) margin computation — with dozens of
-// repeaters spread over hundreds of km, most (pixel, site) pairs are
-// trivially out of range, and skipping them before ever calling into WASM
-// is what keeps the raster loop itself interactive; the terrain zoom cap
-// above is what keeps the *fetch* itself interactive.
-async function handleScopeCoverage({ generation, scopeId, sites, config, imageWidth }) {
-  if (!sites || sites.length === 0) {
-    self.postMessage({ generation, type: "scope-result", scopeId, empty: true });
-    return;
-  }
-  try {
-    const propagation = config.propagation;
-    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), PREVIEW_MAX_RANGE_KM);
-
-    const kmPerDegLat = 110.574;
-    let south = Infinity, north = -Infinity, west = Infinity, east = -Infinity;
-    for (const s of sites) {
-      const kmPerDegLon = Math.max(1, 111.32 * Math.cos((s.lat * Math.PI) / 180));
-      const latPad = rangeKm / kmPerDegLat;
-      const lonPad = rangeKm / kmPerDegLon;
-      south = Math.min(south, s.lat - latPad);
-      north = Math.max(north, s.lat + latPad);
-      west = Math.min(west, s.lon - lonPad);
-      east = Math.max(east, s.lon + lonPad);
-    }
-    const bounds = { south, north, west, east };
-
-    let zoom = Math.min(config.demZoom, PREVIEW_ZOOM_CAP);
-    while (zoom > 4 && estimateTileCount(bounds, zoom) > SCOPE_COVERAGE_MAX_GRID_TILES) zoom--;
-
-    self.postMessage({ generation, type: "scope-status", scopeId, message: `Loading terrain for ${sites.length} repeater${sites.length === 1 ? "" : "s"}…` });
-    const grid = await Terrain.buildLocalGrid(config.demTileURLBase, zoom, bounds);
-
-    const resolvedSites = sites.map((s) => {
-      const groundM = grid.at(s.lat, s.lon);
-      const latPadDeg = rangeKm / kmPerDegLat;
-      const lonPadDeg = rangeKm / Math.max(1, 111.32 * Math.cos((s.lat * Math.PI) / 180));
-      return { lat: s.lat, lon: s.lon, txHeightM: groundM + propagation.antennaHeightM, latPadDeg, lonPadDeg };
-    });
-
-    const avgLat = (south + north) / 2;
-    const kmPerDegLon = 111.32 * Math.cos((avgLat * Math.PI) / 180);
-    const widthKm = (east - west) * kmPerDegLon;
-    const heightKm = (north - south) * kmPerDegLat;
-    const imageHeight = Math.max(1, Math.round(imageWidth * (heightKm / widthKm)));
-
-    const margins = new Float32Array(imageWidth * imageHeight).fill(NaN);
-
-    for (let py = 0; py < imageHeight; py++) {
-      const lat = north - ((py + 0.5) / imageHeight) * (north - south);
-      for (let px = 0; px < imageWidth; px++) {
-        const lon = west + ((px + 0.5) / imageWidth) * (east - west);
-        let best = -Infinity;
-        for (const s of resolvedSites) {
-          if (Math.abs(lat - s.lat) > s.latPadDeg || Math.abs(lon - s.lon) > s.lonPadDeg) continue;
-          const d = Propagation.haversineKm(lat, lon, s.lat, s.lon);
-          if (d > rangeKm || d < 0.01) continue;
-          const m = Propagation.pathMargin(grid, propagation, s.lat, s.lon, s.txHeightM, lat, lon, d);
-          if (m > best) best = m;
-        }
-        if (best >= 0) margins[py * imageWidth + px] = best;
-      }
-      if (py % 10 === 0 || py === imageHeight - 1) {
-        self.postMessage({ generation, type: "scope-progress", scopeId, done: py + 1, total: imageHeight });
-      }
-    }
-
-    self.postMessage(
-      { generation, type: "scope-result", scopeId, bounds, imageWidth, imageHeight, marginGreenDb: propagation.marginGreenDb, margins: margins.buffer },
-      [margins.buffer]
-    );
-  } catch (err) {
-    self.postMessage({ generation, type: "scope-error", scopeId, message: err.message || String(err) });
   }
 }
 
