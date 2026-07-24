@@ -92,9 +92,17 @@ type appConfig struct {
 	// schedule.cron, rendered by -prepare, not this Go binary) still fires
 	// on its own terms; this is a separate, additional guard specifically
 	// against redundant *startup* runs. The -force flag bypasses it
-	// outright.
+	// outright — but each raster tier still independently skips its own
+	// recompute if it already finished earlier today (see
+	// coverageMeta.GeneratedAt/tierFreshToday), so -force means "make sure
+	// a run happens now" rather than "redo everything from scratch". Set
+	// forceAllTiers too (via -force-all-tiers) for the old, blunter
+	// "recompute literally everything regardless of freshness" behavior —
+	// e.g. after changing a propagation-model setting, where every tier's
+	// existing output is now stale even if it ran today.
 	minRecomputeIntervalHours float64
 	forceRecompute            bool
+	forceAllTiers             bool
 }
 
 // toAppConfig maps the YAML config schema onto the subset of fields run()

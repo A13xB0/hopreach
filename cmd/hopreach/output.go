@@ -133,6 +133,34 @@ type coverageMeta struct {
 	MaxSearchKm  float64         `json:"max_search_range_km"`
 	DEMZoom      int             `json:"dem_zoom_level"`
 	Assumptions  coverageAssumps `json:"assumptions"`
+	// GeneratedAt is when this specific tier last actually finished
+	// computing (RFC3339, UTC) — distinct from the top-level meta.json's
+	// own GeneratedAt, which reflects the whole run, not any one tier.
+	// Lets a later run skip recomputing a tier that already completed
+	// today (see tierFreshToday) without needing to skip every other tier,
+	// or the run as a whole, alongside it — the point being a deploy-time
+	// restart doesn't have to redo the expensive Precision tiers just
+	// because it wants fresh repeater data / a fresh Standard raster.
+	// Empty/zero for a tier written before this field existed.
+	GeneratedAt string `json:"generated_at,omitempty"`
+}
+
+// tierFreshToday reports whether cm was generated today (UTC calendar day,
+// matching the UTC convention meta.json's own top-level generated_at
+// already uses) — nil, an unparseable/empty timestamp, or a different day
+// are all "not fresh" (recompute it). See run()'s per-tier skip checks and
+// coverageMeta.GeneratedAt's own doc comment for why this exists.
+func tierFreshToday(cm *coverageMeta, now time.Time) bool {
+	if cm == nil || cm.GeneratedAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, cm.GeneratedAt)
+	if err != nil {
+		return false
+	}
+	ty, tm, td := t.UTC().Date()
+	ny, nm, nd := now.UTC().Date()
+	return ty == ny && tm == nm && td == nd
 }
 
 type coverageAssumps struct {
@@ -152,6 +180,7 @@ func buildCoverageMeta(tiles []coverage.Tile, rangeKm float64, cfg appConfig, no
 		FrequencyMHz: cfg.propagation.FrequencyMHz,
 		MaxSearchKm:  rangeKm,
 		DEMZoom:      cfg.demZoom,
+		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
 		Assumptions: coverageAssumps{
 			TxPowerDBm:      cfg.propagation.TxPowerDBm,
 			TxAntennaGainDB: cfg.propagation.TxAntennaGainDB,
@@ -185,6 +214,15 @@ type meta struct {
 	RepeatersInRegion     int              `json:"repeaters_in_region"`
 	Counts                map[string]int   `json:"counts"`
 	Coverage              *coverageOutputs `json:"coverage,omitempty"`
+	// ScopeCoverage holds one standard-tier coverage raster per known
+	// MeshCore region (e.g. "#fif"), computed from only the repeaters
+	// actually in that region — see run()'s "computing_scope_coverage"
+	// block. Keyed by the region's own name (with its leading "#"), same as
+	// each repeater's inferred_scopes entries, so the frontend can look one
+	// up directly by the scope a user has ticked. nil/absent for a region
+	// with zero member repeaters, or whenever scope inference itself is
+	// disabled.
+	ScopeCoverage map[string]*coverageMeta `json:"scope_coverage,omitempty"`
 	// Complete is false from the moment meta.json is first written (before
 	// any raster) until run() reaches its very end successfully — see
 	// lastGeneratedAt. Left false (the zero value) if the process dies
@@ -274,6 +312,24 @@ func previousCoverage(outputDir string) *coverageOutputs {
 		return nil
 	}
 	return m.Coverage
+}
+
+// previousScopeCoverage is previousCoverage's counterpart for ScopeCoverage —
+// same rationale (seed a fresh run's meta.json with the last run's real
+// tiles so mid-run visitors still see something), same deliberate omission
+// of a Complete check for the same reason.
+func previousScopeCoverage(outputDir string) map[string]*coverageMeta {
+	data, err := os.ReadFile(filepath.Join(outputDir, "meta.json"))
+	if err != nil {
+		return nil
+	}
+	var m struct {
+		ScopeCoverage map[string]*coverageMeta `json:"scope_coverage"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	return m.ScopeCoverage
 }
 
 type imageResult struct {

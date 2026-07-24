@@ -58,34 +58,68 @@ func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig)
 // which is a related but distinct concept. A repeater can genuinely have
 // more than one region enabled at once, so this returns every region with
 // at least one confirmed observation, not just the single most-observed
-// one — see corescope.ObservedScopes. Errors are logged and treated as
-// "no scope data available" rather than fatal: this is an enrichment
-// nothing downstream depends on.
-func inferRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) map[string][]string {
+// one — see corescope.ObservedScopes. Also returns the real, currently-known
+// region name list itself (regardless of whether any repeater matched one)
+// — the caller uses this to know which per-scope coverage rasters to
+// generate, see the "computing_scope_coverage" block in run(). Errors are
+// logged and treated as "no scope data available" rather than fatal: this
+// is an enrichment nothing downstream depends on.
+func inferRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) (scopes map[string][]string, regionNames []string) {
 	allNodes, err := client.FetchAllNodes(ctx)
 	if err != nil {
 		log.Printf("scope inference: fetching node directory failed, skipping: %v", err)
-		return nil
+		return nil, nil
 	}
-	regionNames, err := client.FetchKnownRegionNames(ctx)
+	regionNames, err = client.FetchKnownRegionNames(ctx)
 	if err != nil {
 		log.Printf("scope inference: fetching known region names failed, skipping: %v", err)
-		return nil
+		return nil, nil
 	}
 	since := time.Now().Add(-time.Duration(windowHours * float64(time.Hour)))
 	counts, err := client.FetchRegionParticipation(ctx, since, allNodes, regionNames)
 	if err != nil {
 		log.Printf("scope inference: fetching region participation failed, skipping: %v", err)
-		return nil
+		return nil, regionNames
 	}
-	scopes := make(map[string][]string, len(selected))
+	scopes = make(map[string][]string, len(selected))
 	for _, n := range selected {
 		observed := corescope.ObservedScopes(counts[strings.ToLower(n.PublicKey)])
 		if len(observed) > 0 {
 			scopes[strings.ToLower(n.PublicKey)] = observed
 		}
 	}
-	return scopes
+	return scopes, regionNames
+}
+
+// repeaterInScope reports whether n is a member of region scopeName, via
+// either its inferred scope set (real, cryptographically confirmed
+// observations — see inferRepeaterScopes) or its own self-reported
+// default_scope — the same union public/app.js's repeaterScopesOf uses
+// client-side, so "which repeaters are in this scope" means the same thing
+// in the per-scope coverage this generates as it does in the map's own
+// scope-filter checkboxes and popups.
+func repeaterInScope(n corescope.Node, scopeName string, inferredScopes map[string][]string) bool {
+	for _, s := range inferredScopes[strings.ToLower(n.PublicKey)] {
+		if s == scopeName {
+			return true
+		}
+	}
+	return n.DefaultScope != nil && *n.DefaultScope == scopeName
+}
+
+// scopeSlug turns a region name (e.g. "#ioi-admin") into a safe filename
+// fragment ("ioi-admin") for coverage-scope-<slug>-*.png tiles.
+func scopeSlug(name string) string {
+	name = strings.TrimPrefix(name, "#")
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
 }
 
 // loadLocalGrid loads a small demgrid covering just the given points
@@ -388,9 +422,10 @@ func run(cfg appConfig) (err error) {
 	// over what's fundamentally an enrichment, not something anything
 	// downstream depends on.
 	var inferredScopes map[string][]string
+	var knownRegionNames []string
 	if cfg.scopeInferenceEnabled {
 		prog.Update("inferring_scopes", 0, 1, "Inferring repeater regions from CoreScope packet transport codes")
-		inferredScopes = inferRepeaterScopes(ctx, client, selected, cfg.scopeInferenceWindowHours)
+		inferredScopes, knownRegionNames = inferRepeaterScopes(ctx, client, selected, cfg.scopeInferenceWindowHours)
 		prog.Update("inferring_scopes", 1, 1, fmt.Sprintf("Inferred region(s) for %d/%d repeaters", len(inferredScopes), len(selected)))
 	}
 
@@ -425,7 +460,8 @@ func run(cfg appConfig) (err error) {
 		// tier this run skips (GPU-gated and unavailable, say) or hasn't
 		// gotten to yet still shows its last known-good tiles instead of
 		// briefly vanishing for anyone loading the page mid-run.
-		Coverage: previousCoverage(cfg.outputDir),
+		Coverage:      previousCoverage(cfg.outputDir),
+		ScopeCoverage: previousScopeCoverage(cfg.outputDir),
 	}
 	metaPath := filepath.Join(cfg.outputDir, "meta.json")
 	writeMeta := func() error {
@@ -482,8 +518,21 @@ func run(cfg appConfig) (err error) {
 		tierRecords = append(tierRecords, tr)
 	}
 
+	// shouldComputeTier reports whether a tier needs recomputing: either
+	// forceAllTiers is set (the blunt "ignore freshness entirely"
+	// override — see its own doc comment on appConfig), or the tier's
+	// previous output (nil on a genuine first run) didn't already finish
+	// today. This is what lets -force mean "make sure a run happens now"
+	// without also meaning "redo every expensive Precision pass that
+	// already ran a few hours ago" — the exact scenario a deploy-time
+	// restart or an /admin/recompute call hits.
+	shouldComputeTier := func(existing *coverageMeta) bool {
+		return cfg.forceAllTiers || !tierFreshToday(existing, time.Now())
+	}
+
 	if haveBounds {
-		if !cfg.standardRequiresGPU || engine.Available() {
+		gpuOK := !cfg.standardRequiresGPU || engine.Available()
+		if gpuOK && shouldComputeTier(m.Coverage.Standard) {
 			tierStart := time.Now()
 			prog.Update("computing_coverage", 0, 1, "Computing terrain-aware coverage")
 			raster := coverage.Raster(engine, grid, sites, bounds, cfg.coverageImageWidth, cfg.propagation, cfg.coverageMaxAlpha,
@@ -499,8 +548,73 @@ func run(cfg appConfig) (err error) {
 				return err
 			}
 			recordTier("standard", tierStart, nil)
-		} else {
+		} else if !gpuOK {
 			log.Printf("coverage: coverage.standard_requires_gpu=true but no GPU (local or remote) is available — skipping standard coverage raster")
+		} else {
+			log.Printf("coverage: standard coverage raster already computed today (%s) — skipping recompute (pass -force-all-tiers to override)", m.Coverage.Standard.GeneratedAt)
+		}
+
+		// Per-scope standard-tier coverage: the same model as the "standard"
+		// tier above, but each region gets its own raster computed from only
+		// the repeaters actually in that region (inferred_scopes, falling
+		// back to default_scope — see repeaterInScope), so e.g. "#fif"'s
+		// raster shows where Fife's own repeaters actually reach, not
+		// diluted by every other region's. Reuses the whole-region grid
+		// already loaded above rather than refetching terrain per scope —
+		// each scope's own bounds (padded rangeKm around just its own
+		// repeaters, not the whole region) is a subset of what's already
+		// resident. Gated on scope inference being enabled: without it,
+		// there's no reliable per-repeater region membership at scale (see
+		// inferRepeaterScopes — default_scope alone is sparse in practice),
+		// so there'd be nothing meaningful to split by.
+		if cfg.scopeInferenceEnabled && len(knownRegionNames) > 0 {
+			if !cfg.standardRequiresGPU || engine.Available() {
+				tierStart := time.Now()
+				for i, scopeName := range knownRegionNames {
+					prog.Update("computing_scope_coverage", i, len(knownRegionNames), fmt.Sprintf("Computing per-scope coverage (%d/%d): %s", i+1, len(knownRegionNames), scopeName))
+
+					var scopeSites []propagation.Site
+					var scopePoints []coverage.Point
+					for j, n := range selected {
+						if repeaterInScope(n, scopeName, inferredScopes) {
+							scopeSites = append(scopeSites, sites[j])
+							scopePoints = append(scopePoints, coverage.Point{Lat: *n.Lat, Lon: *n.Lon})
+						}
+					}
+					if len(scopeSites) == 0 {
+						continue
+					}
+					if !shouldComputeTier(m.ScopeCoverage[scopeName]) {
+						log.Printf("coverage: per-scope coverage for %s already computed today — skipping recompute (pass -force-all-tiers to override)", scopeName)
+						continue // seeded m.ScopeCoverage[scopeName] (from previousScopeCoverage) is left as-is
+					}
+					scopeBounds, ok := coverage.RasterBounds(scopePoints, rangeKm)
+					if !ok {
+						continue
+					}
+					scopeRaster := coverage.Raster(engine, grid, scopeSites, scopeBounds, cfg.coverageImageWidth, cfg.propagation, cfg.coverageMaxAlpha, nil)
+					tiles, err := coverage.WriteTiles(cfg.outputDir, "coverage-scope-"+scopeSlug(scopeName), scopeRaster, scopeBounds)
+					if err != nil {
+						prog.Update("error", 0, 0, err.Error())
+						recordTier("scope_coverage", tierStart, err)
+						return fmt.Errorf("writing per-scope coverage tiles for %s: %w", scopeName, err)
+					}
+					cm := buildCoverageMeta(tiles, rangeKm, cfg, fmt.Sprintf("Standard-tier coverage computed using only repeaters observed in region %s (%d repeater(s)).", scopeName, len(scopeSites)))
+					if m.ScopeCoverage == nil {
+						m.ScopeCoverage = map[string]*coverageMeta{}
+					}
+					m.ScopeCoverage[scopeName] = &cm
+					if err := writeMeta(); err != nil {
+						prog.Update("error", 0, 0, err.Error())
+						recordTier("scope_coverage", tierStart, err)
+						return fmt.Errorf("writing %s: %w", metaPath, err)
+					}
+				}
+				prog.Update("computing_scope_coverage", len(knownRegionNames), len(knownRegionNames), fmt.Sprintf("Computed coverage for %d region(s)", len(knownRegionNames)))
+				recordTier("scope_coverage", tierStart, nil)
+			} else {
+				log.Printf("coverage: coverage.standard_requires_gpu=true but no GPU (local or remote) is available — skipping per-scope coverage rasters")
+			}
 		}
 
 		// The calibration search itself already ran above regardless of GPU
@@ -509,7 +623,8 @@ func run(cfg appConfig) (err error) {
 		// even without rendering a full calibrated coverage raster. Only
 		// the raster itself (which goes through engine.Margins/GPU) is
 		// gated.
-		if !cfg.calibratedRequiresGPU || engine.Available() {
+		calibratedGpuOK := !cfg.calibratedRequiresGPU || engine.Available()
+		if calibratedGpuOK && shouldComputeTier(m.Coverage.Calibrated) {
 			tierStart := time.Now()
 			prog.Update("computing_coverage_calibrated", 0, 1, "Computing coverage from calibrated positions")
 			calibratedRaster := coverage.Raster(engine, grid, calibratedSites, bounds, cfg.coverageImageWidth, cfg.propagation, cfg.coverageMaxAlpha,
@@ -525,8 +640,10 @@ func run(cfg appConfig) (err error) {
 				return err
 			}
 			recordTier("calibrated", tierStart, nil)
-		} else {
+		} else if !calibratedGpuOK {
 			log.Printf("coverage: coverage.calibrated_requires_gpu=true but no GPU (local or remote) is available — skipping calibrated coverage raster")
+		} else {
+			log.Printf("coverage: calibrated coverage raster already computed today (%s) — skipping recompute (pass -force-all-tiers to override)", m.Coverage.Calibrated.GeneratedAt)
 		}
 
 		// grid's last use was the calibrated raster just above — release its
@@ -535,14 +652,25 @@ func run(cfg appConfig) (err error) {
 		// letting both be resident at once for the rest of the run.
 		grid.Close()
 
-		precisionAllowed := !cfg.precisionRequiresGPU || engine.Available()
-		calibratedPrecisionAllowed := !cfg.calibratedPrecisionRequiresGPU || engine.Available()
+		precisionGpuOK := !cfg.precisionRequiresGPU || engine.Available()
+		calibratedPrecisionGpuOK := !cfg.calibratedPrecisionRequiresGPU || engine.Available()
+		// Folds the same-day freshness check in here too (not just the GPU
+		// gate) — so when both precision tiers already ran today, the
+		// entire high-resolution terrain fetch below is skipped as well,
+		// not just the raster compute itself. This is the expensive case
+		// the whole shouldComputeTier mechanism exists for.
+		precisionAllowed := precisionGpuOK && shouldComputeTier(m.Coverage.Precision)
+		calibratedPrecisionAllowed := calibratedPrecisionGpuOK && shouldComputeTier(m.Coverage.CalibratedPrecision)
 
-		if !precisionAllowed {
+		if !precisionGpuOK {
 			log.Printf("coverage: coverage.precision_requires_gpu=true but no GPU (local or remote) is available — skipping precision coverage raster")
+		} else if !precisionAllowed {
+			log.Printf("coverage: precision coverage raster already computed today (%s) — skipping recompute (pass -force-all-tiers to override)", m.Coverage.Precision.GeneratedAt)
 		}
-		if !calibratedPrecisionAllowed {
+		if !calibratedPrecisionGpuOK {
 			log.Printf("coverage: coverage.calibrated_precision_requires_gpu=true but no GPU (local or remote) is available — skipping calibrated precision coverage raster")
+		} else if !calibratedPrecisionAllowed {
+			log.Printf("coverage: calibrated precision coverage raster already computed today (%s) — skipping recompute (pass -force-all-tiers to override)", m.Coverage.CalibratedPrecision.GeneratedAt)
 		}
 
 		// The Precision raster's own terrain is no longer loaded as one

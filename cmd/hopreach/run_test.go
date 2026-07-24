@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"hopreach/internal/analytics"
+	"hopreach/internal/corescope"
 )
 
 // TestCleanStaleGridScratch is the regression test for a real production
@@ -100,5 +101,70 @@ func TestRecordCrashedRunIfAny(t *testing.T) {
 	wantStageMention := "computing_coverage_precision"
 	if !strings.Contains(rec.Error, wantStageMention) {
 		t.Errorf("Error = %q, want it to mention the last known stage %q from progress.json", rec.Error, wantStageMention)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// TestRepeaterInScope covers the union repeaterInScope draws on — the same
+// one public/app.js's repeaterScopesOf uses client-side, so which repeaters
+// count as "in scope #x" agrees between the per-scope coverage this drives
+// and the map's own filter checkboxes/popups.
+func TestRepeaterInScope(t *testing.T) {
+	inferred := map[string][]string{
+		"aa": {"#sco", "#ioi"},
+	}
+
+	tests := []struct {
+		name        string
+		node        corescope.Node
+		scope       string
+		wantInScope bool
+	}{
+		{
+			name:        "matches via inferred scopes (case-insensitive pubkey)",
+			node:        corescope.Node{PublicKey: "AA"},
+			scope:       "#ioi",
+			wantInScope: true,
+		},
+		{
+			name:        "does not match a region the repeater's inferred set lacks",
+			node:        corescope.Node{PublicKey: "AA"},
+			scope:       "#fif",
+			wantInScope: false,
+		},
+		{
+			name:        "matches via default_scope when not in inferred set at all",
+			node:        corescope.Node{PublicKey: "BB", DefaultScope: strPtr("#fif")},
+			scope:       "#fif",
+			wantInScope: true,
+		},
+		{
+			name:        "no default_scope and no inferred entry never matches",
+			node:        corescope.Node{PublicKey: "CC"},
+			scope:       "#sco",
+			wantInScope: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := repeaterInScope(tt.node, tt.scope, inferred)
+			if got != tt.wantInScope {
+				t.Errorf("repeaterInScope(%+v, %q) = %v, want %v", tt.node, tt.scope, got, tt.wantInScope)
+			}
+		})
+	}
+}
+
+func TestScopeSlug(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"#sco", "sco"},
+		{"#ioi-admin", "ioi-admin"},
+		{"#Weird Name!", "weird-name-"},
+	}
+	for _, tt := range tests {
+		if got := scopeSlug(tt.in); got != tt.want {
+			t.Errorf("scopeSlug(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

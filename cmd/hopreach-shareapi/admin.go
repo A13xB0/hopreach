@@ -65,6 +65,13 @@ func runRecompute() {
 		recomputeMu.Unlock()
 	}()
 
+	// -force guarantees a run happens now (bypassing
+	// coverage.min_recompute_interval_hours) — it does NOT force every
+	// tier to recompute from scratch: a tier that already finished earlier
+	// today is left as-is (see cmd/hopreach/output.go's tierFreshToday).
+	// That's the intended behaviour here too — this endpoint exists to
+	// pick up fresh repeater data / a config change on demand, not to
+	// redo an expensive Precision pass that just ran a few hours ago.
 	cmd := exec.Command(hopreachBinary, "-force")
 	// Same log file the cron-triggered run writes to (see
 	// docker/entrypoint.sh) — one place to look regardless of what

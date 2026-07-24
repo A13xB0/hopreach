@@ -32,7 +32,8 @@ func main() {
 	sysinfo.ApplyGoMemoryLimit()
 
 	configFlag := flag.String("config", "", "path to config.yaml (default: $HOPREACH_CONFIG, then ./config.yaml)")
-	force := flag.Bool("force", false, "recompute even if within coverage.min_recompute_interval_hours")
+	force := flag.Bool("force", false, "run even if within coverage.min_recompute_interval_hours (each tier still skips itself if it already completed today — see -force-all-tiers)")
+	forceAllTiers := flag.Bool("force-all-tiers", false, "also recompute every tier regardless of same-day freshness (implies -force); use after a config change that invalidates existing output, not for a routine restart/deploy")
 	prepare := flag.Bool("prepare", false, "render config.js, nginx's site config, and the cron file from config.yaml, then exit")
 	flag.Parse()
 
@@ -59,7 +60,8 @@ func main() {
 	defer lock.Close()
 
 	cfg := toAppConfig(yc)
-	cfg.forceRecompute = *force
+	cfg.forceRecompute = *force || *forceAllTiers
+	cfg.forceAllTiers = *forceAllTiers
 	if err := run(cfg); err != nil {
 		log.Fatalf("hopreach: %v", err)
 	}

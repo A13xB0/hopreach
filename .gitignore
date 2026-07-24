@@ -16,3 +16,6 @@ test-results/
 /hopreach
 /hopreach-shareapi
 /hopreach-gpuworker
+
+# Claude Code's own local session/tooling state — not project source.
+.claude/

@@ -58,15 +58,19 @@ corescope:
   request_timeout_seconds: 30
 
   scope_inference:
-    # Tags each repeater with its real MeshCore region (inferred_scope,
+    # Tags each repeater with its real MeshCore region(s) (inferred_scopes,
     # shown in its map popup alongside the site's own default_scope) —
     # decoded from each packet's own cryptographic transport code (see
     # README's "Inferring real scope from each packet's transport code"),
     # not a guess from channel names, and not each node's own
     # self-reported default_scope, which in practice is unset for most
-    # repeaters. Off by default: it means fetching a real window's worth
-    # of raw packet traffic from CoreScope on every run — real extra load,
-    # worth opting into deliberately.
+    # repeaters. Also drives a per-region Standard-tier coverage raster
+    # (README's "Per-region coverage, and comparing regions") — one per
+    # known region, computed from only that region's own repeaters, shown
+    # via the map's region-filter checkboxes. Off by default: it means
+    # fetching a real window's worth of raw packet traffic from CoreScope
+    # on every run (and, once enabled, one extra coverage raster per known
+    # region) — real extra load, worth opting into deliberately.
     enabled: false
     # How far back to look when tallying region participation.
     # 168 = 7 days.

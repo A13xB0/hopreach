@@ -318,24 +318,33 @@ never silently happens.
 
 ### Per-region coverage, and comparing regions
 
-The map's **Filter by region scope** control (top-right) pulls its list
-live from CoreScope's own `GET /api/scope-stats`, not a fixed config
-list — whichever regions are currently active show up automatically.
-Beyond filtering which repeater markers are shown, checking a region also
-computes and overlays its own coverage raster — client-side, via the same
-WASM propagation model the [planning tools](#planning-tools) use, run in
-a Worker so it never blocks the map — restricted to only the repeaters
-`inferred_scopes`/`default_scope` place in that region. Checking more than
-one region overlays their (distinctly coloured, semi-transparent)
-coverage together, so real per-region reach can be visually compared or
-seen to overlap, not just which markers are in each. A wide region's own
-raster can take on the order of a minute to compute the first time (real
-terrain fetch + a search over potentially dozens of sites) — deliberately
-capped to a bounded number of DEM tiles (falling back to a coarser zoom
-for a very large area, the same fix applied to the
-[simulator](#lora-flood-simulator)'s own connectivity builder) rather than
-an unbounded fetch, and a lower resolution than the main coverage map
-(this is a rough per-region overview, not a precision map).
+Alongside the whole-region Standard/Calibrated/Precision tiers, `run()`
+also renders one **Standard-tier coverage raster per known region** —
+e.g. a `#fif` raster computed using *only* the repeaters `inferred_scopes`/
+`default_scope` place in `#fif`, so it shows where that region's own
+repeaters actually reach, not diluted by every other region's — the same
+model as the main Standard tier, just restricted to that region's own
+site set, reusing the same already-loaded terrain grid. Each region's
+raster is bounded to its own repeaters' area (not the whole configured
+region), so a compact region like `#fif` renders a tightly cropped image
+rather than a mostly-empty whole-map-sized one. Tiles are written to
+`coverage-scope-<region>-*.png` and listed in `meta.json`'s
+`scope_coverage` (keyed by region name), the same tiled-PNG shape as the
+main coverage tiers (see `coverage.WriteTiles`) — served as ordinary
+static images, not computed on the fly. Regions with zero member
+repeaters get no entry. Gated on `corescope.scope_inference.enabled`
+(off by default): without it there's no reliable per-repeater region
+membership at scale to split by.
+
+The map's **Filter by region scope** control (top-right) pulls its
+checkbox list live from CoreScope's own `GET /api/scope-stats`, not a
+fixed config list — whichever regions are currently active show up
+automatically. Beyond filtering which repeater markers are shown,
+checking a region also loads its own `scope_coverage` tiles (if any exist
+for it) as a map overlay — instantly, since these are pre-rendered, not a
+live client-side computation. Checking more than one region overlays
+their tiles together, so real per-region reach can be visually compared,
+not just which markers are in each.
 
 ## How the coverage estimate works
 
@@ -697,11 +706,24 @@ field within each):
 | `share` | Shared-plan store/TTL/listen address |
 | `remote_worker` | [Remote GPU worker](#remote-gpu-worker) broker token/timeout |
 
-Two `hopreach` flags sit outside the YAML: `-force` (recompute immediately,
-ignoring `coverage.min_recompute_interval_hours`) and `-prepare` (render
+Three `hopreach` flags sit outside the YAML: `-force` (run immediately,
+ignoring `coverage.min_recompute_interval_hours` — but each coverage tier
+still skips its own recompute if it already finished earlier the same UTC
+day, so this means "make sure a run happens now", not "redo everything
+from scratch"), `-force-all-tiers` (also ignore same-day freshness and
+recompute every tier regardless — implies `-force`; use after a config
+change that invalidates existing output, e.g. a propagation-model tweak,
+not for a routine restart or deploy), and `-prepare` (render
 `config.js`/nginx's site config/the cron file from `config.yaml` and exit —
 what the Docker entrypoint calls at container startup; not needed for local
 development or a normal run).
+
+The per-tier freshness check (each tier's own `generated_at` in
+`meta.json`, compared against the current UTC calendar date) is what lets
+a deploy-time container restart, or the `/admin/recompute` endpoint (see
+[Remote GPU worker](#remote-gpu-worker)), refresh the repeater list and
+any tier that hasn't run yet today without also re-running an expensive
+Precision pass that already completed a few hours earlier that same day.
 
 `HTTP_PORT` (host port mapping) is the one thing that stays a plain
 `docker-compose.yml`/shell environment variable rather than YAML — it's a
