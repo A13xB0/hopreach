@@ -900,6 +900,7 @@
   function applyNodesModalTable() {
     const tbody = document.getElementById("sim-nodes-modal-tbody");
     let applied = 0;
+    let radioChanged = false;
     tbody.querySelectorAll("tr[data-node-id]").forEach((tr) => {
       const n = simNodes.find((x) => x.id === tr.dataset.nodeId);
       if (!n) return;
@@ -954,8 +955,15 @@
       });
       if (radioTouched) override.radio = radio;
       simNodePrefsOverrides[n.id] = override;
+      if (radioTouched) radioChanged = true;
       applied++;
     });
+    // A link's baked-in SNR is anchored to its receiver's SF (see
+    // receiverSf) — changing any node's radio (SF in particular)
+    // invalidates every previously-built link's SNR, so rebuild is
+    // required for the reception model to stay consistent. Delay/power-only
+    // edits don't touch link SNR, so only invalidate when radio changed.
+    if (radioChanged) invalidateLinks();
     // Re-render the Message senders picker/list — they can render
     // node-derived state (e.g. the picker's own option text), which would
     // otherwise stay stale until some unrelated action happened to
@@ -1165,10 +1173,24 @@
     return cachedGrid;
   }
 
+  // The spreading factor a directed link's SNR must be anchored to is the
+  // RECEIVER's own SF — that's the SF the engine checks this reception
+  // against (internal/meshsim/engine.go: snrThresholdForSF(listener SF)),
+  // so approxSnrFromMargin/snrFromObservationCount must map "margin 0 /
+  // one observation" onto the RECEIVER's threshold or the engine silently
+  // rejects the link as weak_signal. Previously hardcoded to 11 (the old
+  // default preset's SF); the default is now the EU/UK (Narrow) SF8 preset,
+  // and a per-node SF override can differ again — so it must be read
+  // per-receiver, not assumed. (This is also why applyNodesModalTable now
+  // calls invalidateLinks() when a radio setting changes: the baked-in SNR
+  // is receiver-SF-specific and must be rebuilt if that SF changes.)
+  function receiverSf(node) {
+    return effectivePrefsFor(node).radio.sf;
+  }
+
   async function buildLinksFromModel(nodes) {
     const grid = await ensureGrid(nodes);
     const links = [];
-    const sf = 11; // DefaultLoRaParams' SF — see internal/meshsim.DefaultLoRaParams
     for (let i = 0; i < nodes.length; i++) {
       const groundM = grid.at(nodes[i].lat, nodes[i].lon);
       const txHeightASL = groundM + cfg.propagation.antennaHeightM;
@@ -1178,7 +1200,8 @@
         if (d > SIM_MAX_RANGE_KM) continue;
         const margin = Propagation.pathMargin(grid, cfg.propagation, nodes[i].lat, nodes[i].lon, txHeightASL, nodes[j].lat, nodes[j].lon, d);
         if (margin < 0) continue; // below the model's own reception threshold — not a link
-        links.push({ from: i, to: j, snrDb: approxSnrFromMargin(margin, sf) });
+        // Receiver is j (the link is "i's transmission is audible at j").
+        links.push({ from: i, to: j, snrDb: approxSnrFromMargin(margin, receiverSf(nodes[j])) });
       }
     }
     return links;
@@ -1196,16 +1219,19 @@
     const resp = await fetch(`/corescope-api/api/nodes/${encodeURIComponent(n.refId)}/reach?days=${CORESCOPE_REACH_DAYS}`);
     if (!resp.ok) return [];
     const data = await resp.json();
-    const sf = 11;
     const links = [];
     for (const l of data.links || []) {
       const targetIdx = nodes.findIndex((x) => x.source === "real" && x.refId === l.pubkey);
       if (targetIdx === -1) continue;
+      // Anchor each direction's SNR to ITS OWN receiver's SF (see
+      // receiverSf / buildLinksFromModel). we_hear is neighbour -> this
+      // node (receiver = this node); they_hear is this node -> neighbour
+      // (receiver = the neighbour).
       if (typeof l.we_hear === "number" && l.we_hear > 0) {
-        links.push({ from: targetIdx, to: nodeIndex, snrDb: snrFromObservationCount(l.we_hear, sf) });
+        links.push({ from: targetIdx, to: nodeIndex, snrDb: snrFromObservationCount(l.we_hear, receiverSf(n)) });
       }
       if (typeof l.they_hear === "number" && l.they_hear > 0) {
-        links.push({ from: nodeIndex, to: targetIdx, snrDb: snrFromObservationCount(l.they_hear, sf) });
+        links.push({ from: nodeIndex, to: targetIdx, snrDb: snrFromObservationCount(l.they_hear, receiverSf(nodes[targetIdx])) });
       }
     }
     return links;
@@ -1381,6 +1407,18 @@
       .map((x) => (x.startsWith("#") ? x : `#${x}`));
   }
 
+  // Physical-layer reception model (internal/meshsim.ChannelParams). Unlike
+  // the Go tests (which construct scenarios with the zero-value, legacy
+  // hard-threshold model), the product turns on the more faithful
+  // probabilistic model: a logistic packet-error-rate curve near the
+  // sensitivity floor instead of a hard step, and a small per-packet fade
+  // so a marginal link genuinely varies between Monte-Carlo trials rather
+  // than giving an identical (over-confident) result every time. Modest,
+  // LoRa-appropriate values — comfortably-strong links stay ~100% reliable
+  // (see the Go test TestChannelSigmoidLeavesStrongLinksReliable).
+  const CHANNEL_PER_WIDTH_DB = 2.0;
+  const CHANNEL_FADING_SIGMA_DB = 2.0;
+
   function scenarioFromState() {
     return {
       nodes: simNodes.map((n) => ({
@@ -1394,6 +1432,7 @@
         floodMaxUnscoped: effectiveFloodMaxUnscoped(n),
       })),
       links: simLinks,
+      channel: { perWidthDb: CHANNEL_PER_WIDTH_DB, fadingSigmaDb: CHANNEL_FADING_SIGMA_DB },
     };
   }
 

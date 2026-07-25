@@ -261,7 +261,7 @@ func (r ConfigRule) ApplyWithAttrs(base NodePrefs, attrs NodeAttrs) NodePrefs {
 // rule with a real Condition will match nothing, since there are no attrs
 // to test it against.
 func applyRuleToScenario(scenario Scenario, attrs []NodeAttrs, rule ConfigRule) Scenario {
-	out := Scenario{Links: scenario.Links, Nodes: make([]SimNode, len(scenario.Nodes))}
+	out := Scenario{Links: scenario.Links, Channel: scenario.Channel, Nodes: make([]SimNode, len(scenario.Nodes))}
 	copy(out.Nodes, scenario.Nodes)
 	for i := range out.Nodes {
 		var a NodeAttrs
@@ -291,7 +291,12 @@ type ConfigPolicy []ConfigRule
 // behaves identically to applyRuleToScenario with that same rule), plus
 // FloodMax is applied separately since it lives on SimNode, not NodePrefs.
 func applyPolicyToScenario(scenario Scenario, attrs []NodeAttrs, policy ConfigPolicy) Scenario {
-	out := Scenario{Links: scenario.Links, Nodes: make([]SimNode, len(scenario.Nodes))}
+	// Channel must be carried through — it governs the reception model
+	// (see Scenario.Channel), and the optimizer runs every candidate policy
+	// through this; dropping it here would silently evaluate candidates
+	// under the legacy hard-threshold/no-fading model even when the caller
+	// enabled the probabilistic one.
+	out := Scenario{Links: scenario.Links, Channel: scenario.Channel, Nodes: make([]SimNode, len(scenario.Nodes))}
 	copy(out.Nodes, scenario.Nodes)
 	for i := range out.Nodes {
 		var a NodeAttrs

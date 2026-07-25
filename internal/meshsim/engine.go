@@ -1,6 +1,9 @@
 package meshsim
 
-import "container/heap"
+import (
+	"container/heap"
+	"math"
+)
 
 // SimNode is one node's static simulation properties. NodePrefs governs its
 // own relay-delay behavior; CanRelay lets a plain client be modeled
@@ -211,6 +214,47 @@ func (n SimNode) shouldDropForLoop(myHash uint32, pathHashes []uint32, packetHas
 type Scenario struct {
 	Nodes []SimNode `json:"nodes"`
 	Links []Link    `json:"links"`
+	// Channel governs the physical-layer reception model — see
+	// ChannelParams. Its zero value ({0, 0}) is the legacy behaviour: a
+	// hard SNR threshold and a fixed per-link SNR, no channel randomness.
+	// Every existing Go test constructs a Scenario without setting this and
+	// so gets exactly that legacy behaviour; the browser-side caller
+	// (public/simulator.js) passes real values to enable the more faithful
+	// probabilistic model. Same "zero value preserves prior behaviour"
+	// discipline as AblationFlags.
+	Channel ChannelParams `json:"channel"`
+}
+
+// ChannelParams turns the reception model from an all-or-nothing hard SNR
+// threshold with a fixed per-link SNR into a probabilistic one — the two
+// physical-fidelity gaps a hard threshold has (docs/SIMULATOR_PLAN_
+// PHASE7.md): real reception near the sensitivity floor is a smooth
+// packet-error-rate curve over a few dB, not a step, and a real link's
+// instantaneous SNR varies packet-to-packet (fast fading) rather than
+// sitting at one fixed value forever. Both default off (zero value) so
+// existing behaviour is unchanged unless a caller opts in.
+type ChannelParams struct {
+	// PERWidthDB, when > 0, replaces the hard SNR-threshold cutoff with a
+	// logistic packet-error-rate curve of this width in dB: a reception
+	// exactly at its SF's threshold decodes ~50% of the time, one PERWidthDB
+	// above it ~73%, two above ~88%, and symmetrically below. 0 keeps the
+	// legacy hard step (decode iff snr >= threshold). A small value (~2)
+	// models a realistically steep LoRa waterfall without making
+	// comfortably-strong links unreliable.
+	PERWidthDB float64 `json:"perWidthDb"`
+	// FadingSigmaDB, when > 0, adds a per-reception zero-mean Gaussian
+	// perturbation of this standard deviation (dB) to the WANTED signal's
+	// SNR before both the capture comparison and the decode check — a
+	// first-order fast-fading model. This is what makes a marginal link
+	// genuinely flicker between Monte-Carlo trials (the fixed-SNR model
+	// never did, so trial-to-trial delivery variance came only from relay
+	// timing, understating real uncertainty — see the optimizer's own
+	// confidence machinery, which assumes trial variance reflects real
+	// variance). Interferer SNRs are left at their mean (a deliberate
+	// scoping choice to keep one draw per reception rather than one per
+	// interferer; the wanted signal's own fade dominates whether a
+	// marginal packet is decoded). 0 = no fading.
+	FadingSigmaDB float64 `json:"fadingSigmaDb"`
 }
 
 // Message is one test-bench-scheduled flood transmission: node Origin
@@ -771,19 +815,36 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 				}
 			}
 
+			channel := scenario.Channel
 			collided := false
 			collidedWith := []int{}
 			survivedCapture := false
 			willRelay := false
 			dropReason := ""
 			collisionKind := ""
+			// effWantedSNR is the wanted signal's instantaneous SNR at this
+			// listener — its mean link SNR plus, when fading is enabled, a
+			// per-reception Gaussian draw (see ChannelParams.FadingSigmaDB).
+			// Computed once and used for BOTH the capture margin comparison
+			// and the decode check below, so a single fade consistently
+			// governs whether this specific packet is heard. Legacy (zero
+			// FadingSigmaDB) leaves it exactly equal to the mean link SNR.
+			var effWantedSNR float64
 			if txBusy {
 				dropReason = "tx_busy"
 			} else {
-				wantedSNR := linkSNR(adj, tx.sender, e.listener)
-				anyInterferer := false
-				sawNoLock := false
-				sawCorrupted := false
+				effWantedSNR = linkSNR(adj, tx.sender, e.listener)
+				if channel.FadingSigmaDB > 0 {
+					effWantedSNR += channel.FadingSigmaDB * gaussian(rng)
+				}
+				// Partition every overlapping, audible interferer into those
+				// that arrive during the wanted packet's own preamble/sync
+				// window (which prevent lock entirely — no_lock) and those
+				// arriving after lock (whose COMBINED power decides
+				// corruption — see aggregateInterfererSNRdB).
+				var preambleInterferers []int
+				var payloadInterferers []int
+				var payloadInterfererSNRs []float64
 				for i, other := range transmissions {
 					if i == e.txIndex || other.sender == tx.sender {
 						continue
@@ -794,27 +855,34 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 					if !audibleTo(adj, other.sender, e.listener) {
 						continue
 					}
-					anyInterferer = true
-					interfererSNR := linkSNR(adj, other.sender, e.listener)
-					outcome := loraCaptureOutcome(wantedSNR, interfererSNR, tx, other)
-					if ab.DisableCapture && outcome == outcomeCaptured {
-						// The pre-phase-1 model: any overlapping, audible
-						// interferer that arrives after lock always corrupts
-						// the wanted signal — no SNR margin can save it. See
-						// AblationFlags.DisableCapture's own doc comment.
-						outcome = outcomeCorrupted
+					if startsBeforeLock(tx, other) {
+						preambleInterferers = append(preambleInterferers, other.sender)
+					} else {
+						payloadInterferers = append(payloadInterferers, other.sender)
+						payloadInterfererSNRs = append(payloadInterfererSNRs, linkSNR(adj, other.sender, e.listener))
 					}
-					switch outcome {
-					case outcomeNoLock:
-						collidedWith = append(collidedWith, other.sender)
-						sawNoLock = true
-					case outcomeCorrupted:
-						collidedWith = append(collidedWith, other.sender)
-						sawCorrupted = true
-					case outcomeCaptured:
-						// Survived this specific interferer — still need to
-						// check the rest before concluding anything.
+				}
+				anyInterferer := len(preambleInterferers) > 0 || len(payloadInterferers) > 0
+				switch {
+				case len(preambleInterferers) > 0:
+					// Lock never acquired — nothing was decoded at all.
+					// no_lock dominates: whatever a later, post-lock
+					// interferer would have done is moot without lock.
+					collidedWith = preambleInterferers
+					collisionKind = "no_lock"
+				case len(payloadInterferers) > 0:
+					// Lock acquired; corruption is decided by the interferers'
+					// COMBINED power, not pairwise (see aggregateInterferer
+					// SNRdB's own doc comment). DisableCapture forces
+					// corruption regardless of margin — the pre-phase-1
+					// "any overlap destroys the signal" model.
+					aggDB := aggregateInterfererSNRdB(payloadInterfererSNRs)
+					if ab.DisableCapture || effWantedSNR-aggDB < captureMarginDB {
+						collidedWith = payloadInterferers
+						collisionKind = "corrupted"
 					}
+					// else: captured — the wanted signal beat the combined
+					// interference by the margin, so it survives.
 				}
 				collided = len(collidedWith) > 0
 				// True if some other transmission overlapped this window
@@ -823,23 +891,15 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 				// clean reception (no interferer at all) purely for
 				// reporting; both leave Collided false.
 				survivedCapture = !collided && anyInterferer
-				switch {
-				case sawNoLock:
-					// no_lock dominates: without lock, whatever a different
-					// interferer did at the payload level is moot.
-					collisionKind = "no_lock"
-				case sawCorrupted:
-					collisionKind = "corrupted"
-				}
 			}
 			if !txBusy && !collided {
-				snr := linkSNR(adj, tx.sender, e.listener)
 				sf := scenario.Nodes[e.listener].Prefs.Radio.SF
 				listenerNode := scenario.Nodes[e.listener]
-				if snr < snrThresholdForSF(sf) {
-					// Never actually decoded — never marks seen. A later,
-					// cleaner copy of the same packet must still be able
-					// to relay normally.
+				if !decodes(effWantedSNR, sf, channel, rng) {
+					// Never actually decoded (below threshold, or lost the
+					// probabilistic packet-error-rate draw near it) — never
+					// marks seen. A later, cleaner copy of the same packet
+					// must still be able to relay normally.
 					dropReason = "weak_signal"
 				} else {
 					// Decoded successfully — read whether an EARLIER
@@ -876,7 +936,7 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 						if !ab.DisablePathByteAirtime {
 							scoreLen = onAirLen(tx.payloadLen, len(tx.path), tx.hashSize)
 						}
-						score := PacketScore(snr, sf, scoreLen)
+						score := PacketScore(effWantedSNR, sf, scoreLen)
 						rxDelay := RxDelayMs(listenerNode.Prefs.RxDelayBase, score, tx.endMs-tx.startMs)
 						var txDelay uint32
 						if tx.direct {
@@ -994,6 +1054,38 @@ func loraCaptured(wantedSNR, interfererSNR float64, tx, other transmission) bool
 	return loraCaptureOutcome(wantedSNR, interfererSNR, tx, other) == outcomeCaptured
 }
 
+// startsBeforeLock reports whether other begins before tx's own
+// preamble+sync acquisition window has elapsed — i.e. whether other
+// prevents the receiver from ever locking onto tx at all (condition 1 of
+// loraCaptureOutcome, factored out so the aggregated interferer loop in
+// Run can partition preamble-window interferers from payload-window ones).
+func startsBeforeLock(tx, other transmission) bool {
+	return other.startMs < tx.startMs+uint32(preambleDurationMs(tx.radio))
+}
+
+// aggregateInterfererSNRdB combines several co-channel interferers'
+// individual SNRs into the single effective interferer level their COMBINED
+// power presents, by summing in the linear domain and converting back to
+// dB. This is the fix for pairwise capture over-optimism (docs/SIMULATOR_
+// PLAN_PHASE7.md): evaluating each interferer separately lets a wanted
+// signal "win" against several interferers it individually beats by the
+// capture margin, even though their summed energy would corrupt it. Two
+// equal interferers sum to +3 dB, three to ~+4.8 dB, and so on — so the
+// effective margin the wanted signal must clear shrinks as interferers
+// pile up, which is the real physical behaviour. For a single interferer
+// this returns exactly that interferer's own SNR, so nothing changes in
+// the (common, and only previously-tested) one-interferer case.
+func aggregateInterfererSNRdB(snrs []float64) float64 {
+	var linear float64
+	for _, s := range snrs {
+		linear += math.Pow(10, s/10)
+	}
+	if linear <= 0 {
+		return math.Inf(-1)
+	}
+	return 10 * math.Log10(linear)
+}
+
 // channelBusy reports whether sender would currently detect the radio
 // channel as occupied — i.e. some other node's transmission, audible to
 // sender, has an airtime window that contains atMs right now — mirroring
@@ -1037,6 +1129,44 @@ func snrThresholdForSF(sf int) float64 {
 		return 999 // out of the modeled range — never passes
 	}
 	return snrThresholdDB[sf-7]
+}
+
+// uniformFloat draws a uniform in [0,1) from the RNG interface's only
+// method (IntN) — 24 bits of resolution, far finer than any dB-scale
+// perturbation here needs. Kept off the hot path: only ever called when a
+// ChannelParams feature is actually enabled, so a zero-value (legacy)
+// Channel consumes no RNG draws and reproduces prior behaviour exactly.
+func uniformFloat(rng RNG) float64 {
+	const bits = 1 << 24
+	return float64(rng.IntN(bits)) / float64(bits)
+}
+
+// gaussian draws a standard-normal sample (mean 0, stddev 1) via
+// Box-Muller from two uniforms — deterministic for a deterministic RNG,
+// so paired-seed comparisons (the optimizer's whole confidence model)
+// stay valid.
+func gaussian(rng RNG) float64 {
+	u1 := uniformFloat(rng)
+	if u1 < 1e-12 {
+		u1 = 1e-12 // guard the log; the drawn value is otherwise unbiased
+	}
+	u2 := uniformFloat(rng)
+	return math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
+}
+
+// decodes reports whether a wanted signal arriving at effSnr (its mean SNR
+// plus any fading already applied by the caller) is successfully decoded
+// at spreading factor sf, under channel. With ch.PERWidthDB <= 0 this is
+// the legacy hard step (effSnr >= threshold); otherwise it's a logistic
+// packet-error-rate curve centred on that SF's own threshold, sampled with
+// rng. Only draws from rng when the probabilistic model is active.
+func decodes(effSnr float64, sf int, ch ChannelParams, rng RNG) bool {
+	threshold := snrThresholdForSF(sf)
+	if ch.PERWidthDB <= 0 {
+		return effSnr >= threshold
+	}
+	p := 1.0 / (1.0 + math.Exp(-(effSnr-threshold)/ch.PERWidthDB))
+	return uniformFloat(rng) < p
 }
 
 // --- item 9: airtime duty-cycle budget ----------------------------------
