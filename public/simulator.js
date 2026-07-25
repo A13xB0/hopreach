@@ -214,6 +214,14 @@
   // proven/predicted overlay (see renderBottleneckAnalysis), so playing
   // the animation doesn't clear or fight with that always-shown context.
   const simRealActivityLayer = L.layerGroup().addTo(map);
+  // The replay's static proven-vs-predicted overlay (see
+  // renderBottleneckAnalysis). Its own layer because simResultsLayer belongs
+  // to the simulation replay, which clears it wholesale on every wave and
+  // every view-option change — so touching any Simulator-view control used
+  // to silently destroy the analysis a replay had just drawn, with no way to
+  // get it back short of replaying the packet.
+  // Starts detached: it's opt-in via the replay control's own checkbox.
+  const simProvenLayer = L.layerGroup();
 
   function randomId() {
     return Array.from(crypto.getRandomValues(new Uint8Array(6)))
@@ -2835,6 +2843,7 @@
     replayTargetHash = "";
     lastRealReplayStatusText = "";
     simRealActivityLayer.clearLayers();
+    simProvenLayer.clearLayers();
     removeBottleneckLegendControl();
     const section = document.getElementById("sim-bottleneck-replay-section");
     if (section) section.classList.add("hidden");
@@ -2925,6 +2934,14 @@
       if (!Number.isFinite(t)) continue;
       if (!uniq.length || t !== uniq[uniq.length - 1]) uniq.push(t);
     }
+    // A lead-in instant one millisecond before the first event, so play
+    // position 0 means "nothing has happened yet" and the replay starts from
+    // an empty map. Without it the scrubber's zero sat exactly ON the first
+    // event, and since CoreScope timestamps a whole observation to the
+    // second, that could be a dozen hops already drawn before you'd pressed
+    // play — which reads as the replay being broken rather than as a
+    // simultaneous burst.
+    if (uniq.length > 0) uniq.unshift(uniq[0] - 1);
     const segs = [];
     let play = 0;
     for (let i = 1; i < uniq.length; i++) {
@@ -3356,7 +3373,7 @@
       times: replayWaves.map((w) => w.atMs),
       format: (srcMs) => {
         const k = countWavesUpTo(srcMs);
-        return `t=${Math.round(srcMs)}ms · ${k}/${replayWaves.length}`;
+        return `t=${Math.max(0, Math.round(srcMs))}ms · ${k}/${replayWaves.length}`;
       },
       render: (srcMs, prevSrcMs) => {
         const k = countWavesUpTo(srcMs);
@@ -4765,6 +4782,83 @@
   // involved — but the packet carries only a 2-byte transport code derived
   // from it, so recovering the region means computing that code for every
   // candidate region name and looking for the one that matches.
+  // SHA-256 and HMAC-SHA256 in plain JS rather than via SubtleCrypto.
+  // window.crypto.subtle is undefined outside a secure context — which any
+  // plain-http deployment on something other than localhost is, including
+  // this project's own production setup. Reaching for it meant region
+  // decoding threw, got swallowed, and silently left every packet unscoped:
+  // a whole replay of "Region mismatch — not relayed" for users on the very
+  // deployment this is built for, while working perfectly on localhost.
+  // These inputs are tiny (a region name, one packet payload) and nothing
+  // here is a secret — the region keys are public by construction — so a
+  // straightforward implementation costs nothing and always works.
+  // Verified against 500 random vectors from node:crypto plus the standard
+  // empty-string and "abc" digests.
+  const SHA256_K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  function sha256Bytes(bytes) {
+    const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    const bitLen = bytes.length * 8;
+    const buf = new Uint8Array((bytes.length + 9 + 63) & ~63);
+    buf.set(bytes);
+    buf[bytes.length] = 0x80;
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(buf.length - 4, bitLen >>> 0, false);
+    dv.setUint32(buf.length - 8, Math.floor(bitLen / 4294967296), false);
+    const w = new Uint32Array(64);
+    for (let off = 0; off < buf.length; off += 64) {
+      for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4, false);
+      for (let i = 16; i < 64; i++) {
+        const x = w[i - 15];
+        const y = w[i - 2];
+        const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+        const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let [a, b, c, d, e, f, g, hh] = h;
+      for (let i = 0; i < 64; i++) {
+        const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+        const ch = (e & f) ^ (~e & g);
+        const t1 = (hh + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+        const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (S0 + maj) >>> 0;
+        hh = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+      }
+      h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+      h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0; h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+    }
+    const out = new Uint8Array(32);
+    const odv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) odv.setUint32(i * 4, h[i], false);
+    return out;
+  }
+
+  function hmacSha256(keyBytes, msgBytes) {
+    const B = 64;
+    const k = keyBytes.length > B ? sha256Bytes(keyBytes) : keyBytes;
+    const pad = new Uint8Array(B);
+    pad.set(k);
+    const inner = new Uint8Array(B + msgBytes.length);
+    const outer = new Uint8Array(B + 32);
+    for (let i = 0; i < B; i++) {
+      inner[i] = pad[i] ^ 0x36;
+      outer[i] = pad[i] ^ 0x5c;
+    }
+    inner.set(msgBytes, B);
+    outer.set(sha256Bytes(inner), B);
+    return sha256Bytes(outer);
+  }
+
   let regionKeyCache = null;
 
   async function ensureRegionKeys() {
@@ -4776,22 +4870,21 @@
         const data = await resp.json();
         for (const r of data.byRegion || []) {
           if (!r.name) continue;
-          const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(r.name)));
-          keys.set(r.name, await crypto.subtle.importKey("raw", digest.slice(0, 16), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]));
+          keys.set(r.name, sha256Bytes(new TextEncoder().encode(r.name)).slice(0, 16));
         }
       }
     } catch {
-      // CoreScope unreachable, or no crypto (an insecure origin has no
-      // SubtleCrypto) — every packet then stays unscoped, which is the
-      // behaviour this replaced rather than a new failure.
+      // CoreScope unreachable. Deliberately NOT cached below, so a transient
+      // failure doesn't silently disable region decoding for the rest of the
+      // session — the next replay tries again.
+      return keys;
     }
-    regionKeyCache = keys;
+    if (keys.size > 0) regionKeyCache = keys;
     return keys;
   }
 
-  async function decodeRegionOfPacket(rawHex) {
+  function decodeRegionOfPacketSync(rawHex, keys) {
     if (!rawHex || typeof rawHex !== "string") return "";
-    const keys = await ensureRegionKeys();
     if (keys.size === 0) return "";
     const raw = [];
     for (let i = 0; i + 1 < rawHex.length; i += 2) raw.push(parseInt(rawHex.substr(i, 2), 16));
@@ -4813,10 +4906,14 @@
     msg[0] = payloadType;
     msg.set(Uint8Array.from(payload), 1);
     for (const [name, key] of keys) {
-      const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, msg));
+      const sig = hmacSha256(key, msg);
       if ((sig[0] | (sig[1] << 8)) === transportCode1) return name;
     }
     return "";
+  }
+
+  async function decodeRegionOfPacket(rawHex) {
+    return decodeRegionOfPacketSync(rawHex, await ensureRegionKeys());
   }
 
   // Every real flood in the window, as simulator messages — real origin,
@@ -5477,6 +5574,12 @@
     if (e.kind === "predicted") {
       if (!showFloodReach()) return;
       for (const r of e.receptions) {
+        // Honour the Simulator view's SHOW filter — these are engine
+        // receptions, so "Collisions only" means the same thing here as it
+        // does for the simulation's own replay. It used to filter one and
+        // not the other, so the map showed hundreds of clean predicted hops
+        // while claiming to be showing collisions only.
+        if (!matchesViewFilter(r)) continue;
         const to = simNodes[r.node];
         if (!to) continue;
         // Predicted collisions are worth seeing — they're the whole reason
@@ -5493,6 +5596,11 @@
       return;
     }
 
+    // An observed hop is by definition a successful delivery — reality only
+    // records what got through — so it survives "Successes only" and is
+    // hidden by "Collisions only", consistent with how the same filter reads
+    // a simulated reception.
+    if (simViewMode.filter === "collisions") return;
     const color = e.isTarget ? REAL_TARGET_COLOR : REAL_CONTEXT_COLOR;
     for (const toIdx of e.tos) {
       const to = simNodes[toIdx];
@@ -5534,7 +5642,9 @@
       // offset into the real window is the number that actually means
       // something when comparing against CoreScope.
       format: (srcMs) => {
-        const offsetS = (srcMs - realTimelineWindowStartMs) / 1000;
+        // Clamped at zero: the timeline's lead-in instant sits 1ms before
+        // the first event, which would otherwise render as "+-0.0s".
+        const offsetS = Math.max(0, (srcMs - realTimelineWindowStartMs) / 1000);
         const k = countRealEventsUpTo(srcMs);
         return `+${offsetS.toFixed(1)}s · ${k}/${realTimelineEvents.length}`;
       },
@@ -5637,9 +5747,13 @@
             <button id="sim-map-real-replay" title="Watch the real traffic in this packet's window play out on the map, in the order it actually happened">▶ Play real traffic</button>
             <button id="sim-map-real-replay-skip" title="Jump straight to the whole window drawn at once">⏭ Skip to end</button>
           </div>
-          <label class="sim-flood-reach-toggle" title="These are floods, so every transmission was heard by everyone in earshot — not just the one path CoreScope could reconstruct. This fans our model's predicted reach out from each real sender, filling in around the observations.">
+          <label class="sim-flood-reach-toggle" title="These are floods, so every transmission was heard by everyone in earshot — not just the one path CoreScope could reconstruct. This plays our model's own simulation of the same window alongside the observations, filling in around them.">
             <input type="checkbox" id="sim-map-show-flood-reach" checked>
             Show the whole flood
+          </label>
+          <label class="sim-flood-reach-toggle" title="The static proven-vs-predicted summary for the target packet (the green/blue/amber lines in the key below). Off while replaying: it's every hop at once, so it covers the map before the replay has played anything and makes t=0 look like it already happened.">
+            <input type="checkbox" id="sim-map-show-proven">
+            Show proven/predicted overlay
           </label>
           <div class="plan-hint" id="sim-map-real-replay-status"></div>
         </div>
@@ -5655,6 +5769,10 @@
       // paths" (see redrawPathsForKeepAllPaths).
       div.querySelector("#sim-map-show-flood-reach").addEventListener("change", () => {
         if (transportSource && transportSource.kind === "real") transportSeekTo(transportPlayMs);
+      });
+      div.querySelector("#sim-map-show-proven").addEventListener("change", (e) => {
+        if (e.target.checked) simProvenLayer.addTo(map);
+        else map.removeLayer(simProvenLayer);
       });
       div.querySelector("#sim-map-open-bottleneck").addEventListener("click", () => openModal("sim-bottleneck-modal"));
       return div;
@@ -5850,6 +5968,7 @@
       // normal run does — and it means the surrounding traffic contends for
       // the channel with the target instead of the target flooding a mesh
       // that's implausibly silent.
+      const regionKeys = await ensureRegionKeys();
       let predictedMessages = await buildWindowFloodMessages(windowPackets, pubkeyToIndex, replayWindowStartMs);
       // The target itself may be missing from the window list (it's fetched
       // separately, and its own row can fall outside what /api/packets
@@ -5914,10 +6033,25 @@
       // what you need to see while a replay plays — the transport controls
       // and the map key are docked on the map itself now, and the
       // "🔍 Bottleneck analysis" button opens the full breakdown on demand.
+      // Scoped traffic that couldn't be decoded would be simulated as
+      // unscoped and refused by most repeaters, so say so rather than
+      // presenting a wall of "Region mismatch" as if it were a finding.
+      const scopedCount = predictedMessages.filter((m) => m.region).length;
+      const transportCount = predictedMessages.filter((m) => {
+        const f = parseMeshFrame(windowPackets.find((p) => p.hash === m.sourceHash)?.raw_hex);
+        return f && f.hasTransport;
+      }).length;
+      const regionNote =
+        regionKeys.size === 0
+          ? " Couldn't fetch the region list from CoreScope, so every packet is being simulated as unscoped — expect repeaters that deny unscoped traffic to refuse it."
+          : transportCount > scopedCount
+            ? ` ${transportCount - scopedCount} scoped packet(s) carry a region we couldn't identify, so they're simulated as unscoped.`
+            : "";
       setStatus(
         "sim-replay-hash-status",
         `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}. ` +
-          `Predicting over ${simNodes.length} repeaters (${alreadyLoaded} already loaded, ${placedForReplay} added from this packet's observations). ` +
+          `Predicting over ${simNodes.length} repeaters (${alreadyLoaded} already loaded, ${placedForReplay} added from this packet's observations)` +
+          `${scopedCount ? `, ${scopedCount} scoped flood(s) decoded` : ""}.${regionNote} ` +
           `Press "▶ Play real ±${windowSecs}s" on the map to watch it, or open the bottleneck analysis for the full breakdown.` +
           (isDirect ? " Note: our model only predicts flood relaying, but this packet used direct (addressed) routing — the prediction side won't be meaningful." : "")
       );
@@ -6041,7 +6175,7 @@
     // still what the model thinks happened and hiding them would misrepresent
     // the predicted flood, but visually demoted so they don't read as
     // failures the way a wall of amber did.
-    simResultsLayer.clearLayers();
+    simProvenLayer.clearLayers();
     const unmodeledPairs = new Set(unmodeled.map((e) => `${e.from}:${e.to}`));
     for (const e of provenEdges.values()) {
       const fIdx = pubkeyToIndex.get(e.from);
@@ -6056,7 +6190,7 @@
           [to.lat, to.lon],
         ],
         { color: isUnmodeled ? "#38bdf8" : "#4ade80", weight: 3, opacity: 0.9 }
-      ).addTo(simResultsLayer);
+      ).addTo(simProvenLayer);
     }
     for (const r of unconfirmed) {
       const from = simNodes[r.fromNode];
@@ -6068,7 +6202,7 @@
           [to.lat, to.lon],
         ],
         { color: "#facc15", weight: 3, opacity: 0.9, dashArray: "6 6" }
-      ).addTo(simResultsLayer);
+      ).addTo(simProvenLayer);
     }
     for (const r of unconfirmable) {
       const from = simNodes[r.fromNode];
@@ -6080,7 +6214,7 @@
           [to.lat, to.lon],
         ],
         { color: "#818cf8", weight: 2, opacity: 0.6, dashArray: "3 7" }
-      ).addTo(simResultsLayer);
+      ).addTo(simProvenLayer);
     }
   }
 
@@ -6207,6 +6341,9 @@
         // playing; its next wave picks the new mode up naturally.
         // (A selected message's own path lives on its own layer and is
         // filter-driven, not keepAllPaths-driven, so it's untouched here.)
+        // Leaves a loaded packet replay alone: it accumulates its window by
+        // design, and this used to wipe the analysis overlay it had drawn.
+        if (transportSource && transportSource.kind === "real") return;
         redrawPathsForKeepAllPaths();
       });
       div.querySelector("#sim-view-filter").addEventListener("change", (e) => {
@@ -6219,7 +6356,13 @@
         // redrawPathsForKeepAllPaths rather than redrawResultLines so a
         // filter change can't silently resurrect every path while
         // "Keep all paths" is unticked.
-        if (lastReport && replayIndex >= replayWaves.length) {
+        // Whichever replay the transport is actually driving is the one that
+        // has to re-render — filtering only ever touched the simulation's
+        // layer, so changing it while watching a packet replay appeared to
+        // do nothing at all.
+        if (transportSource && transportSource.kind === "real") {
+          transportSeekTo(transportPlayMs);
+        } else if (lastReport && replayIndex >= replayWaves.length) {
           redrawPathsForKeepAllPaths();
         }
         drawSelectedMessagePath();
@@ -6317,6 +6460,7 @@
       map.removeLayer(simResultsLayer);
       map.removeLayer(simMessagePathLayer);
       map.removeLayer(simRealActivityLayer);
+      map.removeLayer(simProvenLayer);
       stopRealTimelineReplay();
       removeBottleneckLegendControl();
       removeSimViewControl();
@@ -6497,6 +6641,16 @@
       return n;
     },
     isRealActivityLayerOnMap: () => map.hasLayer(simRealActivityLayer),
+    // Lines on the static proven/predicted overlay that are actually on the
+    // map — zero when the overlay is switched off, however much it holds.
+    getProvenLineCount: () => {
+      if (!map.hasLayer(simProvenLayer)) return 0;
+      let n = 0;
+      simProvenLayer.eachLayer((l) => {
+        if (l instanceof L.Polyline) n++;
+      });
+      return n;
+    },
     // Stroke colour of every real-activity line — lets a test assert the
     // replayed packet is actually drawn distinctly from the surrounding
     // traffic, rather than just that some lines exist.
@@ -6508,6 +6662,13 @@
       return out;
     },
     getNodes: () => simNodes,
+    // The scenario exactly as handed to the engine — the only way to check
+    // what a node's settings actually resolved to, rather than what the
+    // node object happens to carry before overrides are applied.
+    getScenario: () => scenarioFromState(),
+    // Region decode for one raw frame — lets a test cross-check the
+    // browser's own implementation against the Go one it was ported from.
+    decodeRegion: (rawHex) => decodeRegionOfPacket(rawHex),
     getLinks: () => simLinks,
     panBy: (dx, dy) => map.panBy([dx, dy], { animate: false }),
     getSavedSetups: () => loadAllSetups(),

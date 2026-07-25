@@ -1395,6 +1395,61 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   }
 });
 
+// Region decoding used to go through SubtleCrypto, which is undefined
+// outside a secure context — i.e. on any plain-http deployment that isn't
+// localhost, including this project's own production setup. It threw, got
+// swallowed, and left every packet simulated as unscoped, which most
+// repeaters then refuse: a whole replay of "Region mismatch — not relayed"
+// on exactly the deployment it's built for, while working fine locally.
+// This pins the pure-JS implementation that replaced it against real
+// packets and an independent reference.
+test("decodes real packet regions without SubtleCrypto", async ({ page, request }) => {
+  const crypto = require("crypto");
+
+  const statsResp = await request.get("http://localhost:8080/corescope-api/api/scope-stats?window=7d");
+  test.skip(!statsResp.ok(), "CoreScope scope-stats unavailable");
+  const names = ((await statsResp.json()).byRegion || []).map((r) => r.name).filter(Boolean);
+  test.skip(names.length === 0, "no live regions to decode against");
+
+  const pktResp = await request.get("http://localhost:8080/corescope-api/api/packets?limit=120");
+  test.skip(!pktResp.ok(), "CoreScope packets unavailable");
+  const packets = ((await pktResp.json()).packets || []).filter((p) => p.raw_hex).slice(0, 60);
+  test.skip(packets.length === 0, "no live packets to decode");
+
+  // Independent reference: the same algorithm via node:crypto, mirroring
+  // internal/corescope/scope.go's decodePacketRegion.
+  const reference = (rawHex) => {
+    const raw = Buffer.from(rawHex, "hex");
+    if (raw.length < 6) return "";
+    const routeType = raw[0] & 0x03;
+    if (routeType !== 0 && routeType !== 3) return "";
+    const code1 = raw[1] | (raw[2] << 8);
+    const pathLenByte = raw[5];
+    const pathEnd = 6 + (pathLenByte & 0x3f) * ((pathLenByte >> 6) + 1);
+    if (pathEnd > raw.length) return "";
+    const msg = Buffer.concat([Buffer.from([(raw[0] >> 2) & 0x0f]), raw.slice(pathEnd)]);
+    for (const n of names) {
+      const key = crypto.createHash("sha256").update(n).digest().slice(0, 16);
+      const mac = crypto.createHmac("sha256", key).update(msg).digest();
+      if ((mac[0] | (mac[1] << 8)) === code1) return n;
+    }
+    return "";
+  };
+
+  await page.waitForFunction(() => !!(window.__hopreachSimulatorDebug && window.__hopreachSimulatorDebug.decodeRegion));
+
+  let scoped = 0;
+  for (const p of packets) {
+    const got = await page.evaluate((hex) => window.__hopreachSimulatorDebug.decodeRegion(hex), p.raw_hex);
+    expect(got, `region for packet ${p.hash}`).toBe(reference(p.raw_hex));
+    if (got) scoped++;
+  }
+  // Real ScotMesh traffic is largely scoped; decoding none of it would mean
+  // the decoder is silently returning "" for everything, which is precisely
+  // the failure this test exists to catch.
+  expect(scoped).toBeGreaterThan(0);
+});
+
 test("the map key clears the map-tools buttons instead of sitting under them", async ({ page }) => {
   await page.goto("/");
   await page.click("#sim-toggle");
