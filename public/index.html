@@ -218,6 +218,28 @@
           <input type="checkbox" id="sim-optimize-allow-floodmax">
           Allow changing flood.max (off by default — riskier)
         </label>
+        <details id="sim-optimize-advanced">
+          <summary>Advanced (experimental — try one at a time)</summary>
+          <div class="plan-hint">
+            These implement the rest of the optimizer research plan. Each is independent and off by default — the plan's own advice is to land and measure one at a time rather than stacking several, since each changes the search trajectory in a way that makes it hard to tell which change actually helped.
+          </div>
+          <label class="plan-checkbox-row" title="Screens each candidate move with a small batch of trials, then only adds more if the result is still ambiguous, instead of always spending the full trial budget on every candidate. Same wall-clock budget, more decisions — cheap and obvious candidates get decided fast, close calls still get a full look.">
+            <input type="checkbox" id="sim-optimize-adaptive-trials">
+            Adaptive trial budget (racing)
+          </label>
+          <label class="plan-checkbox-row" title="When a round finds nothing that beats the immediately preceding round, tries one more thing: accept the least-contentious candidate anyway if it's no worse than where the search stood several rounds ago. Never loosens the delivery safety floor — only lets the search take a sideways step to escape a rut it's otherwise stuck in.">
+            <input type="checkbox" id="sim-optimize-late-acceptance">
+            Late acceptance hill climbing (escape local optima)
+          </label>
+          <label class="plan-checkbox-row" title="Before the normal round-by-round search starts, spends a fixed, bounded budget nudging every repeater's txdelay at once to find a promising starting point faster. Only kept if it's at least as good as doing nothing; either way you still get named per-repeater changes from the normal search afterward, never a diffuse 'everything moved a little' result.">
+            <input type="checkbox" id="sim-optimize-spsa-warmstart">
+            SPSA warm start
+          </label>
+          <label class="plan-checkbox-row" title="Lets the four things that make up a repeater's contention score (causing collisions, receiving collisions, wasted relays, airtime used) be weighted unevenly instead of equally, adjusting the weights as the search learns which of them actually predicts a real delivery improvement.">
+            <input type="checkbox" id="sim-optimize-learned-weights">
+            Learned contention-score weights
+          </label>
+        </details>
         <div class="plan-row">
           <button id="sim-optimize-adaptive" title="Starts from the best policy search result and slowly backs off whichever repeater is causing the most contention, round by round, until delivery stops improving. Run 'Search policies' first.">🎯🔁 Optimize adaptively</button>
           <button id="sim-optimize-cancel" class="hidden">✕ Cancel</button>

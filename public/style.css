@@ -729,6 +729,23 @@ header .subtitle {
 }
 .plan-hint.hidden { display: none; }
 
+/* Phase 6 Tier 2/3 — the "Advanced (experimental)" optimizer toggles are a
+   plain native <details>, deliberately: it's a genuinely optional, rarely-
+   needed section (the plan's own advice is to try at most one of these at
+   a time), and a native disclosure widget needs no JS open/close wiring. */
+#sim-optimize-advanced {
+  margin: 0.5rem 0;
+  font-size: 0.78rem;
+}
+#sim-optimize-advanced summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0.3rem 0;
+}
+#sim-optimize-advanced[open] summary {
+  color: var(--text);
+}
+
 #companion-pin-height-label {
   display: flex;
   align-items: center;

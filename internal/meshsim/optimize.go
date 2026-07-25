@@ -141,6 +141,78 @@ type OptimizeRequest struct {
 	// falls back to a default well above normal trial-to-trial noise.
 	TabuAspirationDelta float64 `json:"tabuAspirationDelta"`
 
+	// --- Tier 2/3 (docs/SIMULATOR_PLAN_PHASE6.md) — every field below is
+	// opt-in and defaults to false/0, so a caller that doesn't set them
+	// gets EXACTLY Tier 1's already-shipped behaviour. The plan's own
+	// "Suggested order" says to land and measure Tier 1 before considering
+	// these; they're built and available, but off by default for the same
+	// "don't stack untested changes" reason the plan itself gives.
+
+	// AdaptiveTrials switches candidate screening from a fixed Trials
+	// sample to racing/OCBA-lite (work item D): evaluate the incumbent and
+	// a candidate together in small paired batches (RacingMinBatch each),
+	// and stop as soon as the paired difference is decisive — clearly a
+	// pass, clearly a fail, or clearly can't reach MinDeliveryGain/
+	// MinImprovement — rather than always spending the full Trials budget.
+	// Falls back to using the full Trials budget (identical to the
+	// non-adaptive result) whenever a candidate never becomes decisive.
+	// See racingCompare.
+	AdaptiveTrials bool `json:"adaptiveTrials"`
+	// RacingMinBatch is how many paired trials are run before EACH
+	// decisiveness check — too small and the early stderr estimate is
+	// itself noise; too large and racing can't save much over the fixed
+	// budget. <= 0 falls back to 5 (the plan's own "run 5 trials" figure).
+	RacingMinBatch int `json:"racingMinBatch"`
+	// RacingZThreshold is the z-score a paired difference's confidence
+	// bound must clear to count as "decisive" — 1.64 (~90% one-sided) by
+	// default. Lower values stop earlier (cheaper, noisier decisions);
+	// higher values are more conservative (closer to always using the
+	// full Trials budget). <= 0 falls back to 1.64.
+	RacingZThreshold float64 `json:"racingZThreshold"`
+
+	// LateAcceptance enables Late Acceptance Hill Climbing (work item E)
+	// as a FALLBACK, tried only in a round where nothing passes the
+	// normal strict screening (see optimizeAccepts): the single screened
+	// candidate with the lowest contention is accepted anyway if it
+	// doesn't breach the delivery floor/tolerance AND its contention is
+	// no worse than what the search was already at
+	// LateAcceptanceHistoryLength rounds ago. This is what lets the
+	// search take a temporary, contention-neutral-or-better step sideways
+	// to escape a local optimum instead of just declaring staleness — the
+	// delivery-first safety gate is never loosened, only the "must beat
+	// the immediately preceding round" requirement is.
+	LateAcceptance bool `json:"lateAcceptance"`
+	// LateAcceptanceHistoryLength (L) is how many rounds back the
+	// candidate's contention is compared against. <= 0 falls back to 20.
+	LateAcceptanceHistoryLength int `json:"lateAcceptanceHistoryLength"`
+
+	// SPSAWarmStart runs Simultaneous Perturbation Stochastic
+	// Approximation (work item F) ONCE, on the very first OptimizeStep
+	// call, before the normal round loop begins — perturbing every node's
+	// txDelayFactor at once to find a promising starting region cheaply
+	// (2 evaluations per iteration, regardless of node count). The plan's
+	// own documented objection to SPSA is that its own output is diffuse
+	// ("everything moved a little"), the opposite of the actionable
+	// per-repeater output this tool exists to produce — so its result is
+	// used ONLY as a warm-started CurrentPolicy for the normal tabu/top-K
+	// loop to refine from, and is never itself reported as a named
+	// per-node deviation (see spsaWarmStart's own doc comment). Adopted
+	// only if it doesn't breach the same delivery floor every other move
+	// in this file respects.
+	SPSAWarmStart bool `json:"spsaWarmStart"`
+	// SPSAIterations bounds the warm-start's own cost at 2*SPSAIterations
+	// evaluations, keeping the first OptimizeStep call a bounded chunk
+	// even with this enabled (see OptimizeStep's own chunking contract).
+	// <= 0 falls back to 10.
+	SPSAIterations int `json:"spsaIterations"`
+
+	// LearnedWeights lets generateOptimizeCandidates' own ranking use
+	// weights that adapt round over round instead of the fixed
+	// equal-weighted nodeContentionScore (work item G) — see
+	// ContentionWeights' own doc comment for the deliberately narrow
+	// blast radius (ranking only, never acceptance thresholds).
+	LearnedWeights bool `json:"learnedWeights"`
+
 	// HoldoutSeed/HoldoutTrials are for OptimizeValidate, called once
 	// after the loop stops — a seed range the search itself never touches
 	// (docs/SIMULATOR_PLAN_PHASE4.md work item 4's "hold-out validation"),
@@ -191,7 +263,17 @@ const (
 	moveKindTxSpeedup      = "tx_delay_speedup"
 	moveKindRxBackoff      = "rx_delay_backoff"
 	moveKindFloodMaxReduce = "flood_max_reduce"
+	// moveKindSPSAWarmStart marks the ONE special history row an SPSA
+	// warm start (work item F) produces — never a per-node
+	// OptimizeDeviation, see spsaWarmStart's own doc comment.
+	moveKindSPSAWarmStart = "spsa_warm_start"
 )
+
+// spsaWarmStartTargetNode is OptimizeRound.TargetNode's sentinel for the
+// SPSA warm-start row — distinct from -1 ("no candidates were available
+// this round") since this is a genuinely different situation: every node
+// was touched at once, not none.
+const spsaWarmStartTargetNode = -2
 
 // OptimizeDeviation records one accepted targeted adjustment — the
 // per-repeater "why" the UI shows alongside the resulting action list
@@ -325,6 +407,20 @@ type OptimizeState struct {
 	// WASM/JSON boundary" convention Report.Receptions itself uses) —
 	// every accepted adjustment so far, in acceptance order.
 	Deviations []OptimizeDeviation `json:"deviations"`
+
+	// ContentionWeights is the current (possibly learned — work item G,
+	// only when OptimizeRequest.LearnedWeights is set) ranking weight
+	// vector. Always populated from Initialized onward, even when
+	// learning is disabled, so every downstream call site has one real
+	// value to read rather than needing an "is this even set" branch.
+	ContentionWeights ContentionWeights `json:"contentionWeights"`
+
+	// CostHistory is Late Acceptance Hill Climbing's own ring buffer of
+	// past normalized contention scores (work item E) — only populated
+	// when OptimizeRequest.LateAcceptance is set. Length
+	// LateAcceptanceHistoryLength once initialized; indexed by
+	// `Round % len(CostHistory)`.
+	CostHistory []float64 `json:"costHistory,omitempty"`
 }
 
 // optimizeDefaults fills in the zero-value fallbacks OptimizeRequest's own
@@ -371,6 +467,18 @@ func optimizeDefaults(req OptimizeRequest) OptimizeRequest {
 	if req.TabuAspirationDelta <= 0 {
 		req.TabuAspirationDelta = 5.0 // contention-score points — well above normal trial-to-trial noise
 	}
+	if req.RacingMinBatch < 1 {
+		req.RacingMinBatch = 5
+	}
+	if req.RacingZThreshold <= 0 {
+		req.RacingZThreshold = 1.64
+	}
+	if req.LateAcceptanceHistoryLength <= 0 {
+		req.LateAcceptanceHistoryLength = 20
+	}
+	if req.SPSAIterations <= 0 {
+		req.SPSAIterations = 10
+	}
 	return req
 }
 
@@ -391,6 +499,58 @@ func optimizeAttrs(req OptimizeRequest) []NodeAttrs {
 	return attrs
 }
 
+// ContentionWeights are the per-component multipliers
+// weightedContentionScore combines — docs/SIMULATOR_PLAN_PHASE6.md Tier 3
+// work item G, "learn the contention-score weights." The plan itself
+// calls this low-priority ("phase 4 already made delivery the primary
+// objective with contention as a proxy/tiebreak, which limits how much
+// the weighting can mislead") — which is exactly why its blast radius is
+// deliberately kept narrow here: learned weights only ever change WHICH
+// nodes generateOptimizeCandidates ranks to the top for a back-off move
+// (a targeting decision). They never touch optimizeAccepts, MinImprovement,
+// or any reported delivery/contention figure — those all stay on the
+// fixed equal-weighted scale via nodeContentionScore/networkContention
+// Score/normalizedContentionScore, exactly as shipped in Tier 1. That
+// keeps every existing threshold and every number the UI already shows
+// meaningful regardless of whether learning is enabled.
+type ContentionWeights struct {
+	ContentionCaused float64 `json:"contentionCaused"`
+	CollisionCount   float64 `json:"collisionCount"`
+	RedundantRelays  float64 `json:"redundantRelays"`
+	DutyPct          float64 `json:"dutyPct"`
+}
+
+// defaultContentionWeights is the equal-weighted starting point — both
+// the permanent fixed scale nodeContentionScore itself always uses, and
+// LearnedWeights' own starting point before any round has updated it.
+func defaultContentionWeights() ContentionWeights {
+	return ContentionWeights{ContentionCaused: 1, CollisionCount: 1, RedundantRelays: 1, DutyPct: 1}
+}
+
+// resolveContentionWeights guarantees a real, non-zero weight vector —
+// see its own call site's comment on why a bare zero-value
+// ContentionWeights (an unset/foreign field) must never reach
+// weightedContentionScore directly.
+func resolveContentionWeights(w ContentionWeights) ContentionWeights {
+	if w == (ContentionWeights{}) {
+		return defaultContentionWeights()
+	}
+	return w
+}
+
+// weightedContentionScore is nodeContentionScore generalized to take an
+// explicit weight vector — see ContentionWeights' own doc comment on
+// where this is (and isn't) used. nodeContentionScore itself is defined
+// in terms of this function at the fixed default weights, so Tier 1's
+// existing behaviour is provably unchanged.
+func weightedContentionScore(s NodeStats, maxSimTimeMs uint32, w ContentionWeights) float64 {
+	dutyPct := 0.0
+	if maxSimTimeMs > 0 {
+		dutyPct = float64(s.DutyAirtimeMs) / float64(maxSimTimeMs) * 100
+	}
+	return w.ContentionCaused*float64(s.ContentionCaused) + w.CollisionCount*float64(s.CollisionCount) + w.RedundantRelays*float64(s.RedundantRelays) + w.DutyPct*dutyPct
+}
+
 // nodeContentionScore combines the four measurements
 // docs/SIMULATOR_PLAN_PHASE4.md work item 4 names — ContentionCaused,
 // CollisionCount, RedundantRelays, duty cycle — into one comparable
@@ -399,14 +559,25 @@ func optimizeAttrs(req OptimizeRequest) []NodeAttrs {
 // other three counts rather than swamped or swamping them) — the plan's
 // own words are "exact weighting is a tuning decision — start simple and
 // document it," not a claim that this is the objectively correct
-// weighting. A future pass could learn/tune these weights; this is the
-// documented starting point.
+// weighting. This is the FIXED scale every reported number and every
+// acceptance threshold (MinImprovement, TabuAspirationDelta) is
+// calibrated against — see weightedContentionScore for the learnable
+// generalization used only for candidate ranking.
 func nodeContentionScore(s NodeStats, maxSimTimeMs uint32) float64 {
+	return weightedContentionScore(s, maxSimTimeMs, defaultContentionWeights())
+}
+
+// contentionComponents returns the four raw (unweighted) component values
+// for s, in the same fixed order weightedContentionScore/ContentionWeights
+// use — the shared building block for both dominantContentionReason's
+// "which one is biggest" check and the online weight-learning update in
+// OptimizeStep.
+func contentionComponents(s NodeStats, maxSimTimeMs uint32) [4]float64 {
 	dutyPct := 0.0
 	if maxSimTimeMs > 0 {
 		dutyPct = float64(s.DutyAirtimeMs) / float64(maxSimTimeMs) * 100
 	}
-	return float64(s.ContentionCaused) + float64(s.CollisionCount) + float64(s.RedundantRelays) + dutyPct
+	return [4]float64{float64(s.ContentionCaused), float64(s.CollisionCount), float64(s.RedundantRelays), dutyPct}
 }
 
 // nodeSpeedupScore ranks nodes for the "speed up" candidate set — phase 6
@@ -469,27 +640,50 @@ func normalizedContentionScore(stats []NodeStats, maxSimTimeMs uint32, trials in
 // whichever is checked first below (contention caused > collisions >
 // redundant relays > duty cycle), an arbitrary but deterministic order.
 func dominantContentionReason(s NodeStats, maxSimTimeMs uint32) string {
-	dutyPct := 0.0
-	if maxSimTimeMs > 0 {
-		dutyPct = float64(s.DutyAirtimeMs) / float64(maxSimTimeMs) * 100
+	raw := contentionComponents(s, maxSimTimeMs)
+	texts := [4]string{
+		fmt.Sprintf("its own transmissions caused %d collisions elsewhere", s.ContentionCaused),
+		fmt.Sprintf("%d of its own receptions collided", s.CollisionCount),
+		fmt.Sprintf("%d of its own relays added no new delivery", s.RedundantRelays),
+		fmt.Sprintf("high duty cycle (%.0f%% airtime used)", raw[3]),
 	}
-	type component struct {
-		value float64
-		text  string
-	}
-	components := []component{
-		{float64(s.ContentionCaused), fmt.Sprintf("its own transmissions caused %d collisions elsewhere", s.ContentionCaused)},
-		{float64(s.CollisionCount), fmt.Sprintf("%d of its own receptions collided", s.CollisionCount)},
-		{float64(s.RedundantRelays), fmt.Sprintf("%d of its own relays added no new delivery", s.RedundantRelays)},
-		{dutyPct, fmt.Sprintf("high duty cycle (%.0f%% airtime used)", dutyPct)},
-	}
-	best := components[0]
-	for _, c := range components[1:] {
-		if c.value > best.value {
-			best = c
+	bestIdx := 0
+	for i := 1; i < len(raw); i++ {
+		if raw[i] > raw[bestIdx] {
+			bestIdx = i
 		}
 	}
-	return best.text
+	return texts[bestIdx]
+}
+
+// evaluateOneTrial runs exactly one simulation trial of an already-
+// policy-applied scenario, at a given (seed, trial) pair — the shared
+// building block evaluateAverageOptimize sums over, and that phase 6 Tier
+// 2's racingCompare (docs/SIMULATOR_PLAN_PHASE6.md work item D) also uses
+// directly, since racing needs each trial's own value, not just a running
+// sum. Takes the scenario with policy ALREADY applied so a multi-trial
+// caller doesn't re-run applyPolicyToScenario on every trial.
+func evaluateOneTrial(applied Scenario, messages []Message, maxSimTimeMs uint32, seed uint64, trial int) (delivery, collision float64, stats []NodeStats) {
+	rng := rand.New(rand.NewPCG(seed, uint64(trial)))
+	report := Run(applied, messages, rng, maxSimTimeMs)
+	return report.DeliveryRatio(applied, messages), report.CollisionRate(), report.PerNodeStats(applied, messages)
+}
+
+// addNodeStatsInto sums src's own trial-scoped counters into dst — the
+// per-trial accumulation both evaluateAverageOptimize and racingCompare
+// need, factored out so the two can't drift on which fields actually get
+// summed.
+func addNodeStatsInto(dst *NodeStats, src NodeStats) {
+	dst.SuccessCount += src.SuccessCount
+	dst.CollisionCount += src.CollisionCount
+	dst.ContentionCaused += src.ContentionCaused
+	dst.TxBusyCount += src.TxBusyCount
+	dst.DutyAirtimeMs += src.DutyAirtimeMs
+	dst.RelayedCount += src.RelayedCount
+	dst.RedundantRelays += src.RedundantRelays
+	dst.UniqueDeliveries += src.UniqueDeliveries
+	dst.DeliveredCount += src.DeliveredCount
+	dst.ReachableCount += src.ReachableCount
 }
 
 // evaluateAverageOptimize averages DeliveryRatio/CollisionRate over trials
@@ -504,33 +698,148 @@ func evaluateAverageOptimize(scenario Scenario, attrs []NodeAttrs, policy Config
 	}
 	var totalDelivery, totalCollision float64
 	for trial := 0; trial < trials; trial++ {
-		rng := rand.New(rand.NewPCG(seed, uint64(trial)))
-		report := Run(applied, messages, rng, maxSimTimeMs)
-		totalDelivery += report.DeliveryRatio(applied, messages)
-		totalCollision += report.CollisionRate()
+		d, c, trialStats := evaluateOneTrial(applied, messages, maxSimTimeMs, seed, trial)
+		totalDelivery += d
+		totalCollision += c
 		// Summed across trials, NOT averaged — see this function's own
 		// note in OptimizeStep on why raw totals are used for ranking
 		// (relative order is unaffected by a constant per-node divisor,
 		// and integer NodeStats fields would lose real signal to
 		// truncation if divided here).
-		trialStats := report.PerNodeStats(applied, messages)
 		for i := range trialStats {
 			if i >= len(sums) {
 				continue
 			}
-			sums[i].SuccessCount += trialStats[i].SuccessCount
-			sums[i].CollisionCount += trialStats[i].CollisionCount
-			sums[i].ContentionCaused += trialStats[i].ContentionCaused
-			sums[i].TxBusyCount += trialStats[i].TxBusyCount
-			sums[i].DutyAirtimeMs += trialStats[i].DutyAirtimeMs
-			sums[i].RelayedCount += trialStats[i].RelayedCount
-			sums[i].RedundantRelays += trialStats[i].RedundantRelays
-			sums[i].UniqueDeliveries += trialStats[i].UniqueDeliveries
-			sums[i].DeliveredCount += trialStats[i].DeliveredCount
-			sums[i].ReachableCount += trialStats[i].ReachableCount
+			addNodeStatsInto(&sums[i], trialStats[i])
 		}
 	}
 	return totalDelivery / float64(trials), totalCollision / float64(trials), sums
+}
+
+// racingResult is one side (incumbent or candidate) of a racingCompare —
+// the normalized delivery/collision/contention plus the raw per-node
+// stat sums, over however many trials racing actually used.
+type racingResult struct {
+	delivery, collision, contention float64
+	stats                           []NodeStats
+	trials                          int
+}
+
+// racingCompare implements adaptive trial budgeting / racing
+// (docs/SIMULATOR_PLAN_PHASE6.md Tier 2 work item D, "OCBA-lite"):
+// incumbent and candidate are evaluated together, trial by trial, using
+// COMMON RANDOM NUMBERS (the same (seed, trial) pair for both — the same
+// pairing discipline every other comparison in this file already uses),
+// in batches of RacingMinBatch. After each batch, the paired delivery
+// difference and paired contention difference are checked — via a
+// normal-approximation confidence bound on their running mean — against
+// the same three verdicts optimizeAccepts itself distinguishes: a
+// decisively real delivery win, a decisive failure of both acceptance
+// paths, or a decisive delivery-neutral contention win. The moment any of
+// those clears its threshold, evaluation stops early — "same wall-clock
+// budget buys substantially more decisions" per the plan's own framing.
+// If nothing ever becomes decisive, the full req.Trials budget runs, so
+// racing can never be LESS thorough than the fixed-budget path, only
+// faster when the call is easy.
+//
+// Deliberately independent of nodeContentionScore/ContentionWeights
+// (work item G): racing's own decisiveness check always uses the FIXED
+// equal-weighted scale (via normalizedContentionScore), for the same
+// reason optimizeAccepts' own thresholds do — MinImprovement and
+// DeliveryTolerance are calibrated against that fixed scale, and mixing
+// in a round-to-round-adapting weight vector here would make "decisive"
+// mean something different depending on how much learning has drifted.
+func racingCompare(req OptimizeRequest, attrs []NodeAttrs, incumbentPolicy, candidatePolicy ConfigPolicy, seed uint64) (inc, cand racingResult, decisive bool) {
+	appliedInc := applyPolicyToScenario(req.Scenario, attrs, incumbentPolicy)
+	appliedCand := applyPolicyToScenario(req.Scenario, attrs, candidatePolicy)
+
+	incSums := make([]NodeStats, len(appliedInc.Nodes))
+	candSums := make([]NodeStats, len(appliedCand.Nodes))
+	for i := range incSums {
+		incSums[i].Node = i
+	}
+	for i := range candSums {
+		candSums[i].Node = i
+	}
+
+	var incDeliverySum, candDeliverySum, incCollisionSum, candCollisionSum float64
+	var n int
+	// Welford's online mean/variance for the paired delivery difference
+	// (candidate - incumbent) and the paired contention difference
+	// (incumbent - candidate; positive means the candidate improved).
+	var deliveryDiffMean, deliveryDiffM2 float64
+	var contentionDiffMean, contentionDiffM2 float64
+
+	maxTrials := req.Trials
+	trial := 0
+	for trial < maxTrials {
+		batchEnd := trial + req.RacingMinBatch
+		if batchEnd > maxTrials {
+			batchEnd = maxTrials
+		}
+		for ; trial < batchEnd; trial++ {
+			incD, incC, incStats := evaluateOneTrial(appliedInc, req.Messages, req.MaxSimTimeMs, seed, trial)
+			candD, candC, candStats := evaluateOneTrial(appliedCand, req.Messages, req.MaxSimTimeMs, seed, trial)
+			incDeliverySum += incD
+			candDeliverySum += candD
+			incCollisionSum += incC
+			candCollisionSum += candC
+			for i := range incSums {
+				if i < len(incStats) {
+					addNodeStatsInto(&incSums[i], incStats[i])
+				}
+			}
+			for i := range candSums {
+				if i < len(candStats) {
+					addNodeStatsInto(&candSums[i], candStats[i])
+				}
+			}
+
+			incContentionTrial := normalizedContentionScore(incStats, req.MaxSimTimeMs, 1)
+			candContentionTrial := normalizedContentionScore(candStats, req.MaxSimTimeMs, 1)
+
+			n++
+			deliveryDelta := candD - incD
+			dMeanDelta := deliveryDelta - deliveryDiffMean
+			deliveryDiffMean += dMeanDelta / float64(n)
+			deliveryDiffM2 += dMeanDelta * (deliveryDelta - deliveryDiffMean)
+
+			contentionDelta := incContentionTrial - candContentionTrial
+			cMeanDelta := contentionDelta - contentionDiffMean
+			contentionDiffMean += cMeanDelta / float64(n)
+			contentionDiffM2 += cMeanDelta * (contentionDelta - contentionDiffMean)
+		}
+
+		if n >= 2 {
+			deliveryStderr := math.Sqrt(deliveryDiffM2 / float64(n-1) / float64(n))
+			contentionStderr := math.Sqrt(contentionDiffM2 / float64(n-1) / float64(n))
+			z := req.RacingZThreshold
+			lowerDelivery := deliveryDiffMean - z*deliveryStderr
+			upperDelivery := deliveryDiffMean + z*deliveryStderr
+			lowerContention := contentionDiffMean - z*contentionStderr
+
+			switch {
+			case lowerDelivery >= req.MinDeliveryGain:
+				decisive = true // clearly a real delivery win
+			case upperDelivery < -req.DeliveryTolerance:
+				decisive = true // clearly fails both acceptance paths
+			case lowerContention > req.MinImprovement && lowerDelivery >= -req.DeliveryTolerance:
+				decisive = true // clearly a delivery-neutral contention win
+			}
+			if decisive {
+				break
+			}
+		}
+	}
+	if n < 1 {
+		n = 1 // defensive only — optimizeDefaults already guarantees req.Trials >= 1
+	}
+
+	inc = racingResult{delivery: incDeliverySum / float64(n), collision: incCollisionSum / float64(n), stats: incSums, trials: n}
+	cand = racingResult{delivery: candDeliverySum / float64(n), collision: candCollisionSum / float64(n), stats: candSums, trials: n}
+	inc.contention = normalizedContentionScore(incSums, req.MaxSimTimeMs, n)
+	cand.contention = normalizedContentionScore(candSums, req.MaxSimTimeMs, n)
+	return inc, cand, decisive
 }
 
 // currentNodeStateFor resolves node's own effective SimNode (Prefs +
@@ -621,13 +930,147 @@ func escalatingStep(base float64, staleRounds int) float64 {
 	return base * float64(1+staleRounds)
 }
 
+// spsaAlpha/spsaGamma are Spall's own recommended SPSA gain-sequence
+// exponents — standard, widely-cited default values, not tuned for this
+// project specifically. spsaGainA/spsaGainC size the gain sequences
+// relative to this file's OWN existing txDelayFactor step conventions
+// (optimizeMinBackoffStep=0.1) rather than being independently derived —
+// a documented starting point, the same latitude this file's other
+// move-size constants were given when first introduced.
+// spsaEvalFloor/spsaEvalCeiling are a generous SAFETY clamp applied only
+// to the two evaluation points each SPSA iteration probes (never to the
+// gradient math itself — see spsaWarmStart's own comment on why), wide
+// enough to rarely bind during a normal run, existing only to keep a
+// pathological perturbation from ever handing the simulator a deeply
+// negative txDelayFactor.
+const (
+	spsaAlpha         = 0.602
+	spsaGamma         = 0.101
+	spsaGainA         = 0.2
+	spsaGainC         = 0.15
+	spsaStabilityFrac = 0.1
+	spsaEvalFloor     = 0.0
+	spsaEvalCeiling   = optimizeMaxTxDelay * 2
+)
+
+// spsaWarmStart runs Simultaneous Perturbation Stochastic Approximation
+// (docs/SIMULATOR_PLAN_PHASE6.md Tier 3 work item F) once: perturbs EVERY
+// node's txDelayFactor simultaneously and estimates a full per-node
+// gradient from just 2 simulation evaluations per iteration, regardless
+// of node count — dramatically cheaper than evaluating each node
+// separately once dozens of nodes are involved. Minimizes the FIXED,
+// unweighted normalizedContentionScore internally, purely as a cheap
+// descent heuristic to find a promising region quickly — never delivery,
+// since a single scalar descent target has to be cheap to evaluate many
+// times, and contention is this file's own designated cheap proxy for
+// exactly that reason (see nodeContentionScore's own doc comment).
+//
+// The plan's own documented objection to SPSA is that its raw output is
+// diffuse — "everything moved a little" — the opposite of the actionable,
+// named-repeater output this tool exists to produce. This function is
+// therefore never treated as a final answer: its result comes back as a
+// single candidate STARTING policy, which OptimizeStep's own Initialized
+// branch either adopts (only if it clears the exact same delivery-floor
+// gate every other move in this file respects) or discards outright. Even
+// when adopted, it contributes exactly ONE history row (moveKindSPSA
+// WarmStart) — never per-node OptimizeDeviation entries — and becomes
+// CurrentPolicy for the normal tabu/top-K loop to keep refining from. This
+// is the hybrid the plan itself suggests: "SPSA to find the region,
+// per-node refinement for the final actionable deltas."
+func spsaWarmStart(req OptimizeRequest, attrs []NodeAttrs, basePolicy ConfigPolicy, seed uint64) ConfigPolicy {
+	n := len(req.Scenario.Nodes)
+	if n == 0 {
+		return basePolicy
+	}
+	theta := make([]float64, n)
+	for i := 0; i < n; i++ {
+		resolved := currentNodeStateFor(i, baselineNodeFor(req, i), attrs[i], basePolicy)
+		theta[i] = resolved.Prefs.TxDelayFactor
+	}
+
+	clampEval := func(v float64) float64 {
+		if v < spsaEvalFloor {
+			return spsaEvalFloor
+		}
+		if v > spsaEvalCeiling {
+			return spsaEvalCeiling
+		}
+		return v
+	}
+	buildPolicy := func(vals []float64) ConfigPolicy {
+		rules := make([]ConfigRule, 0, n)
+		for i, v := range vals {
+			rules = append(rules, ConfigRule{
+				Name:          fmt.Sprintf("adaptive: spsa warm-start node %d txdelay", i),
+				Condition:     RuleCondition{Kind: ConditionNodeIndexIn, Nodes: []int{i}},
+				TxDelayFactor: floatPtr(v),
+			})
+		}
+		return append(clonePolicy(basePolicy), rules...)
+	}
+
+	rng := rand.New(rand.NewPCG(seed, 0x53504153)) // "SPAS" — a fixed, distinguishing stream from every other rng in this file
+	for k := 0; k < req.SPSAIterations; k++ {
+		ak := spsaGainA / math.Pow(float64(k+1)+spsaStabilityFrac*float64(req.SPSAIterations), spsaAlpha)
+		ck := spsaGainC / math.Pow(float64(k+1), spsaGamma)
+
+		delta := make([]float64, n)
+		for i := range delta {
+			if rng.IntN(2) == 0 {
+				delta[i] = -1
+			} else {
+				delta[i] = 1
+			}
+		}
+
+		plus := make([]float64, n)
+		minus := make([]float64, n)
+		for i := range theta {
+			plus[i] = clampEval(theta[i] + ck*delta[i])
+			minus[i] = clampEval(theta[i] - ck*delta[i])
+		}
+
+		trialSeed := seed + 0x9e3779b9 + uint64(k)*2
+		_, _, plusStats := evaluateAverageOptimize(req.Scenario, attrs, buildPolicy(plus), req.Messages, req.MaxSimTimeMs, req.Trials, trialSeed)
+		_, _, minusStats := evaluateAverageOptimize(req.Scenario, attrs, buildPolicy(minus), req.Messages, req.MaxSimTimeMs, req.Trials, trialSeed)
+		plusObj := normalizedContentionScore(plusStats, req.MaxSimTimeMs, req.Trials)
+		minusObj := normalizedContentionScore(minusStats, req.MaxSimTimeMs, req.Trials)
+
+		for i := range theta {
+			// Standard SPSA gradient estimate: the SAME scalar objective
+			// difference, divided by a DIFFERENT per-component
+			// perturbation — this is what recovers a full per-node
+			// gradient from just 2 evaluations. Using the EFFECTIVE
+			// (possibly clamp-shortened) delta actually evaluated, not
+			// the raw ck*delta[i], keeps the estimate consistent with
+			// what the simulator was actually asked about.
+			effectiveDeltaI := (plus[i] - minus[i]) / 2
+			if effectiveDeltaI == 0 {
+				continue
+			}
+			grad := (plusObj - minusObj) / (2 * effectiveDeltaI)
+			theta[i] -= ak * grad
+		}
+	}
+
+	for i := range theta {
+		if theta[i] < optimizeMinTxDelay {
+			theta[i] = optimizeMinTxDelay
+		}
+		if theta[i] > optimizeMaxTxDelay {
+			theta[i] = optimizeMaxTxDelay
+		}
+	}
+	return buildPolicy(theta)
+}
+
 // buildNodeSnapshot assembles the full per-repeater table — EVERY node,
 // not just the adjusted ones, since "which repeaters are causing the most
 // contention" is only answerable by seeing them all ranked together.
 // stats must be the summed-across-trials NodeStats
 // evaluateAverageOptimize returns, with trials passed alongside so
 // per-trial averages can be recovered where that matters.
-func buildNodeSnapshot(req OptimizeRequest, attrs []NodeAttrs, policy ConfigPolicy, stats []NodeStats, trials int, adjustedNodes map[int]bool, tabooedNodes map[int]bool) []OptimizeNodeSnapshot {
+func buildNodeSnapshot(req OptimizeRequest, attrs []NodeAttrs, policy ConfigPolicy, stats []NodeStats, trials int, adjustedNodes map[int]bool, tabooedNodes map[int]bool, weights ContentionWeights) []OptimizeNodeSnapshot {
 	if trials < 1 {
 		trials = 1
 	}
@@ -660,7 +1103,7 @@ func buildNodeSnapshot(req OptimizeRequest, attrs []NodeAttrs, policy ConfigPoli
 		resolved := currentNodeStateFor(i, baselineNodeFor(req, i), nodeAttrs, policy)
 		out[i] = OptimizeNodeSnapshot{
 			Node:            i,
-			ContentionScore: nodeContentionScore(s, req.MaxSimTimeMs) / float64(trials),
+			ContentionScore: weightedContentionScore(s, req.MaxSimTimeMs, weights) / float64(trials),
 			Stats:           perTrial,
 			Diagnosis:       DiagnoseNode(perTrial, req.MaxSimTimeMs),
 			TxDelay:         resolved.Prefs.TxDelayFactor,
@@ -707,6 +1150,102 @@ func optimizeAccepts(req OptimizeRequest, baselineDelivery, currentDelivery, cur
 	return contentionGain > req.MinImprovement && deliveryGain >= -req.DeliveryTolerance
 }
 
+// optimizeAcceptsLAHC is Late Acceptance Hill Climbing's own acceptance
+// rule (docs/SIMULATOR_PLAN_PHASE6.md Tier 2 work item E) — used ONLY as
+// a fallback in a round where optimizeAccepts found nothing to accept
+// against the immediately-preceding round (see OptimizeStep's own LAHC
+// fallback block). The delivery floor (MaxDeliveryRegression) and the
+// "must not cost more than DeliveryTolerance versus the CURRENT round"
+// requirement are both preserved unchanged from optimizeAccepts — LAHC
+// never loosens the safety gate, only the "must also beat the immediately
+// preceding round's contention" requirement, which it replaces with
+// "must not be worse than historicalContention" (the contention
+// LateAcceptanceHistoryLength rounds ago). This is the classic LAHC
+// comparison (candidate cost <= history[i mod L]) adapted to this file's
+// multi-criterion, delivery-gated setting — it's what lets a temporarily
+// worse-than-current, but historically fine, move through, which is the
+// whole point: escaping a local optimum optimizeAccepts alone cannot.
+func optimizeAcceptsLAHC(req OptimizeRequest, baselineDelivery, currentDelivery, candidateDelivery, candidateContention, historicalContention float64) bool {
+	if candidateDelivery < baselineDelivery-req.MaxDeliveryRegression {
+		return false
+	}
+	if candidateDelivery < currentDelivery-req.DeliveryTolerance {
+		return false
+	}
+	return candidateContention <= historicalContention
+}
+
+// advanceLateAcceptanceHistory pushes this round's own resulting
+// contention into the LAHC ring buffer (work item E) — standard LAHC
+// bookkeeping, run unconditionally once per round (whether or not a move
+// was accepted this round, and regardless of whether it was accepted via
+// the strict path or the LAHC fallback) whenever LateAcceptance is
+// enabled. A no-op otherwise.
+func advanceLateAcceptanceHistory(req OptimizeRequest, state *OptimizeState) {
+	if !req.LateAcceptance || len(state.CostHistory) == 0 {
+		return
+	}
+	state.CostHistory[state.Round%len(state.CostHistory)] = state.CurrentContention
+}
+
+// optimizeWeightLearningRate/optimizeWeightMin/optimizeWeightMax bound
+// work item G's online weight update — small enough that one round's own
+// (noisy) outcome nudges the ranking weights without letting a single
+// result swing them wildly, and clamped rather than renormalized, since
+// candidate RANKING only depends on relative proportions between the four
+// weights — a uniform positive rescale can never change which node ranks
+// highest, so there's no need to fight the clamp back to a fixed sum.
+const (
+	optimizeWeightLearningRate = 0.05
+	optimizeWeightMin          = 0.1
+	optimizeWeightMax          = 5.0
+)
+
+// updateContentionWeights is work item G's online learning step — after
+// each round's screening, every back-off-kind candidate (tx_delay_backoff/
+// rx_delay_backoff/flood_max_reduce; speed-up candidates are driven by
+// nodeSpeedupScore, an unrelated ranking, and have nothing to teach these
+// weights) is a training example: the four raw contention components that
+// made this node rank highly, paired with the REAL delivery outcome
+// actually observed when the move was tried. Each component's weight
+// moves toward components that were large on good-outcome candidates and
+// away from components large on bad-outcome ones — grounded in delivery
+// (the real objective), not in the contention score itself, per this
+// file's own standing "don't optimize contention directly" rule
+// (docs/SIMULATOR_PLAN_PHASE6.md's own "Risks" section).
+func updateContentionWeights(weights ContentionWeights, results []optimizeScreenResult, currentStats []NodeStats, maxSimTimeMs uint32) ContentionWeights {
+	clamp := func(v float64) float64 {
+		if v < optimizeWeightMin {
+			return optimizeWeightMin
+		}
+		if v > optimizeWeightMax {
+			return optimizeWeightMax
+		}
+		return v
+	}
+	for _, r := range results {
+		switch r.c.kind {
+		case moveKindTxBackoff, moveKindRxBackoff, moveKindFloodMaxReduce:
+		default:
+			continue
+		}
+		if r.c.node < 0 || r.c.node >= len(currentStats) {
+			continue
+		}
+		raw := contentionComponents(currentStats[r.c.node], maxSimTimeMs)
+		total := raw[0] + raw[1] + raw[2] + raw[3]
+		if total <= 0 {
+			continue
+		}
+		reward := r.deliveryGain
+		weights.ContentionCaused = clamp(weights.ContentionCaused + optimizeWeightLearningRate*reward*(raw[0]/total))
+		weights.CollisionCount = clamp(weights.CollisionCount + optimizeWeightLearningRate*reward*(raw[1]/total))
+		weights.RedundantRelays = clamp(weights.RedundantRelays + optimizeWeightLearningRate*reward*(raw[2]/total))
+		weights.DutyPct = clamp(weights.DutyPct + optimizeWeightLearningRate*reward*(raw[3]/total))
+	}
+	return weights
+}
+
 // optimizeMoveCandidate is one proposed, not-yet-evaluated move — a
 // (node, kind) pair plus the resulting policy. Generated in bulk each
 // round by generateOptimizeCandidates, then screened.
@@ -721,6 +1260,20 @@ type optimizeMoveCandidate struct {
 	priorityScore float64 // the ranking score (contention or speedup) that surfaced this candidate — for ordering only
 }
 
+// optimizeScreenResult is one candidate's own screening-pass outcome —
+// promoted to a package-level type (rather than staying a local type
+// inside OptimizeStep) specifically so updateContentionWeights (work item
+// G) can take a slice of them as a parameter.
+type optimizeScreenResult struct {
+	c              optimizeMoveCandidate
+	delivery       float64
+	collision      float64
+	contention     float64
+	deliveryGain   float64
+	contentionGain float64
+	passed         bool
+}
+
 // generateOptimizeCandidates builds this round's own move list: up to
 // TopK back-off candidates (highest nodeContentionScore) and up to TopK
 // speed-up candidates (highest nodeSpeedupScore), expanded into one
@@ -728,7 +1281,7 @@ type optimizeMoveCandidate struct {
 // B. Candidates whose (node, kind) is currently tabu are dropped UNLESS
 // the change-triggered aspiration criterion clears them (work item A2):
 // see the tabuBlocks closure below.
-func generateOptimizeCandidates(req OptimizeRequest, state OptimizeState, attrs []NodeAttrs, currentStats []NodeStats, moveSet OptimizeMoveSet) []optimizeMoveCandidate {
+func generateOptimizeCandidates(req OptimizeRequest, state OptimizeState, attrs []NodeAttrs, currentStats []NodeStats, moveSet OptimizeMoveSet, weights ContentionWeights) []optimizeMoveCandidate {
 	n := len(currentStats)
 
 	tabuBlocks := func(node int, kind string) bool {
@@ -760,7 +1313,13 @@ func generateOptimizeCandidates(req OptimizeRequest, state OptimizeState, attrs 
 	backoffRanked := make([]ranked, 0, n)
 	speedupRanked := make([]ranked, 0, n)
 	for i, s := range currentStats {
-		if cs := nodeContentionScore(s, req.MaxSimTimeMs); cs > 0 {
+		// Ranking uses the (possibly learned, see ContentionWeights' own
+		// doc comment) weighted score — this is the ONE place learned
+		// weights are allowed to change behaviour: which nodes rise to
+		// the top of the candidate list. tabuBlocks' own aspiration check
+		// below deliberately stays on the fixed nodeContentionScore scale,
+		// since TabuAspirationDelta is calibrated against it.
+		if cs := weightedContentionScore(s, req.MaxSimTimeMs, weights); cs > 0 {
 			backoffRanked = append(backoffRanked, ranked{i, cs})
 		}
 		if ss := nodeSpeedupScore(s); ss > 0 {
@@ -959,20 +1518,66 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 	}
 
 	if !state.Initialized {
+		// The TRUE baseline — before any adjustment, including the SPSA
+		// warm start below — measured first and kept in
+		// BaselineDelivery/BaselineContention for the whole run, so "how
+		// much did the whole process help" always has an honest zero
+		// point regardless of which Tier 2/3 features are enabled.
 		delivery, collision, stats := evaluateAverageOptimize(req.Scenario, attrs, req.BasePolicy, req.Messages, req.MaxSimTimeMs, req.Trials, req.Seed)
 		contention := normalizedContentionScore(stats, req.MaxSimTimeMs, req.Trials)
+
+		currentPolicy := req.BasePolicy
+		currentDelivery, currentCollision, currentContention := delivery, collision, contention
+		snapshotStats := stats
+		history := []OptimizeRound{}
+
+		if req.SPSAWarmStart {
+			// docs/SIMULATOR_PLAN_PHASE6.md work item F — see
+			// spsaWarmStart's own doc comment for why its result is
+			// adopted-or-discarded here as a single all-or-nothing step,
+			// never reported as per-node deviations.
+			warmPolicy := spsaWarmStart(req, attrs, req.BasePolicy, req.Seed)
+			warmDelivery, warmCollision, warmStats := evaluateAverageOptimize(req.Scenario, attrs, warmPolicy, req.Messages, req.MaxSimTimeMs, req.Trials, req.Seed+0x5254a5)
+			warmContention := normalizedContentionScore(warmStats, req.MaxSimTimeMs, req.Trials)
+			adopted := optimizeAccepts(req, delivery, delivery, contention, warmDelivery, warmContention)
+			if adopted {
+				currentPolicy = warmPolicy
+				currentDelivery, currentCollision, currentContention = warmDelivery, warmCollision, warmContention
+				snapshotStats = warmStats
+			}
+			history = append(history, OptimizeRound{
+				Round: 0, Delivery: currentDelivery, Collision: currentCollision, Contention: currentContention,
+				TargetNode: spsaWarmStartTargetNode, MoveKind: moveKindSPSAWarmStart, Accepted: adopted, CandidatesTried: req.SPSAIterations,
+			})
+		}
+
+		weights := defaultContentionWeights()
+		var costHistory []float64
+		if req.LateAcceptance {
+			// Seeded with the (possibly SPSA-adjusted) starting
+			// contention repeated L times — standard LAHC initialization,
+			// so the very first rounds aren't comparing against an
+			// artificial zero.
+			costHistory = make([]float64, req.LateAcceptanceHistoryLength)
+			for i := range costHistory {
+				costHistory[i] = currentContention
+			}
+		}
+
 		return OptimizeState{
 			Initialized:        true,
-			CurrentPolicy:      req.BasePolicy,
-			CurrentDelivery:    delivery,
-			CurrentCollision:   collision,
-			CurrentContention:  contention,
+			CurrentPolicy:      currentPolicy,
+			CurrentDelivery:    currentDelivery,
+			CurrentCollision:   currentCollision,
+			CurrentContention:  currentContention,
 			BaselineDelivery:   delivery,
 			BaselineContention: contention,
 			Deviations:         []OptimizeDeviation{},
-			History:            []OptimizeRound{},
+			History:            history,
 			TabuList:           []OptimizeTabuEntry{},
-			NodeSnapshot:       buildNodeSnapshot(req, attrs, req.BasePolicy, stats, req.Trials, nil, nil),
+			NodeSnapshot:       buildNodeSnapshot(req, attrs, currentPolicy, snapshotStats, req.Trials, nil, nil, weights),
+			ContentionWeights:  weights,
+			CostHistory:        costHistory,
 		}
 	}
 	if state.Done {
@@ -998,8 +1603,17 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 	currentDelivery, currentCollision, currentStats := evaluateAverageOptimize(req.Scenario, attrs, state.CurrentPolicy, req.Messages, req.MaxSimTimeMs, req.Trials, roundSeed)
 	currentContention := normalizedContentionScore(currentStats, req.MaxSimTimeMs, req.Trials)
 
+	// Defensive against a zero-value ContentionWeights (an old/foreign
+	// state that predates this field, or simply never round-tripped
+	// through the Initialized branch) — a zero weight vector would make
+	// EVERY node's ranking score 0, silently producing zero backoff
+	// candidates every round. resolveContentionWeights guarantees a real,
+	// usable vector regardless.
+	weights := resolveContentionWeights(state.ContentionWeights)
+	state.ContentionWeights = weights
+
 	state.TabuList = pruneExpiredTabuEntries(state.TabuList, state.Round)
-	candidates := generateOptimizeCandidates(req, state, attrs, currentStats, moveSet)
+	candidates := generateOptimizeCandidates(req, state, attrs, currentStats, moveSet, weights)
 
 	state.Round++
 
@@ -1022,37 +1636,49 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 		for _, d := range state.Deviations {
 			adjustedNodes[d.Node] = true
 		}
-		state.NodeSnapshot = buildNodeSnapshot(req, attrs, state.CurrentPolicy, currentStats, req.Trials, adjustedNodes, tabooed)
+		state.NodeSnapshot = buildNodeSnapshot(req, attrs, state.CurrentPolicy, currentStats, req.Trials, adjustedNodes, tabooed, weights)
 		if currentContention <= 0 {
 			state.Done = true
 			state.DoneReason = "converged — no node shows any contention or delivery-shortfall signal left"
 		} else {
+			advanceLateAcceptanceHistory(req, &state)
 			optimizeCheckStopping(req, &state)
 		}
 		return state
 	}
 
-	// Screen every surviving candidate — cheap (Trials), each paired
-	// against the SAME roundSeed incumbent measurement above.
-	type screened struct {
-		c              optimizeMoveCandidate
-		delivery       float64
-		collision      float64
-		contention     float64
-		deliveryGain   float64
-		contentionGain float64
-		passed         bool
-	}
-	results := make([]screened, len(candidates))
+	// Screen every surviving candidate — cheap (Trials, or fewer if
+	// AdaptiveTrials/racing decides early — work item D), each paired
+	// against the SAME roundSeed incumbent measurement above (racing
+	// re-measures its OWN paired incumbent sample per candidate; see
+	// racingCompare's own doc comment on why that's still consistent).
+	results := make([]optimizeScreenResult, len(candidates))
 	for i, c := range candidates {
+		if req.AdaptiveTrials {
+			inc, cnd, _ := racingCompare(req, attrs, state.CurrentPolicy, c.policy, roundSeed)
+			results[i] = optimizeScreenResult{
+				c: c, delivery: cnd.delivery, collision: cnd.collision, contention: cnd.contention,
+				deliveryGain:   cnd.delivery - inc.delivery,
+				contentionGain: inc.contention - cnd.contention,
+				passed:         optimizeAccepts(req, state.BaselineDelivery, inc.delivery, inc.contention, cnd.delivery, cnd.contention),
+			}
+			continue
+		}
 		d, col, stats := evaluateAverageOptimize(req.Scenario, attrs, c.policy, req.Messages, req.MaxSimTimeMs, req.Trials, roundSeed)
 		cont := normalizedContentionScore(stats, req.MaxSimTimeMs, req.Trials)
-		results[i] = screened{
+		results[i] = optimizeScreenResult{
 			c: c, delivery: d, collision: col, contention: cont,
 			deliveryGain:   d - currentDelivery,
 			contentionGain: currentContention - cont,
 			passed:         optimizeAccepts(req, state.BaselineDelivery, currentDelivery, currentContention, d, cont),
 		}
+	}
+
+	// Work item G — online weight learning, from this round's own
+	// screening outcomes, before ranking is used again next round.
+	if req.LearnedWeights {
+		weights = updateContentionWeights(weights, results, currentStats, req.MaxSimTimeMs)
+		state.ContentionWeights = weights
 	}
 
 	// Every candidate that failed screening is tabooed now — it had its
@@ -1088,6 +1714,31 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 		}
 	}
 
+	// Work item E — Late Acceptance Hill Climbing fallback: only tried
+	// when the strict path above found NOTHING to accept this round.
+	// Picks the single screened candidate with the lowest contention
+	// (regardless of whether it passed the strict gate) and accepts it
+	// anyway if it clears the same delivery floor/tolerance AND is no
+	// worse than the search's own contention LateAcceptanceHistoryLength
+	// rounds ago — see optimizeAcceptsLAHC's own doc comment. This is
+	// what lets the search escape a local optimum the strict, accept-
+	// only gate cannot.
+	lahcChosen := false
+	var lahcHistoricalContention float64
+	if bestIdx < 0 && req.LateAcceptance && len(results) > 0 && len(state.CostHistory) > 0 {
+		lahcIdx := 0
+		for i := 1; i < len(results); i++ {
+			if results[i].contention < results[lahcIdx].contention {
+				lahcIdx = i
+			}
+		}
+		lahcHistoricalContention = state.CostHistory[state.Round%len(state.CostHistory)]
+		if optimizeAcceptsLAHC(req, state.BaselineDelivery, currentDelivery, results[lahcIdx].delivery, results[lahcIdx].contention, lahcHistoricalContention) {
+			bestIdx = lahcIdx
+			lahcChosen = true
+		}
+	}
+
 	accepted := false
 	var chosen *optimizeMoveCandidate
 	if bestIdx >= 0 {
@@ -1103,25 +1754,54 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 		baseContention := normalizedContentionScore(baseStats, req.MaxSimTimeMs, req.ConfirmTrials)
 		confirmDelivery, confirmCollision, confirmStats := evaluateAverageOptimize(req.Scenario, attrs, chosen.policy, req.Messages, req.MaxSimTimeMs, req.ConfirmTrials, confirmSeed)
 		confirmContention := normalizedContentionScore(confirmStats, req.MaxSimTimeMs, req.ConfirmTrials)
-		if optimizeAccepts(req, state.BaselineDelivery, baseDelivery, baseContention, confirmDelivery, confirmContention) {
+		// A candidate chosen via the LAHC fallback is confirmed against
+		// the SAME LAHC rule it was screened with — confirming it against
+		// the strict rule instead would almost always just reject it
+		// again, defeating the entire point of the fallback.
+		confirmPassed := optimizeAccepts(req, state.BaselineDelivery, baseDelivery, baseContention, confirmDelivery, confirmContention)
+		if lahcChosen {
+			confirmPassed = optimizeAcceptsLAHC(req, state.BaselineDelivery, baseDelivery, confirmDelivery, confirmContention, lahcHistoricalContention)
+		}
+		if confirmPassed {
 			accepted = true
 			state.CurrentPolicy = chosen.policy
 			state.CurrentDelivery = confirmDelivery
 			state.CurrentCollision = confirmCollision
 			state.CurrentContention = confirmContention
-			state.StaleRounds = 0
 			state.TabuList = clearTabuFor(state.TabuList, chosen.node, chosen.kind)
 			state.Deviations = append(state.Deviations, OptimizeDeviation{
 				Node: chosen.node, Kind: chosen.kind, Reason: chosen.reason,
 				OldValue: chosen.oldValue, NewValue: chosen.newValue, Round: state.Round, Warning: chosen.warning,
 			})
+			if !lahcChosen {
+				state.StaleRounds = 0
+			}
+			// A LAHC-accepted move (lahcChosen) deliberately does NOT
+			// reset StaleRounds here — see the combined increment below.
+			// LAHC's own "<=" comparison (see optimizeAcceptsLAHC's own
+			// doc comment — standard LAHC practice, not a bug, allows
+			// crossing a plateau) means that once contention has genuinely
+			// plateaued, candidateContention <= historicalContention holds
+			// almost trivially, round after round, for whatever candidate
+			// the deterministic ranking proposes next. Resetting
+			// staleness on every such "acceptance" was observed, live,
+			// to let a run burn its ENTIRE round budget accepting a
+			// sequence of indistinguishable-from-no-op lateral moves on
+			// the same node, never once correctly reporting itself as
+			// stuck. Counting a LAHC accept the same as a rejection for
+			// staleness purposes (while still keeping the move itself —
+			// it's a real, if lateral, step) fixes that: a long run of
+			// pure lateral moves still eventually trips the stale-rounds
+			// limit, exactly as a long run of pure rejections would.
 		} else {
 			state.TabuList = tabuOne(state.TabuList, chosen.node, chosen.kind, tabuExpiry, nodeContentionScore(currentStats[chosen.node], req.MaxSimTimeMs))
 		}
 	}
 
-	if !accepted {
+	if !accepted || lahcChosen {
 		state.StaleRounds++
+	}
+	if !accepted {
 		// Keep the reported figures tracking the freshly-measured
 		// incumbent even on a rejected round, so a UI reading
 		// CurrentDelivery/CurrentContention shows this round's own real
@@ -1131,6 +1811,7 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 		state.CurrentCollision = currentCollision
 		state.CurrentContention = currentContention
 	}
+	advanceLateAcceptanceHistory(req, &state)
 
 	// Refresh the per-repeater table and append this round to the
 	// history, whether the move was accepted or not.
@@ -1148,7 +1829,7 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 		// re-measure so the table reflects what was actually kept.
 		_, _, snapshotStats = evaluateAverageOptimize(req.Scenario, attrs, state.CurrentPolicy, req.Messages, req.MaxSimTimeMs, req.Trials, roundSeed)
 	}
-	state.NodeSnapshot = buildNodeSnapshot(req, attrs, state.CurrentPolicy, snapshotStats, snapshotTrials, adjustedNodes, tabooed)
+	state.NodeSnapshot = buildNodeSnapshot(req, attrs, state.CurrentPolicy, snapshotStats, snapshotTrials, adjustedNodes, tabooed, weights)
 
 	targetNode, moveKind := -1, ""
 	if chosen != nil {

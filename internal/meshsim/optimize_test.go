@@ -540,7 +540,7 @@ func TestOptimizeMoveSetFloodMaxCarriesWarning(t *testing.T) {
 	}
 	stats[1].RedundantRelays = 4 // node 1 (a relay) has redundant relays — should propose a flood_max_reduce
 
-	candidates := generateOptimizeCandidates(req, state, attrs, stats, OptimizeMoveSet{FloodMax: true})
+	candidates := generateOptimizeCandidates(req, state, attrs, stats, OptimizeMoveSet{FloodMax: true}, defaultContentionWeights())
 	found := false
 	for _, c := range candidates {
 		if c.node != 1 || c.kind != moveKindFloodMaxReduce {
@@ -612,7 +612,7 @@ func TestOptimizeTabuAspirationClearsOnScoreChange(t *testing.T) {
 
 	attrs := optimizeAttrs(req)
 	_, _, currentStats := evaluateAverageOptimize(req.Scenario, attrs, state.CurrentPolicy, req.Messages, req.MaxSimTimeMs, req.Trials, req.Seed)
-	candidates := generateOptimizeCandidates(req, state, attrs, currentStats, defaultOptimizeMoveSet())
+	candidates := generateOptimizeCandidates(req, state, attrs, currentStats, defaultOptimizeMoveSet(), defaultContentionWeights())
 
 	found := false
 	for _, c := range candidates {
@@ -639,7 +639,7 @@ func TestGenerateOptimizeCandidatesRespectsTopK(t *testing.T) {
 	state := OptimizeStep(req, OptimizeState{})
 	attrs := optimizeAttrs(req)
 	_, _, currentStats := evaluateAverageOptimize(req.Scenario, attrs, state.CurrentPolicy, req.Messages, req.MaxSimTimeMs, req.Trials, req.Seed)
-	candidates := generateOptimizeCandidates(req, state, attrs, currentStats, OptimizeMoveSet{TxDelay: true})
+	candidates := generateOptimizeCandidates(req, state, attrs, currentStats, OptimizeMoveSet{TxDelay: true}, defaultContentionWeights())
 
 	backoffNodes := map[int]bool{}
 	speedupNodes := map[int]bool{}
@@ -682,5 +682,306 @@ func TestOptimizeStepPicksBestAmongCandidates(t *testing.T) {
 		if round.Accepted && round.CandidatesTried < 1 {
 			t.Errorf("round %d: accepted a move but recorded CandidatesTried=%d", round.Round, round.CandidatesTried)
 		}
+	}
+}
+
+// --- Phase 6 Tier 2/3 (docs/SIMULATOR_PLAN_PHASE6.md) -------------------
+
+// TestRacingCompareStopsEarlyOnADecisiveDifference is work item D's own
+// direct test: a candidate with an obvious, large contention improvement
+// over the incumbent should be decided well before the full Trials
+// budget is spent — that early stopping is racing's entire point.
+func TestRacingCompareStopsEarlyOnADecisiveDifference(t *testing.T) {
+	scenario, messages := lockstepCollisionScenario()
+	req := OptimizeRequest{
+		Scenario: scenario, Messages: messages, MaxSimTimeMs: 60_000,
+		Trials: 60, RacingMinBatch: 5, RacingZThreshold: 1.64,
+		MinDeliveryGain: 0.005, MinImprovement: 0.5, DeliveryTolerance: 0.02, MaxDeliveryRegression: 0.05,
+		Seed: 1,
+	}
+	req = optimizeDefaults(req)
+	attrs := optimizeAttrs(req)
+
+	incumbentPolicy := ConfigPolicy{}
+	// A large, obviously-effective back-off on node 1 — this fixture's
+	// own three lockstepped relays (see lockstepCollisionScenario) are
+	// already known (TestOptimizeStepReducesContentionOverBaseline) to
+	// respond clearly to exactly this kind of move.
+	candidatePolicy := ConfigPolicy{{
+		Name:          "big backoff",
+		Condition:     RuleCondition{Kind: ConditionNodeIndexIn, Nodes: []int{1}},
+		TxDelayFactor: floatPtr(2.0),
+	}}
+
+	_, cand, decisive := racingCompare(req, attrs, incumbentPolicy, candidatePolicy, req.Seed)
+	if !decisive {
+		t.Error("expected a large, obvious contention improvement to be decided decisively")
+	}
+	if cand.trials >= req.Trials {
+		t.Errorf("expected racing to stop before the full trial budget (%d), used %d", req.Trials, cand.trials)
+	}
+}
+
+// TestRacingCompareUsesFullBudgetWhenIndecisive proves racing never does
+// LESS work than the fixed-budget path when the comparison genuinely
+// can't be called early — comparing a policy against ITSELF has a true
+// difference of exactly zero, which should never cross any of
+// racingCompare's own decisive thresholds.
+func TestRacingCompareUsesFullBudgetWhenIndecisive(t *testing.T) {
+	scenario, messages := lockstepCollisionScenario()
+	req := OptimizeRequest{
+		Scenario: scenario, Messages: messages, MaxSimTimeMs: 60_000,
+		Trials: 20, RacingMinBatch: 5, RacingZThreshold: 1.64,
+		MinDeliveryGain: 0.005, MinImprovement: 0.5, DeliveryTolerance: 0.02, MaxDeliveryRegression: 0.05,
+		Seed: 1,
+	}
+	req = optimizeDefaults(req)
+	attrs := optimizeAttrs(req)
+
+	policy := ConfigPolicy{}
+	_, cand, decisive := racingCompare(req, attrs, policy, policy, req.Seed)
+	if decisive {
+		t.Error("comparing a policy against itself should never be decisive")
+	}
+	if cand.trials != req.Trials {
+		t.Errorf("expected the full trial budget (%d) to be used when indecisive, got %d", req.Trials, cand.trials)
+	}
+}
+
+// TestOptimizeStepWithAdaptiveTrialsStillReducesContention is the
+// end-to-end smoke test for work item D — the full loop must still make
+// real progress with AdaptiveTrials enabled, not just avoid crashing.
+func TestOptimizeStepWithAdaptiveTrialsStillReducesContention(t *testing.T) {
+	req := baseOptimizeRequest()
+	req.AdaptiveTrials = true
+	state := OptimizeStep(req, OptimizeState{})
+	baselineContention := state.CurrentContention
+	for i := 0; i < 50 && !state.Done; i++ {
+		state = OptimizeStep(req, state)
+	}
+	if !state.Done {
+		t.Fatal("test setup: expected the loop to finish within 50 rounds")
+	}
+	if state.CurrentContention >= baselineContention {
+		t.Errorf("expected AdaptiveTrials to still reduce contention below baseline (%v), got %v", baselineContention, state.CurrentContention)
+	}
+}
+
+// TestOptimizeAcceptsLAHCAllowsATemporaryWorseningMove is work item E's
+// own direct test: a candidate that would be REJECTED by the strict rule
+// (no real delivery gain, contention not improved enough) must still be
+// ACCEPTED via the LAHC rule when its contention is no worse than the
+// historical value it's compared against — the whole point of the
+// fallback.
+func TestOptimizeAcceptsLAHCAllowsATemporaryWorseningMove(t *testing.T) {
+	req := OptimizeRequest{DeliveryTolerance: 0.005, MinImprovement: 0.5, MaxDeliveryRegression: 0.02, MinDeliveryGain: 0.005}
+	const baseline, current, candidate = 0.40, 0.40, 0.399 // within DeliveryTolerance, not a real delivery gain
+	const candidateContention = 3400.0
+	const historicalContention = 3450.0 // candidate is BETTER than L rounds ago, though maybe not better than the immediately preceding round
+
+	if !optimizeAcceptsLAHC(req, baseline, current, candidate, candidateContention, historicalContention) {
+		t.Error("expected LAHC to accept a move that beats the historical contention and stays within the delivery floor/tolerance")
+	}
+	// The same candidate must still be rejected if it beaches the
+	// baseline floor, exactly like the strict rule.
+	if optimizeAcceptsLAHC(req, baseline, current, 0.37, candidateContention, historicalContention) {
+		t.Error("expected LAHC to still respect the baseline delivery floor")
+	}
+	// And rejected if its own contention is WORSE than the historical
+	// value — LAHC isn't a free pass, just a different comparison point.
+	if optimizeAcceptsLAHC(req, baseline, current, candidate, historicalContention+1, historicalContention) {
+		t.Error("expected LAHC to reject a candidate worse than the historical contention")
+	}
+}
+
+// TestOptimizeStepWithLateAcceptanceDoesNotCrashAndAdvancesHistory is the
+// end-to-end smoke test for work item E — CostHistory must be populated
+// at Initialized and keep advancing round over round, and the loop must
+// still terminate normally.
+func TestOptimizeStepWithLateAcceptanceDoesNotCrashAndAdvancesHistory(t *testing.T) {
+	req := baseOptimizeRequest()
+	req.LateAcceptance = true
+	req.LateAcceptanceHistoryLength = 5
+
+	state := OptimizeStep(req, OptimizeState{})
+	if len(state.CostHistory) != 5 {
+		t.Fatalf("expected CostHistory to be seeded at length 5, got %d", len(state.CostHistory))
+	}
+	firstSnapshot := append([]float64{}, state.CostHistory...)
+
+	for i := 0; i < 10 && !state.Done; i++ {
+		state = OptimizeStep(req, state)
+	}
+	if len(state.CostHistory) != 5 {
+		t.Errorf("expected CostHistory to stay length 5, got %d", len(state.CostHistory))
+	}
+	if reflectDeepEqualFloatSlices(firstSnapshot, state.CostHistory) {
+		t.Error("expected CostHistory to have advanced after several rounds, not stay frozen at its seeded values")
+	}
+}
+
+// TestOptimizeStepLAHCAcceptancesStillCountTowardStaleness is the direct
+// regression test for a bug found live (via a real browser/worker run
+// against a genuinely plateaued 2-node fixture): once contention stopped
+// changing round to round, EVERY round's own best-by-contention candidate
+// trivially satisfied optimizeAcceptsLAHC's own "<=" comparison (nothing
+// was actually getting WORSE, so nothing ever failed it), and because
+// StaleRounds was being reset to 0 on every such "acceptance" exactly
+// like a real improvement, the run burned its entire 100-round budget
+// accepting a long sequence of indistinguishable-from-no-op lateral moves
+// on the same node — never once correctly reporting itself as stuck, and
+// never converging. Constructed here directly: a scenario where every
+// node already has TxDelayFactor at optimizeMaxTxDelay (so back-off
+// candidates keep getting proposed — RedundantRelays keeps them non-zero
+// — but can never actually change anything, `newVal` clamped to the same
+// ceiling every round) forces exactly this "flat forever" condition.
+func TestOptimizeStepLAHCAcceptancesStillCountTowardStaleness(t *testing.T) {
+	scenario, messages := lockstepCollisionScenario()
+	for i := range scenario.Nodes {
+		scenario.Nodes[i].Prefs.TxDelayFactor = optimizeMaxTxDelay // already capped — back-off moves become true no-ops
+	}
+	req := OptimizeRequest{
+		Scenario: scenario, Messages: messages, BasePolicy: ConfigPolicy{},
+		MaxSimTimeMs: 60_000, Trials: 5, ConfirmTrials: 5, Seed: 1,
+		DeliveryTolerance: 0.02, MinDeliveryGain: 0.005, MaxDeliveryRegression: 0.05,
+		MinImprovement: 1e9, // impossible — the strict path can never accept anything, isolating the LAHC path
+		LateAcceptance: true, LateAcceptanceHistoryLength: 5,
+		MaxRounds: 200, StaleRoundsLimit: 10,
+	}
+	state := OptimizeStep(req, OptimizeState{})
+	for i := 0; i < 250 && !state.Done; i++ {
+		state = OptimizeStep(req, state)
+	}
+	if !state.Done {
+		t.Fatal("expected the run to stop on its own within 250 rounds")
+	}
+	if state.Round >= req.MaxRounds {
+		t.Errorf("expected the run to stop via staleness well before the %d-round budget, ran %d rounds — LAHC acceptances on a truly flat scenario must still count as stale", req.MaxRounds, state.Round)
+	}
+}
+
+func reflectDeepEqualFloatSlices(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestSPSAWarmStartProducesAHistoryRowNotDeviations is work item F's own
+// direct test: SPSA must contribute exactly one History row (never
+// per-node OptimizeDeviation entries — the plan's own "diffuse, not
+// actionable" concern this design works around), and the TRUE baseline
+// (BaselineDelivery/BaselineContention) must match what the SAME request
+// measures WITHOUT SPSA enabled, since it's measured before SPSA ever
+// runs.
+func TestSPSAWarmStartProducesAHistoryRowNotDeviations(t *testing.T) {
+	req := baseOptimizeRequest()
+	req.SPSAWarmStart = true
+	req.SPSAIterations = 3 // small — this test only cares about the mechanism, not convergence quality
+
+	withoutSPSA := baseOptimizeRequest()
+	baselineOnly := OptimizeStep(withoutSPSA, OptimizeState{})
+
+	state := OptimizeStep(req, OptimizeState{})
+	if state.BaselineDelivery != baselineOnly.CurrentDelivery || state.BaselineContention != baselineOnly.CurrentContention {
+		t.Errorf("expected the TRUE baseline to match a non-SPSA run exactly: SPSA baseline=(%v,%v) plain=(%v,%v)",
+			state.BaselineDelivery, state.BaselineContention, baselineOnly.CurrentDelivery, baselineOnly.CurrentContention)
+	}
+	if len(state.Deviations) != 0 {
+		t.Errorf("expected zero per-node deviations from the SPSA warm start itself, got %d", len(state.Deviations))
+	}
+	if len(state.History) != 1 {
+		t.Fatalf("expected exactly one history row for the SPSA warm start, got %d", len(state.History))
+	}
+	row := state.History[0]
+	if row.MoveKind != moveKindSPSAWarmStart || row.Round != 0 || row.TargetNode != spsaWarmStartTargetNode {
+		t.Errorf("unexpected SPSA history row: %+v", row)
+	}
+}
+
+// TestSPSAWarmStartDiscardedIfItBreachesTheDeliveryFloor proves SPSA's
+// own result is gated by the exact same delivery-first safety rule every
+// other move in this file respects, not adopted unconditionally.
+func TestSPSAWarmStartDiscardedIfItBreachesTheDeliveryFloor(t *testing.T) {
+	scenario, messages := lockstepCollisionScenario()
+	req := OptimizeRequest{
+		Scenario: scenario, Messages: messages, MaxSimTimeMs: 60_000,
+		Trials: 5, ConfirmTrials: 5, Seed: 1,
+		SPSAWarmStart: true, SPSAIterations: 5,
+		MaxDeliveryRegression: 0.0001, // an almost-zero floor — SPSA's own perturbation is very likely to cost at least this much somewhere
+	}
+	state := OptimizeStep(req, OptimizeState{})
+	if len(state.History) != 1 {
+		t.Fatalf("expected one history row, got %d", len(state.History))
+	}
+	if state.History[0].Accepted && state.CurrentDelivery < state.BaselineDelivery-req.MaxDeliveryRegression {
+		t.Error("SPSA warm start was adopted despite breaching MaxDeliveryRegression")
+	}
+	// Whether adopted or discarded, CurrentDelivery must never itself be
+	// below the floor — the same invariant OptimizeStep's normal rounds
+	// already guarantee.
+	req = optimizeDefaults(req)
+	if state.CurrentDelivery < state.BaselineDelivery-req.MaxDeliveryRegression-1e-9 {
+		t.Errorf("CurrentDelivery %v breaches the baseline floor after an SPSA warm start", state.CurrentDelivery)
+	}
+}
+
+// TestUpdateContentionWeightsRewardsComponentsOnGoodOutcomes is work item
+// G's own direct test: a candidate whose dominant component was
+// ContentionCaused and whose realized delivery outcome was strongly
+// positive should push that weight UP; a candidate whose dominant
+// component was RedundantRelays with a strongly negative outcome should
+// push that weight DOWN.
+func TestUpdateContentionWeightsRewardsComponentsOnGoodOutcomes(t *testing.T) {
+	weights := defaultContentionWeights()
+	stats := []NodeStats{
+		{Node: 0, ContentionCaused: 10}, // node 0: almost entirely ContentionCaused
+		{Node: 1, RedundantRelays: 10},  // node 1: almost entirely RedundantRelays
+	}
+	results := []optimizeScreenResult{
+		{c: optimizeMoveCandidate{node: 0, kind: moveKindTxBackoff}, deliveryGain: 0.05},       // good outcome
+		{c: optimizeMoveCandidate{node: 1, kind: moveKindFloodMaxReduce}, deliveryGain: -0.05}, // bad outcome
+	}
+	updated := updateContentionWeights(weights, results, stats, 60_000)
+	if updated.ContentionCaused <= weights.ContentionCaused {
+		t.Errorf("expected ContentionCaused weight to increase on a good outcome: before=%v after=%v", weights.ContentionCaused, updated.ContentionCaused)
+	}
+	if updated.RedundantRelays >= weights.RedundantRelays {
+		t.Errorf("expected RedundantRelays weight to decrease on a bad outcome: before=%v after=%v", weights.RedundantRelays, updated.RedundantRelays)
+	}
+	// Speed-up candidates aren't contention-ranking training examples —
+	// must be ignored entirely, not accidentally move any weight.
+	speedupOnly := []optimizeScreenResult{
+		{c: optimizeMoveCandidate{node: 0, kind: moveKindTxSpeedup}, deliveryGain: 0.2},
+	}
+	unchanged := updateContentionWeights(weights, speedupOnly, stats, 60_000)
+	if unchanged != weights {
+		t.Errorf("expected speed-up-only results to leave weights unchanged: before=%+v after=%+v", weights, unchanged)
+	}
+}
+
+// TestOptimizeStepWithLearnedWeightsStillReducesContention is the
+// end-to-end smoke test for work item G.
+func TestOptimizeStepWithLearnedWeightsStillReducesContention(t *testing.T) {
+	req := baseOptimizeRequest()
+	req.LearnedWeights = true
+	state := OptimizeStep(req, OptimizeState{})
+	baselineContention := state.CurrentContention
+	for i := 0; i < 50 && !state.Done; i++ {
+		state = OptimizeStep(req, state)
+	}
+	if !state.Done {
+		t.Fatal("test setup: expected the loop to finish within 50 rounds")
+	}
+	if state.CurrentContention >= baselineContention {
+		t.Errorf("expected LearnedWeights to still reduce contention below baseline (%v), got %v", baselineContention, state.CurrentContention)
+	}
+	if state.ContentionWeights == defaultContentionWeights() {
+		t.Error("expected ContentionWeights to have moved from the default after several rounds of learning on a real contention-heavy fixture")
 	}
 }

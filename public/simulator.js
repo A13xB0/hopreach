@@ -3714,6 +3714,12 @@
     const maxRoundsField = roundBudgetField("sim-optimize-max-rounds");
     const staleLimitField = roundBudgetField("sim-optimize-stale-limit");
     const allowFloodMax = document.getElementById("sim-optimize-allow-floodmax").checked;
+    // Tier 2/3 (docs/SIMULATOR_PLAN_PHASE6.md) — each independent, off by
+    // default, matching the Go side's own opt-in defaults exactly.
+    const adaptiveTrials = document.getElementById("sim-optimize-adaptive-trials").checked;
+    const lateAcceptance = document.getElementById("sim-optimize-late-acceptance").checked;
+    const spsaWarmStart = document.getElementById("sim-optimize-spsa-warmstart").checked;
+    const learnedWeights = document.getElementById("sim-optimize-learned-weights").checked;
 
     const optimizeRequest = {
       scenario: scenarioFromState(),
@@ -3740,6 +3746,13 @@
       // own tooltip on why it's categorically riskier than the delay
       // knobs.
       moveSet: { txDelay: true, rxDelay: true, floodMax: allowFloodMax },
+      // Tier 2/3 — see #sim-optimize-advanced's own tooltips for what
+      // each of these actually does; all default false when unchecked,
+      // matching internal/meshsim.OptimizeRequest's own opt-in defaults.
+      adaptiveTrials,
+      lateAcceptance,
+      spsaWarmStart,
+      learnedWeights,
       // A seed range the search itself never draws from (search rounds
       // use `seed` and `seed + round*1_000_003`, see internal/meshsim.
       // OptimizeStep) — hold-out validation only means something if it's
@@ -4015,6 +4028,10 @@
     tx_delay_speedup: "speed up txdelay",
     rx_delay_backoff: "raise rxdelay",
     flood_max_reduce: "trim flood.max",
+    // Tier 3 work item F — see internal/meshsim.spsaWarmStart's own doc
+    // comment on why this one row touches every node at once rather than
+    // naming a single one.
+    spsa_warm_start: "SPSA warm start (all repeaters)",
   };
 
   function renderOptimizeHistory(state) {
@@ -4027,11 +4044,12 @@
     }
     history.forEach((h) => {
       const target = simNodes[h.targetNode];
+      const targetLabel = h.moveKind === "spsa_warm_start" ? "(every repeater)" : target ? target.label : h.targetNode >= 0 ? `#${h.targetNode}` : "—";
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${h.round}</td>
         <td class="${h.accepted ? "sim-optimize-round-kept" : ""}">${h.accepted ? "✓ kept" : "—"}</td>
-        <td>${escapeHtml(target ? target.label : h.targetNode >= 0 ? `#${h.targetNode}` : "—")}</td>
+        <td>${escapeHtml(targetLabel)}</td>
         <td>${escapeHtml(MOVE_KIND_LABELS[h.moveKind] || h.moveKind || "—")}</td>
         <td>${h.candidatesTried || 0}</td>
         <td>${(h.delivery * 100).toFixed(1)}%</td>

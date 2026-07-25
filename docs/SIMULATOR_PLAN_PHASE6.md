@@ -1,10 +1,28 @@
 # Simulator plan, phase 6 — make the adaptive optimizer actually good
 
-Status: **Tier 1 done and verified** (A1, A2, B, C, G, H — tabu list with
-aspiration, change-triggered tabu clearing, top-K best-improvement search,
-widened move set, settable round budget, flood.max opt-in toggle). Tier 2
-(D, E) and Tier 3 (F, G) are deliberately not built yet — see "Suggested
-order" below: "Measure. Only then consider D and E."
+Status: **all tiers done and verified**, built in full at the user's
+explicit request rather than following this document's own staged
+"measure, then consider D and E" sequencing. Tier 1 (A1, A2, B, C, G(H),
+H — tabu list with aspiration, change-triggered tabu clearing, top-K
+best-improvement search, widened move set, settable round budget,
+flood.max opt-in toggle). Tier 2 (D — adaptive/racing trial budget; E —
+Late Acceptance Hill Climbing). Tier 3 (F — SPSA warm start, hybridized
+per this doc's own recommendation so its output stays actionable; G —
+learned contention-score weights, scoped to ranking only, never
+acceptance thresholds). All Tier 2/3 features are opt-in, off by default,
+exposed individually behind an "Advanced (experimental)" UI section with
+an explicit "try one at a time" note — the risk this document itself
+flags ("don't add all of these at once... land one, measure") is real,
+so the UI keeps that choice available even though all four shipped in one
+release. A real bug was found and fixed live during verification: LAHC's
+own textbook "<=" comparison, combined with this domain's deterministic
+(non-random) candidate proposal, could let a plateaued run "accept" a
+long sequence of no-op lateral moves on the same node every round,
+resetting staleness each time and burning the entire round budget without
+ever converging — fixed by no longer resetting StaleRounds on a
+LAHC-only acceptance (only a strict, non-LAHC improvement resets it; a
+LAHC accept still counts toward the stale-rounds limit, exactly like a
+rejection would).
 
 Phase 4's optimizer works now (after the paired-comparison and
 acceptance-rule fixes), but it is a **naive greedy hill-climber**. This
