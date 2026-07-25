@@ -46,10 +46,41 @@ async function addMessageSenderViaModal(page) {
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
 }
 
+// Finds a point on the map that a click will actually reach the map with.
+// Anything sitting on top — a repeater marker, a cluster bubble, a docked
+// control — consumes the click itself, and Leaflet never fires its own map
+// click, so no node gets placed. Which points are covered depends entirely
+// on where the live repeater data happens to put markers, so a fixed
+// coordinate (the map's centre, say) works locally and then fails against
+// a different dataset. Probes a spread of candidates and returns the first
+// whose topmost element is the map surface itself.
+async function findClickableMapPoint(page, map) {
+  const box = await map.boundingBox();
+  if (!box) throw new Error("map has no bounding box");
+  const fractions = [0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85];
+  for (const fy of fractions) {
+    for (const fx of fractions) {
+      const point = { x: Math.round(box.width * fx), y: Math.round(box.height * fy) };
+      const clear = await page.evaluate(
+        ({ x, y, left, top }) => {
+          const el = document.elementFromPoint(left + x, top + y);
+          if (!el) return false;
+          // Tiles and the map container itself are fine; a marker, a
+          // Leaflet control, or either docked panel is not.
+          return !el.closest(".leaflet-marker-icon, .leaflet-control, .leaflet-popup, #sim-panel, #plan-panel, #map-tools, #sim-transport");
+        },
+        { ...point, left: box.x, top: box.y }
+      );
+      if (clear) return point;
+    }
+  }
+  throw new Error("no clickable point found on the map — every probe was covered");
+}
+
 // Leaflet occasionally swallows the very first click on a map right after
 // it's been shown/resized (its own internal click-vs-drag detection can
 // still be settling) — pre-existing flakiness, not specific to any one
-// test. Retries once after a short wait rather than failing outright.
+// test. Retries on a fresh clear point rather than failing outright.
 async function clickMapUntilNodeCount(page, map, position, expectedCount) {
   await map.click({ position });
   try {
@@ -57,9 +88,9 @@ async function clickMapUntilNodeCount(page, map, position, expectedCount) {
       .poll(() => page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount()), { timeout: 1500 })
       .toBe(expectedCount);
   } catch {
-    await map.click({ position });
+    await map.click({ position: await findClickableMapPoint(page, map) });
     await expect
-      .poll(() => page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount()), { timeout: 3000 })
+      .poll(() => page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount()), { timeout: 5000 })
       .toBe(expectedCount);
   }
 }
@@ -977,7 +1008,7 @@ test("places a virtual companion location by clicking the map, and stops when to
   const map = page.locator("#map");
   const box = await map.boundingBox();
   if (!box) throw new Error("map has no bounding box");
-  await clickMapUntilNodeCount(page, map, { x: box.width / 2, y: box.height / 2 }, 1);
+  await clickMapUntilNodeCount(page, map, await findClickableMapPoint(page, map), 1);
   await expect(page.locator("#sim-node-count-badge")).toHaveText("1");
   await expect(page.locator(".sim-marker-companion")).toHaveCount(1);
 
@@ -1002,9 +1033,12 @@ test("companion labels never repeat, even after removing one and adding another"
   // Spaced a quarter of the map apart (not just a few px) so the first
   // marker's own clickable area can never intercept the second click.
   await page.click("#sim-add-companion");
-  await clickMapUntilNodeCount(page, map, { x: box.width / 2, y: box.height / 2 }, 1);
+  const firstSpot = await findClickableMapPoint(page, map);
+  await clickMapUntilNodeCount(page, map, firstSpot, 1);
   await expect(page.locator(".sim-marker-companion")).toHaveCount(1);
-  await map.click({ position: { x: box.width / 4, y: box.height / 4 } });
+  // Far enough from the first that its own marker can't intercept, and
+  // re-probed so the new marker isn't sitting on the second point either.
+  await map.click({ position: await findClickableMapPoint(page, map) });
   await expect(page.locator(".sim-marker-companion")).toHaveCount(2);
   await page.click("#sim-add-companion"); // stop placing
 

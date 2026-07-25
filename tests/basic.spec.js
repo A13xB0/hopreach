@@ -116,8 +116,18 @@ test("map detail defaults to Calibrated Precision, resetting an old saved prefer
 
   // A genuinely fresh visitor gets the new default, saved.
   await page.goto("/");
-  await page.waitForSelector("#position-mode-select", { timeout: 60_000 });
-  const available = await page.locator("#position-mode-select option").evaluateAll((els) => els.map((el) => el.value));
+  // The control only exists once meta.json reports more than one coverage
+  // tier, so an instance that hasn't computed any (a fresh container with
+  // no coverage run behind it) legitimately never renders it. Skip in that
+  // case rather than timing out — the assertions below are about the
+  // default *among available tiers*, which is vacuous without them.
+  const modeSelect = page.locator("#position-mode-select");
+  try {
+    await modeSelect.waitFor({ state: "visible", timeout: 60_000 });
+  } catch {
+    test.skip(true, "this instance publishes no coverage tiers, so there's no Map detail control");
+  }
+  const available = await modeSelect.locator("option").evaluateAll((els) => els.map((el) => el.value));
   test.skip(!available.includes("calibrated_precision"), "this instance doesn't have a calibrated_precision tier to default to");
 
   await expect(page.locator("#position-mode-select")).toHaveValue("calibrated_precision");
