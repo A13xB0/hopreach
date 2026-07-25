@@ -2823,6 +2823,32 @@
     if (open) renderRankingsTableInto(document.getElementById("sim-rankings-fullwindow-body"));
   }
 
+  // Tears a loaded packet replay all the way down. Everything a replay puts
+  // on screen outlives the nodes it was built from otherwise: "Clear all"
+  // used to leave the replay control docked on the map showing a frozen
+  // "Playing… t=+6.0s (16/63)", its flood lines still drawn over an empty
+  // map, and a Play button that would happily bring the seek bar back to
+  // scrub a window whose repeaters no longer existed.
+  //
+  // Deliberately NOT what closing the simulator panel does — that keeps
+  // realTimelineEvents so reopening restores the replay you were watching
+  // (see setSimPanelOpen). This is for the paths that genuinely discard the
+  // work: clearing the nodes, or loading a different setup over the top.
+  function clearReplayState() {
+    stopRealTimelineReplay();
+    realTimelineEvents = [];
+    replayObservations = new Map();
+    replayWindowStartMs = 0;
+    replayTargetHash = "";
+    lastRealReplayStatusText = "";
+    simRealActivityLayer.clearLayers();
+    removeBottleneckLegendControl();
+    const section = document.getElementById("sim-bottleneck-replay-section");
+    if (section) section.classList.add("hidden");
+    setStatus("sim-bottleneck-replay-status", "");
+    setStatus("sim-replay-hash-status", "");
+  }
+
   function hideResults() {
     document.getElementById("sim-open-results-modal").classList.add("hidden");
     document.getElementById("sim-open-predictions-modal").classList.add("hidden");
@@ -2837,11 +2863,7 @@
     clearTransportSource();
     replayWaves = [];
     replayIndex = 0;
-    // Observations belong to the replay whose report is being discarded —
-    // leaving them behind would label a fresh simulation's inspector with
-    // measurements from a packet that has nothing to do with it.
-    replayObservations = new Map();
-    replayTargetHash = "";
+    clearReplayState();
     lastReport = null;
     lastMessages = null;
     lastTuneResult = null;
