@@ -49,11 +49,32 @@ func RxDelayMs(rxDelayBase float64, score float64, airtimeMs uint32) int {
 		return 0
 	}
 	delay := int((math.Pow(rxDelayBase, 0.85-score) - 1.0) * float64(airtimeMs))
+	// Mirror Dispatcher::checkRecv's own `if (_delay < 50) { process
+	// immediately }` gate (Dispatcher.cpp:243): a computed hold-back below
+	// rxDelayMinThresholdMs is NOT queued as a delayed relay at all — the
+	// packet is processed straight away, i.e. an effective delay of 0. This
+	// crucially covers the NEGATIVE values pow(rxDelayBase, 0.85-score)
+	// produces whenever score > 0.85 (a strong, cleanly-decoded reception)
+	// and rxDelayBase > 1: pow(base, negative) < 1, so (…-1)*airtime < 0.
+	// Without this clamp a negative delay flows into the engine's
+	// relayAt := atMs + uint32(rxDelay) + txDelay, where uint32(negative)
+	// is an enormous value that schedules the relay in the past / beyond
+	// the sim window — silently breaking every relay from a node with
+	// rxDelayBase > 1. That's not a hypothetical: the adaptive optimizer's
+	// own rx_delay_backoff move raises rxDelayBase into exactly that range.
+	if delay < rxDelayMinThresholdMs {
+		return 0
+	}
 	if delay > MaxRxDelayMs {
 		return MaxRxDelayMs
 	}
 	return delay
 }
+
+// rxDelayMinThresholdMs mirrors the literal 50 in Dispatcher::checkRecv's
+// own "process immediately" branch — any hold-back shorter than this
+// (including negatives) is treated as no delay at all. See RxDelayMs.
+const rxDelayMinThresholdMs = 50
 
 // MaxRxDelayMs mirrors Dispatcher.cpp's own MAX_RX_DELAY_MILLIS clamp — real
 // firmware never holds a weak-signal reception back longer than this,

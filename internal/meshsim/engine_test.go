@@ -1709,22 +1709,26 @@ func TestMessageEffectiveHashSizeDefaultsAndClamps(t *testing.T) {
 }
 
 // TestOnAirLenIncludesPathBytes is a table-driven check against
-// Packet::writeTo's own wire layout (src/Packet.cpp:59-60): the path_len
-// byte, then hash_count*hash_size accumulated path bytes, then the
-// payload.
+// Packet::getRawLength's own wire layout (src/Packet.cpp): 2 framing bytes
+// (header + path_len) + hash_count*hash_size accumulated path bytes +
+// payload + 4 transport-code bytes when the packet carries them.
 func TestOnAirLenIncludesPathBytes(t *testing.T) {
 	tests := []struct {
-		payloadLen, hashCount, hashSize, want int
+		payloadLen, hashCount, hashSize int
+		transport                       bool
+		want                            int
 	}{
-		{20, 0, 3, 21}, // origin's own first send: no accumulated path yet
-		{20, 1, 3, 24}, // one relay hop at 3 bytes
-		{20, 5, 1, 26}, // five hops at 1 byte
-		{20, 2, 2, 25}, // two hops at 2 bytes
-		{0, 0, 3, 1},   // zero-length payload still carries the path_len byte
+		{20, 0, 3, false, 22}, // origin's own first send: no accumulated path yet, 2 framing bytes
+		{20, 1, 3, false, 25}, // one relay hop at 3 bytes
+		{20, 5, 1, false, 27}, // five hops at 1 byte
+		{20, 2, 2, false, 26}, // two hops at 2 bytes
+		{0, 0, 3, false, 2},   // zero-length payload still carries the 2 framing bytes
+		{20, 0, 3, true, 26},  // region-scoped: + 4 transport-code bytes
+		{20, 1, 3, true, 29},  // scoped, one relay hop
 	}
 	for _, tt := range tests {
-		if got := onAirLen(tt.payloadLen, tt.hashCount, tt.hashSize); got != tt.want {
-			t.Errorf("onAirLen(%d, %d, %d) = %d, want %d", tt.payloadLen, tt.hashCount, tt.hashSize, got, tt.want)
+		if got := onAirLen(tt.payloadLen, tt.hashCount, tt.hashSize, tt.transport); got != tt.want {
+			t.Errorf("onAirLen(%d, %d, %d, %v) = %d, want %d", tt.payloadLen, tt.hashCount, tt.hashSize, tt.transport, got, tt.want)
 		}
 	}
 }
@@ -1826,7 +1830,7 @@ func TestRunRelayAppendsAtPacketHashSizeNotItsOwn(t *testing.T) {
 	if relayTx.HashSize != 3 {
 		t.Errorf("relay's own transmission HashSize = %d, want 3 (the packet's own size, not the relay's configured HashSize of 1)", relayTx.HashSize)
 	}
-	wantOnAir := onAirLen(20, 1, 3) // 1 accumulated hop (origin's own hash) at 3 bytes
+	wantOnAir := onAirLen(20, 1, 3, false) // 1 accumulated hop (origin's own hash) at 3 bytes, unscoped (no transport codes)
 	if relayTx.OnAirLen != wantOnAir {
 		t.Errorf("relay's own transmission OnAirLen = %d, want %d", relayTx.OnAirLen, wantOnAir)
 	}

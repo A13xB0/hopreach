@@ -750,7 +750,11 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 
 			onAir := e.payloadLen
 			if !ab.DisablePathByteAirtime {
-				onAir = onAirLen(e.payloadLen, len(e.path), e.hashSize)
+				// Transport codes are carried exactly by region-scoped
+				// (transport-routed) packets — see onAirLen and Packet::
+				// hasTransportCodes. A non-empty region is this simulator's
+				// own marker for that.
+				onAir = onAirLen(e.payloadLen, len(e.path), e.hashSize, e.region != "")
 			}
 			airtime := AirtimeMs(node.Prefs.Radio, onAir)
 			budget.spend(airtime)
@@ -965,17 +969,37 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 							break
 						}
 						willRelay = true
+						// PacketScore uses the FULL received frame length
+						// (firmware: packetScore(snr, len) where len is the
+						// whole on-air frame, transport codes included) — so
+						// scoreLen matches the transmission airtime's own
+						// onAirLen exactly.
 						scoreLen := tx.payloadLen
 						if !ab.DisablePathByteAirtime {
-							scoreLen = onAirLen(tx.payloadLen, len(tx.path), tx.hashSize)
+							scoreLen = onAirLen(tx.payloadLen, len(tx.path), tx.hashSize, tx.region != "")
 						}
 						score := PacketScore(effWantedSNR, sf, scoreLen)
+						// The weak-signal RX hold-back is sized on the full
+						// received frame airtime (firmware calcRxDelay's own
+						// air_time = getEstAirtimeFor(len), the whole frame).
 						rxDelay := RxDelayMs(listenerNode.Prefs.RxDelayBase, score, tx.endMs-tx.startMs)
+						// The relay (retransmit) delay, however, is sized on
+						// the packet length EXCLUDING transport codes —
+						// firmware getRetransmitDelay uses getEstAirtimeFor(
+						// getPathByteLen() + payload_len + 2), which is
+						// getRawLength minus the 4 transport bytes. Only
+						// region-scoped traffic differs from the full frame
+						// here (an unscoped packet has no transport codes, so
+						// its full airtime already IS the delay airtime).
+						relayDelayAirtime := tx.endMs - tx.startMs
+						if !ab.DisablePathByteAirtime && tx.region != "" {
+							relayDelayAirtime = AirtimeMs(tx.radio, onAirLen(tx.payloadLen, len(tx.path), tx.hashSize, false))
+						}
 						var txDelay uint32
 						if tx.direct {
-							txDelay = DirectRetransmitDelayMs(rng, tx.endMs-tx.startMs, listenerNode.Prefs.DirectTxDelayFactor)
+							txDelay = DirectRetransmitDelayMs(rng, relayDelayAirtime, listenerNode.Prefs.DirectTxDelayFactor)
 						} else {
-							txDelay = RetransmitDelayMs(rng, tx.endMs-tx.startMs, listenerNode.Prefs.TxDelayFactor)
+							txDelay = RetransmitDelayMs(rng, relayDelayAirtime, listenerNode.Prefs.TxDelayFactor)
 						}
 						relayAt := e.atMs + uint32(rxDelay) + txDelay
 						// Copy-append, never mutate tx.path/tx.pathNodes in

@@ -169,6 +169,43 @@ radios neither hear nor jam each other. Observed CoreScope links are never
 gated: if two real repeaters actually heard each other, they were
 compatible in reality.
 
+## Fifth review pass — firmware timing formulas (checked against source)
+
+Re-read the actual MeshCore firmware (`/tmp/mc-src`, github.com/meshcore-
+dev/MeshCore) line-by-line for the timing formulas. `packetScoreInt` and
+`getRetransmitDelay`/`getDirectRetransmitDelay` matched ours exactly. Three
+things did not:
+
+- **Negative RX hold-back bug (real, high-impact).** `MyMesh::calcRxDelay`
+  is `(pow(rx_delay_base, 0.85 - score) - 1) * air_time`. For a strong,
+  cleanly-decoded packet (`score > 0.85`) with `rx_delay_base > 1`, the
+  exponent is negative, `pow(...) < 1`, and the whole thing is NEGATIVE.
+  Firmware's `Dispatcher::checkRecv` guards this with `if (_delay < 50) {
+  process immediately }` — which covers negatives. Our `RxDelayMs` didn't:
+  a negative int flowed into the engine's `relayAt := atMs +
+  uint32(rxDelay) + txDelay`, where `uint32(negative)` is ~4 billion,
+  scheduling the relay in the past / beyond the sim window so it never
+  fired. Every relay from a node with `rx_delay_base > 1` silently broke —
+  and the adaptive optimizer's own `rx_delay_backoff` move raises
+  `rx_delay_base` into exactly that range, so it could actively steer into
+  the bug. Fixed by mirroring the `< 50 → 0` gate (which also correctly
+  models "a sub-50ms hold-back is processed immediately").
+- **Airtime under-counted the frame by 1–5 bytes.** Real `Packet::
+  getRawLength()` is `2 + pathBytes + payload + (transportCodes ? 4 : 0)`:
+  two framing bytes (header + path_len), and 4 transport-code bytes on a
+  region-scoped / transport-routed packet. Our `onAirLen` used `+1` and
+  never modelled transport codes — a systematic 1-byte airtime undercount
+  on every packet, and 5 on every scoped one, biasing every collision
+  window and duty-cycle figure. Now a direct port of `getRawLength`, with a
+  non-empty `Message.Region` as the marker for transport codes.
+- **Retransmit-delay length excludes transport codes.** Firmware sizes the
+  flood/direct relay delay on `getEstAirtimeFor(getPathByteLen() +
+  payload_len + 2)` — `getRawLength` MINUS the 4 transport bytes — while the
+  RX hold-back and the actual transmission airtime use the full frame. Now
+  matched: scoped traffic sizes its relay delay on the transport-excluded
+  length, everything else on the full frame (identical for unscoped, the
+  common case).
+
 ## What is deliberately still approximate (and why it's the right call)
 
 - **The margin→SNR and observation-count→SNR mappings are proxies**, not

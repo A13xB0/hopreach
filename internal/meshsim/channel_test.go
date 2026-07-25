@@ -266,6 +266,49 @@ func TestRunComparablePreambleInterferersStillCollide(t *testing.T) {
 	}
 }
 
+// TestRunRelaysWithHighRxDelayBaseAndStrongSignal is the end-to-end guard
+// for the negative-RX-delay bug (see TestRxDelayMsNeverNegativeForStrongSignal):
+// a repeater configured with rxDelayBase > 1, receiving a strong (high
+// PacketScore) packet, must still relay it. The old code produced a
+// negative RX delay here that became a huge uint32 in relayAt, scheduling
+// the relay in the past / beyond the sim window so it never went out.
+func TestRunRelaysWithHighRxDelayBaseAndStrongSignal(t *testing.T) {
+	// A -> B -> C, strong links (high SNR -> high PacketScore -> the
+	// score>0.85 regime where the raw RX-delay formula goes negative).
+	a, b, c := 0, 1, 2
+	nodes := []SimNode{testNode(true), testNode(true), testNode(false)}
+	nodes[b].Prefs.RxDelayBase = 3 // a common community value, > 1 — the trigger
+	scenario := Scenario{
+		Nodes: nodes,
+		Links: []Link{
+			{From: a, To: b, SNRdB: 20}, {From: b, To: a, SNRdB: 20},
+			{From: b, To: c, SNRdB: 20}, {From: c, To: b, SNRdB: 20},
+		},
+	}
+	messages := []Message{{Origin: a, SendAtMs: 0, PayloadLen: 20}}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	// B must relay, and C must receive B's relay within the sim window.
+	var bRelayed, cGotIt bool
+	for _, tx := range report.Transmissions {
+		if tx.Node == b && tx.IsRelay {
+			bRelayed = true
+		}
+	}
+	for _, r := range report.Receptions {
+		if r.Node == c && r.FromNode == b && isCanonicalDelivery(r) {
+			cGotIt = true
+		}
+	}
+	if !bRelayed {
+		t.Error("node B (rxDelayBase=3) failed to relay a strong-signal packet — the negative-RX-delay bug")
+	}
+	if !cGotIt {
+		t.Error("node C never received B's relay — B's relay was scheduled outside the sim window (negative-RX-delay bug)")
+	}
+}
+
 // rngFunc adapts a plain func to the RNG interface for tests.
 type rngFunc func(int) int
 

@@ -94,3 +94,34 @@ func TestRxDelayMsClampsAtMaxRxDelayMs(t *testing.T) {
 		t.Errorf("RxDelayMs with an extreme rxDelayBase/airtime = %dms, want clamped to MaxRxDelayMs (%dms)", got, MaxRxDelayMs)
 	}
 }
+
+// TestRxDelayMsNeverNegativeForStrongSignal is the direct regression test
+// for the negative-delay bug: at score > 0.85 with rxDelayBase > 1,
+// pow(base, 0.85-score) < 1, so the raw formula is NEGATIVE. Real firmware's
+// `if (_delay < 50)` branch treats that as "process immediately" (delay 0);
+// RxDelayMs must too. Without it a negative here became a huge uint32 in
+// the engine's relayAt arithmetic, silently breaking every relay from a
+// node with rxDelayBase > 1 — the range the optimizer's rx_delay_backoff
+// move raises it to.
+func TestRxDelayMsNeverNegativeForStrongSignal(t *testing.T) {
+	for _, base := range []float64{1.5, 3, 10, 20} {
+		for _, score := range []float64{0.9, 0.95, 1.0} {
+			for _, airtime := range []uint32{100, 1000, 30_000} {
+				if got := RxDelayMs(base, score, airtime); got < 0 {
+					t.Errorf("RxDelayMs(%v, %v, %d) = %d, want >= 0 (a strong-signal reception must never produce a negative hold-back)", base, score, airtime, got)
+				}
+			}
+		}
+	}
+}
+
+// TestRxDelayMsBelowThresholdIsZero pins the firmware `if (_delay < 50)`
+// gate: a small-but-positive computed hold-back (below rxDelayMinThresholdMs)
+// is processed immediately, not applied.
+func TestRxDelayMsBelowThresholdIsZero(t *testing.T) {
+	// base 1.1, score 0.5 -> pow(1.1, 0.35)-1 ~= 0.0335; * a short airtime
+	// stays well under 50ms.
+	if got := RxDelayMs(1.1, 0.5, 500); got != 0 {
+		t.Errorf("RxDelayMs(1.1, 0.5, 500) = %d, want 0 (a sub-50ms hold-back is processed immediately)", got)
+	}
+}

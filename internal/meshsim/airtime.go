@@ -122,16 +122,31 @@ func AirtimeMs(p LoRaParams, payloadLen int) uint32 {
 	return uint32(totalMs) // truncating int conversion, matching getEstAirtimeFor's own microseconds/1000 integer division
 }
 
-// onAirLen returns the byte count actually transmitted for a packet whose
-// application payload is payloadLen bytes and whose accumulated path
-// carries hashCount hops at hashSize bytes each — matching real firmware's
-// own wire layout exactly: Packet::writeTo (src/Packet.cpp) writes the
-// path_len byte, then hash_count*hash_size path bytes (Packet::writePath),
-// then the payload. Dispatcher::checkRecv's own packetScore/getEstAirtimeFor
-// calls (src/Dispatcher.cpp) both use this same raw-received length, not
-// just the payload — a longer accumulated path genuinely costs more airtime
-// and is genuinely harder to receive cleanly, not a detail this simulator
-// can skip once path-hash size is modeled at all.
-func onAirLen(payloadLen, hashCount, hashSize int) int {
-	return payloadLen + 1 + hashCount*hashSize
+// onAirLen returns the byte count actually transmitted for a packet — a
+// direct port of Packet::getRawLength (src/Packet.cpp):
+//
+//	2 + getPathByteLen() + payload_len + (hasTransportCodes() ? 4 : 0)
+//
+// i.e. 2 framing bytes (the 1-byte header + the 1-byte path_len field),
+// plus hashCount*hashSize accumulated path bytes, plus the application
+// payload, plus 4 bytes of transport codes when the packet carries them.
+// A packet carries transport codes exactly when it is region-scoped /
+// transport-routed (ROUTE_TYPE_TRANSPORT_FLOOD / _DIRECT — see engine.go's
+// own mapping of a non-empty Message.Region to this); an ordinary unscoped
+// flood (ROUTE_TYPE_FLOOD) does not. Dispatcher::checkRecv's own
+// packetScore/getEstAirtimeFor calls (src/Dispatcher.cpp) both use this
+// same raw-received length, so a longer accumulated path — and a
+// transport-coded packet — genuinely cost more airtime and are genuinely
+// harder to receive cleanly.
+//
+// (Previously this counted only 1 framing byte and never the transport
+// codes, undercounting airtime by 1 byte on every packet and by 5 on every
+// region-scoped one — small, but a systematic bias in every collision
+// window and duty-cycle figure.)
+func onAirLen(payloadLen, hashCount, hashSize int, hasTransportCodes bool) int {
+	n := payloadLen + 2 + hashCount*hashSize
+	if hasTransportCodes {
+		n += 4
+	}
+	return n
 }
