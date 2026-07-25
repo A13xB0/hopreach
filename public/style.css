@@ -996,6 +996,8 @@ header .subtitle {
 .sim-node-badge.sim-badge-direct { background: rgba(250,204,21,0.18); color: #facc15; }
 /* Item 17 — a sender's own configured path-hash size (1-3 bytes). */
 .sim-node-badge.sim-badge-hashsize { background: rgba(148,163,184,0.18); color: #94a3b8; }
+/* Phase 8 — a fixed background transmission of reconstructed real traffic. */
+.sim-node-badge.sim-badge-background { background: rgba(100,116,139,0.22); color: #94a3b8; }
 
 #sim-message-cancel-edit.hidden { display: none; }
 #sim-setup-import-file.hidden { display: none; }

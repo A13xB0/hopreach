@@ -303,6 +303,28 @@ type Message struct {
 	// of this message. Zero/unset falls back to defaultMessageHashSize —
 	// see effectiveHashSize.
 	HashSize int `json:"hashSize,omitempty"`
+	// Background marks this as a FIXED, non-relaying transmission rather than
+	// a flood to propagate — docs/SIMULATOR_PLAN_PHASE8.md's "replay
+	// everything else as background" design. It models one real observed hop
+	// of surrounding traffic (a direct/channel/anon packet, or a specific
+	// relay of a flood we're not itself reproducing): node Origin keys the
+	// radio at SendAtMs for FrameBytes' worth of airtime and nothing more.
+	// It occupies the channel exactly like any transmission — so it causes
+	// collisions, CAD deferrals, and half-duplex tx_busy at the nodes that
+	// hear it — but it never triggers a relay, generates no reception of its
+	// own, and is never deferred by CAD or the duty-cycle budget (it already
+	// happened at its observed time; only the floods being TUNED respect the
+	// channel around it). This is what lets a reconstructed real episode
+	// carry realistic contention from traffic we can't (or don't need to)
+	// route.
+	Background bool `json:"background,omitempty"`
+	// FrameBytes, when > 0, is the exact total on-air byte count for this
+	// message's airtime — used instead of the onAirLen reconstruction. Only
+	// meaningful for a Background message, where the real frame size is known
+	// exactly from CoreScope's raw_hex, so the background's airtime (and thus
+	// how long it occupies the channel) is exact rather than reconstructed
+	// from payload + path assumptions.
+	FrameBytes int `json:"frameBytes,omitempty"`
 }
 
 // defaultMessageHashSize is what a Message with no explicit HashSize uses.
@@ -470,6 +492,10 @@ type Transmission struct {
 	// side rather than the listener's.
 	CADDeferred    bool `json:"cadDeferred,omitempty"`
 	BudgetDeferred bool `json:"budgetDeferred,omitempty"`
+	// Background is true for a fixed replayed background transmission (see
+	// Message.Background) — never relays, and never itself deferred; a UI can
+	// render it distinctly from the floods being simulated.
+	Background bool `json:"background,omitempty"`
 }
 
 // cadFailRetryDelayMs/cadFailMaxDurationMs mirror Dispatcher::
@@ -565,6 +591,11 @@ type event struct {
 	// budgetDeferred marks a send that's already been pushed back at least
 	// once by the sender's own duty-cycle budget — see txBudget.
 	budgetDeferred bool
+	// background/frameBytes carry a fixed replayed background transmission
+	// (see Message.Background/FrameBytes) — a background send never defers,
+	// never relays, and uses frameBytes for its airtime directly.
+	background bool
+	frameBytes int
 
 	// eventRxComplete fields
 	txIndex  int // index into engine.transmissions
@@ -656,7 +687,7 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 		// match real loop.detect), the human-readable pathNodes reported
 		// on Reception.Path is meant to show the complete hop-by-hop route
 		// including where the packet started.
-		heap.Push(&q, event{atMs: m.SendAtMs, kind: eventSend, sender: m.Origin, packetID: i, payloadLen: m.PayloadLen, hopCount: 0, region: m.Region, direct: m.Direct, hashSize: m.effectiveHashSize(), pathNodes: []int{m.Origin}})
+		heap.Push(&q, event{atMs: m.SendAtMs, kind: eventSend, sender: m.Origin, packetID: i, payloadLen: m.PayloadLen, hopCount: 0, region: m.Region, direct: m.Direct, hashSize: m.effectiveHashSize(), pathNodes: []int{m.Origin}, background: m.Background, frameBytes: m.FrameBytes})
 	}
 
 	budgets := make([]txBudget, len(scenario.Nodes))
@@ -714,6 +745,36 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 			node := scenario.Nodes[e.sender]
 			budget := &budgets[e.sender]
 			budget.refill(e.atMs)
+
+			if e.background {
+				// A fixed replayed background transmission (see
+				// Message.Background): occupy the channel for its own airtime
+				// and nothing else. NOT deferred by CAD or the budget — it
+				// happened at its observed time — but it DOES spend the
+				// emitting node's own airtime budget (it really used that
+				// airtime, so it correctly leaves that node less headroom for
+				// the floods being simulated). Because it's appended to
+				// transmissions, the interference/CAD/tx_busy logic sees it
+				// automatically; it just never schedules a relay.
+				onAir := e.frameBytes
+				if onAir <= 0 {
+					onAir = onAirLen(e.payloadLen, 0, e.hashSize, e.region != "")
+				}
+				airtime := AirtimeMs(node.Prefs.Radio, onAir)
+				budget.spend(airtime)
+				transmissions = append(transmissions, transmission{
+					sender: e.sender, packetID: e.packetID,
+					startMs: e.atMs, endMs: e.atMs + airtime,
+					payloadLen: e.payloadLen, radio: node.Prefs.Radio, region: e.region, direct: e.direct, hashSize: e.hashSize, hopCount: e.hopCount,
+				})
+				report.Transmissions = append(report.Transmissions, Transmission{
+					PacketID: e.packetID, Node: e.sender, AtMs: e.atMs, AirtimeMs: airtime,
+					HopCount: e.hopCount, PayloadLen: e.payloadLen, OnAirLen: onAir, HashSize: e.hashSize, Region: e.region, Direct: e.direct,
+					Background: true,
+				})
+				continue
+			}
+
 			// Real firmware checks its duty-cycle budget before anything
 			// else in checkSend() — including before the CAD/channel-busy
 			// check below — gated against the WORST-CASE (MAX_TRANS_UNIT)

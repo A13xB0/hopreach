@@ -75,7 +75,16 @@ func (r Report) DeliveryRatio(scenario Scenario, messages []Message) float64 {
 	}
 
 	var total float64
+	var counted int
 	for i, m := range messages {
+		// Background messages (see Message.Background) are fixed interference,
+		// not floods to deliver — they never relay and generate no receptions,
+		// so they must NOT be scored as delivery failures (that would drag the
+		// ratio down and give the optimizer a corrupt objective).
+		if m.Background {
+			continue
+		}
+		counted++
 		reachable := reachableFrom(scenario, m.Origin, m.Region)
 		delete(reachable, m.Origin) // the origin isn't a delivery TARGET — this measures how much of the rest of the reachable network got it
 		if len(reachable) == 0 {
@@ -91,7 +100,10 @@ func (r Report) DeliveryRatio(scenario Scenario, messages []Message) float64 {
 		}
 		total += float64(delivered) / float64(len(reachable))
 	}
-	return total / float64(len(messages))
+	if counted == 0 {
+		return 0 // nothing but background — no delivery to measure
+	}
+	return total / float64(counted)
 }
 
 // reachableFrom computes the set of nodes a message from origin, tagged
@@ -269,6 +281,9 @@ func (r Report) PerNodeStats(scenario Scenario, messages []Message) []NodeStats 
 	}
 
 	for _, m := range messages {
+		if m.Background {
+			continue // fixed interference, not a delivery target — see DeliveryRatio
+		}
 		reachable := reachableFrom(scenario, m.Origin, m.Region)
 		delete(reachable, m.Origin)
 		for node := range reachable {

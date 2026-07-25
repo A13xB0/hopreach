@@ -296,6 +296,7 @@
           <label for="sim-replay-window-secs">Surrounding activity window (± seconds)</label>
           <input type="number" id="sim-replay-window-secs" min="1" max="120" step="1" value="30" title="How much real CoreScope activity either side of the target packet to fetch and replay alongside it — capped at 120s">
         </div>
+        <button id="sim-reconstruct-episode" class="plan-full-width-btn" title="Rebuild this real time window as a fully editable simulator setup: real repeaters, real connectivity, and every real packet in the window as a sender (with real payloads) or fixed background traffic. Then change settings or run the optimizer and re-run to see if the problems go away.">🏗️ Reconstruct window as editable setup</button>
         <div id="sim-replay-hash-status" class="plan-hint hidden"></div>
         <button id="sim-open-bottleneck-modal" class="plan-full-width-btn hidden">🔍 Bottleneck analysis</button>
       </div>

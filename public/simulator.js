@@ -683,6 +683,27 @@
       // path can never mix hash sizes hop to hop. See
       // docs/SIMULATOR_PLAN_PHASE3.md.
       const hashSizeBadge = ` <span class="sim-node-badge sim-badge-hashsize" title="Path-hash size this sender stamps onto its own packets — one size applies to the whole path">${g.hashSize || DEFAULT_MESSAGE_HASH_SIZE}B</span>`;
+      if (g.fixed) {
+        // A reconstructed real transmission (see reconstructEpisodeFromWindow)
+        // — one packet at an absolute time, not a random generator. Rendered
+        // distinctly, and not editable via the random-sender form.
+        const kindBadge = g.background
+          ? ` <span class="sim-node-badge sim-badge-background" title="Fixed background transmission of real surrounding traffic — occupies the channel but isn't itself simulated as a flood">background</span>`
+          : ` <span class="sim-node-badge sim-badge-real" title="Reconstructed real flood sender">real flood</span>`;
+        row.innerHTML = `
+          <span class="plan-item-label">${escapeHtml(node ? node.label : "?")}${g.background ? "" : hashSizeBadge}${kindBadge}${g.region ? ` <span class="sim-node-badge sim-badge-region">scoped</span>` : ""}</span>
+          <span class="plan-item-sub">@ ${((g.atMs || 0) / 1000).toFixed(1)}s · ${g.background ? `${g.frameBytes || 0}B on air` : `${g.payloadLen || 0}B payload`}${g.sourceHash ? ` · ${escapeHtml(g.sourceHash.slice(0, 8))}` : ""}</span>
+          <span class="plan-item-actions">
+            <button data-act="remove" title="Remove">✕</button>
+          </span>
+        `;
+        row.querySelector('[data-act="remove"]').onclick = () => {
+          simMessageGenerators = simMessageGenerators.filter((x) => x.id !== g.id);
+          renderMessageList();
+        };
+        list.appendChild(row);
+        continue;
+      }
       row.innerHTML = `
         <span class="plan-item-label">${escapeHtml(node ? node.label : "?")}${hashSizeBadge}${g.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(g.region)}</span>` : ""}${g.direct ? ` <span class="sim-node-badge sim-badge-direct">direct</span>` : ""}</span>
         <span class="plan-item-sub">${g.count} message${g.count === 1 ? "" : "s"} · ${g.minPayload}-${g.maxPayload}B · ${g.minGapMs}-${g.maxGapMs}ms apart</span>
@@ -1604,6 +1625,24 @@
   function messagesFromState(seed) {
     const messages = [];
     simMessageGenerators.forEach((g, gi) => {
+      // A "fixed" generator is one reconstructed real transmission at an
+      // absolute time (docs/SIMULATOR_PLAN_PHASE8.md) — a real flood sender,
+      // or a fixed background transmission of surrounding traffic. It expands
+      // to exactly one message, unlike the random count/gap/payload
+      // generators below.
+      if (g.fixed) {
+        messages.push({
+          origin: g.nodeIndex,
+          sendAtMs: g.atMs || 0,
+          payloadLen: g.payloadLen || 20,
+          region: g.region || "",
+          direct: !!g.direct,
+          hashSize: g.hashSize || DEFAULT_MESSAGE_HASH_SIZE,
+          background: !!g.background,
+          frameBytes: g.frameBytes || 0,
+        });
+        return;
+      }
       const rng = mulberry32((seed >>> 0) ^ ((gi + 1) * 0x9e3779b9));
       let atMs = 0;
       for (let i = 0; i < g.count; i++) {
@@ -4309,6 +4348,221 @@
     }
   }
 
+  // The origin (true sender) of a real packet, lowercased, if identifiable —
+  // only ADVERTs self-identify (their decoded pubKey). Everything else's true
+  // origin is one hop upstream of the first observed relay and not in the
+  // data (see docs/SIMULATOR_PLAN_PHASE8.md's origin-identification table),
+  // so callers fall back to the first observed relay.
+  function originPubkeyOfPacket(p) {
+    try {
+      const dec = JSON.parse(p.decoded_json || "{}");
+      if (dec.pubKey) return String(dec.pubKey).toLowerCase();
+    } catch {
+      /* not decodable — fall through */
+    }
+    return null;
+  }
+
+  // Reconstructs the real CoreScope time window around the packet in the
+  // replay input as a fully editable simulator setup (docs/SIMULATOR_PLAN_
+  // PHASE8.md): real repeaters at their real positions, connectivity from the
+  // real proven relay edges observed in the window, and every real packet as
+  // either a flood sender (real payload/hash size) or — for direct/channel/
+  // anon traffic we don't route — a fixed background transmission that still
+  // loads the channel. After this, the user tweaks settings or runs the
+  // optimizer and re-runs to see whether the real problems shrink.
+  async function reconstructEpisodeFromWindow() {
+    const hash = extractPacketHash(document.getElementById("sim-replay-hash-input").value);
+    if (!hash) {
+      setStatus("sim-replay-hash-status", "Couldn't find a packet hash (16 hex characters) in that input.");
+      return;
+    }
+    const btn = document.getElementById("sim-reconstruct-episode");
+    btn.disabled = true;
+    try {
+      setStatus("sim-replay-hash-status", "Reconstructing — fetching the target packet…");
+      // The window is centred on the target packet's own time.
+      const detailResp = await fetch(`/corescope-api/api/packets/${encodeURIComponent(hash)}`);
+      if (!detailResp.ok) throw new Error(`packet ${hash} not found (HTTP ${detailResp.status})`);
+      const detail = await detailResp.json();
+      const targetMs = Date.parse((detail.packet && detail.packet.timestamp) || (detail.observations && detail.observations[0] && detail.observations[0].timestamp));
+      if (Number.isNaN(targetMs)) throw new Error("target packet has no usable timestamp");
+
+      const windowSecs = Math.min(120, Math.max(1, parseInt(document.getElementById("sim-replay-window-secs").value, 10) || 30));
+      const windowMs = windowSecs * 1000;
+      const windowStartMs = targetMs - windowMs;
+      setStatus("sim-replay-hash-status", `Fetching real activity within ±${windowSecs}s…`);
+      const { packets, hitCap } = await fetchPacketsAroundTime(targetMs, windowMs);
+      if (packets.length === 0) throw new Error("no real activity found in that window");
+
+      const dir = await ensureNodeDirectory();
+
+      // Collect every node that appears in the window (relay, observer, or
+      // advert origin) and has a known position — those become the sim nodes.
+      const involved = new Set();
+      for (const p of packets) {
+        for (const k of p.resolved_path || []) if (k) involved.add(k.toLowerCase());
+        if (p.observer_id) involved.add(p.observer_id.toLowerCase());
+        const o = originPubkeyOfPacket(p);
+        if (o) involved.add(o);
+      }
+      const pubkeys = [...involved].filter((k) => dir.has(k));
+      if (pubkeys.length < 2) throw new Error("fewer than 2 positioned nodes in the window — nothing to reconstruct");
+      const indexByPubkey = new Map(pubkeys.map((k, i) => [k, i]));
+
+      const nodes = pubkeys.map((k) => {
+        const info = dir.get(k);
+        return { id: randomId(), source: "real", refId: k, label: info.name, lat: info.lat, lon: info.lon, role: info.role, regions: ["*"], address: shortAddressFromPubkey(k) };
+      });
+
+      // Connectivity: the real proven directed edges observed in the window
+      // (origin→relay0, relay_i→relay_{i+1}, last_relay→observer), each a
+      // "this really decoded that" fact, so assigned a strong SNR. This is the
+      // topology phase 7 validated at 100% delivery recall.
+      const edgeMap = new Map();
+      const addEdge = (fromK, toK) => {
+        if (!fromK || !toK) return;
+        const fi = indexByPubkey.get(fromK);
+        const ti = indexByPubkey.get(toK);
+        if (fi == null || ti == null || fi === ti) return;
+        edgeMap.set(`${fi}:${ti}`, { from: fi, to: ti, snrDb: 20 });
+      };
+      for (const p of packets) {
+        const path = (p.resolved_path || []).map((x) => (x || "").toLowerCase());
+        const o = originPubkeyOfPacket(p);
+        if (o && path[0]) addEdge(o, path[0]);
+        for (let i = 0; i + 1 < path.length; i++) addEdge(path[i], path[i + 1]);
+        const obs = (p.observer_id || "").toLowerCase();
+        if (path.length && obs) addEdge(path[path.length - 1], obs);
+      }
+
+      // Blend in the propagation model to fill the gaps a single sparse
+      // window's proven edges miss. Real ScotMesh traffic is low-rate, so the
+      // proven edges alone form a thin tree — but the nodes that COULD hear
+      // each other (whether or not they relayed in this window) are exactly
+      // what makes a flood's own relays contend, which is the thing worth
+      // tuning. Proven edges (real) always win over a modelled one for the
+      // same pair. Terrain can legitimately fail for nodes spread too far for
+      // one grid fetch — fall back to proven-only rather than aborting.
+      let modelAdded = 0;
+      try {
+        setStatus("sim-replay-hash-status", "Filling connectivity gaps with the terrain model…");
+        const modelLinks = await buildLinksFromModel(nodes);
+        for (const l of modelLinks) {
+          const key = `${l.from}:${l.to}`;
+          if (!edgeMap.has(key)) {
+            edgeMap.set(key, l);
+            modelAdded++;
+          }
+        }
+      } catch {
+        /* terrain unavailable / area too large — proven edges alone still work */
+      }
+      const links = [...edgeMap.values()];
+
+      // Senders + background: each real packet becomes a fixed transmission at
+      // its observed second (offset from the window start). Flood traffic
+      // (route 0/1) → tunable flood senders injected at their origin (advert
+      // pubkey, else the first observed relay). Everything else → a fixed
+      // background transmission at its first observed hop, loading the channel
+      // without being routed.
+      const generators = [];
+      let floodCount = 0;
+      let bgCount = 0;
+      let skipped = 0;
+      for (const p of packets) {
+        const tMs = Date.parse(p.timestamp);
+        if (Number.isNaN(tMs)) {
+          skipped++;
+          continue;
+        }
+        const atMs = Math.max(0, tMs - windowStartMs);
+        const frame = parseMeshFrame(p.raw_hex);
+        const path = (p.resolved_path || []).map((x) => (x || "").toLowerCase());
+        const isFlood = p.route_type === 0 || p.route_type === 1;
+        if (isFlood) {
+          const originKey = originPubkeyOfPacket(p) || path[0];
+          const oi = indexByPubkey.get(originKey);
+          if (oi == null) {
+            skipped++;
+            continue;
+          }
+          generators.push({
+            id: randomId(),
+            fixed: true,
+            nodeIndex: oi,
+            atMs,
+            payloadLen: frame ? frame.payloadLen : 20,
+            hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+            // A non-empty region marks the packet as transport-coded (route 0)
+            // for the +4-byte airtime; the reconstructed nodes all hold the
+            // "*" wildcard so this never gates relaying, only sizes airtime.
+            region: frame && frame.hasTransport ? "scoped" : "",
+            background: false,
+            sourceHash: p.hash,
+            isTarget: p.hash === hash,
+          });
+          floodCount++;
+        } else {
+          const firstHop = path[0];
+          const bi = indexByPubkey.get(firstHop);
+          if (bi == null) {
+            skipped++;
+            continue;
+          }
+          generators.push({
+            id: randomId(),
+            fixed: true,
+            background: true,
+            nodeIndex: bi,
+            atMs,
+            frameBytes: p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 24,
+            payloadLen: frame ? frame.payloadLen : 20,
+            hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+            region: frame && frame.hasTransport ? "scoped" : "",
+            sourceHash: p.hash,
+          });
+          bgCount++;
+        }
+      }
+
+      // Commit to the workspace (same shape applySetupData leaves it in).
+      simNodes = nodes;
+      simLinks = links;
+      simMessageGenerators = generators;
+      simNodePrefsOverrides = {};
+      currentSetupId = null;
+      document.getElementById("sim-setup-name").value = `CoreScope ${hash.slice(0, 8)} ±${windowSecs}s`;
+      // A sim window that comfortably covers the whole reconstructed span.
+      document.getElementById("sim-max-time").value = String(2 * windowMs + 5000);
+      cachedGrid = null;
+
+      hideResults();
+      renderNodeList();
+      renderMessageNodeOptions();
+      renderMessageList();
+      redrawNodeMarkers();
+      setStatus("sim-links-status", `${links.length} links (${links.length - modelAdded} real proven + ${modelAdded} terrain-model fill) reconstructed from the window.`);
+      setStatus(
+        "sim-status",
+        `Reconstructed ${nodes.length} repeaters, ${floodCount} flood sender${floodCount === 1 ? "" : "s"}, ${bgCount} background transmission${bgCount === 1 ? "" : "s"} from ±${windowSecs}s around ${hash.slice(0, 8)}.` +
+          (skipped ? ` ${skipped} packet(s) skipped (unpositioned nodes).` : "") +
+          (hitCap ? " Window hit the fetch cap — partial coverage of the oldest edge." : "") +
+          " Now run the simulation, or tweak settings / run the optimizer and re-run to see if the problems shrink."
+      );
+      // Fit the map to the reconstructed nodes so the user sees the episode.
+      if (nodes.length > 0) {
+        const lats = nodes.map((n) => n.lat);
+        const lons = nodes.map((n) => n.lon);
+        map.fitBounds([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]], { padding: [40, 40], maxZoom: 12 });
+      }
+    } catch (err) {
+      setStatus("sim-replay-hash-status", `Reconstruction failed: ${err.message || err}`);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // Every hop of every packet observed in the window, in chronological
   // order — the target packet's own hops are tagged isTarget so playback
   // can highlight them distinctly from the surrounding real traffic.
@@ -5000,6 +5254,7 @@
   document.getElementById("sim-replay").addEventListener("click", startReplay);
   document.getElementById("sim-skip-to-end").addEventListener("click", skipToEnd);
   document.getElementById("sim-replay-hash-go").addEventListener("click", replayFromHash);
+  document.getElementById("sim-reconstruct-episode").addEventListener("click", reconstructEpisodeFromWindow);
   document.getElementById("sim-packet-modal-back").addEventListener("click", goBackPacketModal);
   document.getElementById("sim-bottleneck-replay").addEventListener("click", startRealTimelineReplay);
   document.getElementById("sim-bottleneck-replay-skip").addEventListener("click", skipRealTimelineToEnd);

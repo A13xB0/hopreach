@@ -1,6 +1,29 @@
 # Simulator plan, phase 8 — reproduce and repair real network episodes
 
-Status: **not started**. Plan / handover document, same shape as phases 3–7.
+Status: **work items 1, 2, and the engine + metric parts of 4 built.** You
+can now reconstruct a real CoreScope time window as a fully editable
+simulator setup (real repeaters, blended real-proven + terrain-model
+connectivity, and every real packet as a flood sender with its real payload
+or a fixed background transmission), then run / tweak settings / run the
+optimizer and re-run. Still to build: the whole-window actual-vs-predicted
+comparison with observer-deafness classification (work item 3), the polished
+before/after problem-count delta (rest of work item 4), and the provenance/
+re-roll reproducibility affordances (work item 5).
+
+### Real finding from building it: the live traffic rate is low
+
+Measured while validating the reconstruction: ScotMesh's observed packet
+rate is only ~3 packets/minute (600 packets span 3+ hours), so a ±20–30s
+window genuinely contains ~1 packet. The reconstruction faithfully
+reproduces that — which means the "surrounding traffic contention" angle is
+limited by how much concurrent traffic actually exists. The main *tunable*
+target is therefore a single real flood's own relay-vs-relay contention (the
+broadcast-storm self-collision), which is why the reconstruction blends in
+the terrain model: proven edges alone form a thin tree, but the nodes that
+*could* hear each other are what make a flood's relays contend, and that's
+what settings tuning acts on. A user chasing a real problem picks a packet
+that was under-delivered and reconstructs it to see whether the cause is
+contention (tunable), weak links, or a hop limit.
 
 ## Goal (the user's own words)
 
