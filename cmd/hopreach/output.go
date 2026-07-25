@@ -55,10 +55,15 @@ type featureCollection struct {
 // by calibration.Position) and adds calibrated_lat/lon plus offset/score
 // properties for the frontend's Standard/Calibrated dropdown; nil (the
 // default, calibration disabled) omits those properties entirely.
-// inferredScopes (pubkey, lowercase -> every region with a confirmed
-// observation), if non-nil, adds inferred_scopes wherever a repeater has
-// any — see inferRepeaterScopes.
-func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, inferredScopes map[string][]string, cfg appConfig) []feature {
+// observedScopes (pubkey, lowercase -> every region with a confirmed
+// observation), if non-nil, adds observed_scopes/inferred_scopes wherever a
+// repeater has any — see observeRepeaterScopes. observedUnscoped (pubkey,
+// lowercase -> observed relaying at least one plain unscoped flood) adds
+// observed_unscoped, but only when scopeObservationEnabled — a repeater
+// simply not present because scope observation never ran at all must not
+// be indistinguishable from one genuinely observed-and-absent (see
+// corescope.ObservedUnscoped's own doc comment).
+func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, observedScopes map[string][]string, observedUnscoped map[string]int, scopeObservationEnabled bool, cfg appConfig) []feature {
 	features := make([]feature, 0, len(nodes))
 	for i, n := range nodes {
 		name := "Unnamed repeater"
@@ -85,17 +90,31 @@ func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults 
 			// unless REQUIRED_SCOPE is also set.
 			"default_scope": n.DefaultScope,
 		}
-		if scopes, ok := inferredScopes[strings.ToLower(n.PublicKey)]; ok {
+		if scopes, ok := observedScopes[strings.ToLower(n.PublicKey)]; ok {
 			// Every region this repeater has been observed relaying —
 			// decoded from real packets' own cryptographic transport
-			// codes, see corescope.ScopeInference. A repeater can
+			// codes, see corescope.ObservedScopes. A repeater can
 			// genuinely have more than one region enabled at once, so
 			// this is a list, not a single value. Distinct from
 			// default_scope (self-reported, sparse in practice) — shown
 			// alongside it in the frontend popup, not merged, since they
 			// can legitimately disagree and that's itself useful
 			// information.
+			//
+			// observed_scopes is the correctly-named field (this data is
+			// cryptographically confirmed, not inferred). inferred_scopes
+			// is dual-written alongside it for one release so a frontend
+			// build (or a cached repeaters.geojson) from before this
+			// change doesn't lose the data mid-rollout — drop it a
+			// release after this one ships.
+			props["observed_scopes"] = scopes
 			props["inferred_scopes"] = scopes
+		}
+		if scopeObservationEnabled {
+			// See corescope.ObservedUnscoped: this is "not observed
+			// relaying unscoped traffic in the window", not a confirmed
+			// negative — the frontend should present it that way.
+			props["observed_unscoped"] = corescope.ObservedUnscoped(observedUnscoped[strings.ToLower(n.PublicKey)])
 		}
 		if calResults != nil {
 			cr := calResults[i]

@@ -44,6 +44,52 @@
     },
   };
 
+  // Item 14's own "manage it better" answer: one button that collapses
+  // every collapsible map control on screen at once (whichever ones
+  // actually exist right now — some, like the simulator view options or
+  // the bottleneck key, only exist while their own mode is active), and
+  // restores each to whatever it individually was before, not just a
+  // blanket re-expand (an intentionally-collapsed control, e.g. "Map
+  // display" which defaults closed, should stay closed on restore).
+  // Session-only — deliberately not persisted, this is a momentary "clear
+  // the map" action, not a saved preference the way each control's own
+  // collapsed state already is.
+  let mapDeclutterSnapshot = null;
+
+  function setMapControlHeaderCollapsed(header, collapsed) {
+    const body = header.parentElement && header.parentElement.querySelector(".map-control-body");
+    if (!body) return;
+    const chevron = header.querySelector(".map-control-chevron");
+    body.classList.toggle("hidden", collapsed);
+    if (chevron) chevron.textContent = collapsed ? "▸" : "▾";
+    const key = header.dataset.storageKey;
+    if (key) localStorage.setItem(`hopreach.mapControlCollapsed.${key}`, collapsed ? "1" : "0");
+  }
+
+  function toggleMapDeclutter() {
+    const headers = document.querySelectorAll(".map-control-header");
+    const btn = document.getElementById("map-declutter-toggle");
+    if (mapDeclutterSnapshot === null) {
+      mapDeclutterSnapshot = new Map();
+      headers.forEach((header) => {
+        const body = header.parentElement && header.parentElement.querySelector(".map-control-body");
+        if (!body) return;
+        mapDeclutterSnapshot.set(header, body.classList.contains("hidden"));
+        setMapControlHeaderCollapsed(header, true);
+      });
+      btn.classList.add("active");
+      btn.title = "Restore every map control to how it was";
+    } else {
+      headers.forEach((header) => {
+        setMapControlHeaderCollapsed(header, mapDeclutterSnapshot.has(header) ? mapDeclutterSnapshot.get(header) : false);
+      });
+      mapDeclutterSnapshot = null;
+      btn.classList.remove("active");
+      btn.title = "Collapse (or restore) every map control at once";
+    }
+  }
+  document.getElementById("map-declutter-toggle").addEventListener("click", toggleMapDeclutter);
+
   const baseLayers = {
     // _nolabels (not _all): place names/roads are drawn separately, in the
     // "labels" pane below, which sits *above* the coverage overlay — see
@@ -71,7 +117,7 @@
   const initialBasemap = baseLayers[savedBasemap] ? savedBasemap : "Dark";
   baseLayers[initialBasemap].addTo(map);
 
-  const layersControl = L.control.layers(baseLayers, {}, { collapsed: false, position: "topright" }).addTo(map);
+  const layersControl = L.control.layers(baseLayers, {}, { collapsed: true, position: "topright" }).addTo(map);
   map.on("baselayerchange", (e) => localStorage.setItem(BASEMAP_STORAGE_KEY, e.name));
 
   // Roads and place names, drawn in their own panes above the coverage
@@ -213,14 +259,16 @@
 
   // A repeater's real scope(s) for filtering/coverage purposes — a real
   // MeshCore repeater can have more than one region enabled at once, so
-  // this is a set, not a single value. inferred_scopes (decoded from real
+  // this is a set, not a single value. observed_scopes (decoded from real
   // packets' own cryptographic transport codes — see
-  // corescope.scope_inference) is the reliable signal; default_scope
-  // (self-reported, sparse) is folded in too in case it names a region
-  // inferred_scopes' own packet window happened to miss. Empty array
-  // means no scope is known at all.
+  // corescope.ObservedScopes) is the reliable signal; falls back to the
+  // older inferred_scopes property for one release while older cached
+  // repeaters.geojson data rolls over (the server dual-writes both — see
+  // output.go's buildFeatures). default_scope (self-reported, sparse) is
+  // folded in too in case it names a region the observation window missed.
+  // Empty array means no scope is known at all.
   function repeaterScopesOf(props) {
-    const scopes = new Set(props.inferred_scopes || []);
+    const scopes = new Set(props.observed_scopes || props.inferred_scopes || []);
     if (props.default_scope) scopes.add(props.default_scope);
     return Array.from(scopes);
   }
@@ -404,23 +452,24 @@
   }
 
   // default_scope (self-reported, often absent — see the map's own scope
-  // filter above) and inferred_scopes (every region decoded from this
+  // filter above) and observed_scopes (every region decoded from this
   // repeater's own real packets' cryptographic transport codes —
   // MeshCore's actual region-scoping mechanism, not a guess from channel
-  // names — see corescope.scope_inference, off by default) are shown
+  // names — see corescope.ObservedScopes, off by default) are shown
   // separately, not merged: they can legitimately disagree, and that
   // disagreement is itself useful information, not noise to hide.
-  // inferred_scopes can be more than one region — a real repeater can
-  // have several enabled at once.
+  // observed_scopes can be more than one region — a real repeater can have
+  // several enabled at once. Falls back to the older inferred_scopes
+  // property for one release (see repeaterScopesOf's own comment).
   function scopeRowsHtml(props) {
-    const inferred = props.inferred_scopes || [];
-    if (!props.default_scope && inferred.length === 0) return "";
+    const observed = props.observed_scopes || props.inferred_scopes || [];
+    if (!props.default_scope && observed.length === 0) return "";
     const rows = [];
     if (props.default_scope) {
       rows.push(`<div class="popup-row"><span>Scope (reported)</span><span>${escapeHtml(props.default_scope)}</span></div>`);
     }
-    if (inferred.length > 0) {
-      rows.push(`<div class="popup-row"><span>Scope${inferred.length > 1 ? "s" : ""} (observed)</span><span>${escapeHtml(inferred.join(", "))}</span></div>`);
+    if (observed.length > 0) {
+      rows.push(`<div class="popup-row"><span>Scope${observed.length > 1 ? "s" : ""} (observed)</span><span>${escapeHtml(observed.join(", "))}</span></div>`);
     }
     return rows.join("");
   }
@@ -465,6 +514,12 @@
     legendControl = L.control({ position: "bottomright" });
     legendControl.onAdd = function () {
       const div = L.DomUtil.create("div", "legend");
+      // Item 14 — title/bar/labels/opacity stay always visible (the part
+      // anyone actually needs at a glance); the explanatory note goes
+      // behind its own small disclosure, collapsed by default (unlike the
+      // shared map-control-header/collapsibleHtml default of expanded —
+      // this one specific control wants the opposite starting state).
+      const noteCollapsed = localStorage.getItem("hopreach.mapControlCollapsed.legend-note") !== "0";
       div.innerHTML = `
         <div class="legend-title">Estimated coverage (${freqMHz} MHz)</div>
         <div class="legend-bar"></div>
@@ -473,13 +528,20 @@
           <label for="coverage-opacity">Opacity</label>
           <input type="range" id="coverage-opacity" min="0" max="100" value="100">
         </div>
-        <div class="legend-note">Terrain-aware estimate (free-space path loss + knife-edge diffraction over real elevation data). Best server per point — not foliage/building-aware.</div>
+        <div class="map-control-header" data-storage-key="legend-note">
+          <span>Details</span>
+          <span class="map-control-chevron">${noteCollapsed ? "▸" : "▾"}</span>
+        </div>
+        <div class="map-control-body${noteCollapsed ? " hidden" : ""}">
+          <div class="legend-note">Terrain-aware estimate (free-space path loss + knife-edge diffraction over real elevation data). Best server per point — not foliage/building-aware.</div>
+        </div>
       `;
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
       div.querySelector("#coverage-opacity").addEventListener("input", (e) => {
         coverageTileOverlays.forEach((o) => o.setOpacity(e.target.value / 100));
       });
+      window.HopReachMapControls.wireCollapsible(div);
       return div;
     };
     legendControl.addTo(map);

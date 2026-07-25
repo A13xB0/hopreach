@@ -11,15 +11,47 @@
 importScripts("wasm_exec.js", "wasm-bridge.js", "meshsim-bridge.js");
 
 self.onmessage = async (e) => {
-  if (e.data.kind !== "suggest") return;
-  const { generation, tuneRequest } = e.data;
-  try {
-    await MeshSim.ready;
-    const result = MeshSim.suggest(tuneRequest, (done, total) => {
-      self.postMessage({ generation, type: "suggest-progress", done, total });
-    });
-    self.postMessage({ generation, type: "suggest-result", result });
-  } catch (err) {
-    self.postMessage({ generation, type: "suggest-error", message: err.message || String(err) });
+  const { kind, generation } = e.data;
+  if (kind === "suggest") {
+    const { tuneRequest } = e.data;
+    try {
+      await MeshSim.ready;
+      const result = MeshSim.suggest(tuneRequest, (done, total) => {
+        self.postMessage({ generation, type: "suggest-progress", done, total });
+      });
+      self.postMessage({ generation, type: "suggest-result", result });
+    } catch (err) {
+      self.postMessage({ generation, type: "suggest-error", message: err.message || String(err) });
+    }
+    return;
+  }
+  if (kind === "stress") {
+    // Item 15b's offered-load sweep — same off-main-thread reasoning as
+    // "suggest" above: each swept level is its own batch of full
+    // simulation runs, easily seconds of CPU work across a real sweep.
+    const { stressRequest } = e.data;
+    try {
+      await MeshSim.ready;
+      const result = MeshSim.stress(stressRequest, (done, total) => {
+        self.postMessage({ generation, type: "stress-progress", done, total });
+      });
+      self.postMessage({ generation, type: "stress-result", result });
+    } catch (err) {
+      self.postMessage({ generation, type: "stress-error", message: err.message || String(err) });
+    }
+    return;
+  }
+  if (kind === "suggest-policy") {
+    // Item 15c's composite-policy search — see MeshSim.suggestPolicy.
+    const { policyTuneRequest } = e.data;
+    try {
+      await MeshSim.ready;
+      const result = MeshSim.suggestPolicy(policyTuneRequest, (done, total) => {
+        self.postMessage({ generation, type: "suggest-policy-progress", done, total });
+      });
+      self.postMessage({ generation, type: "suggest-policy-result", result });
+    } catch (err) {
+      self.postMessage({ generation, type: "suggest-policy-error", message: err.message || String(err) });
+    }
   }
 };

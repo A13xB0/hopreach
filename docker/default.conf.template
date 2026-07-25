@@ -23,13 +23,34 @@ server {
         index  index.html index.htm;
     }
 
+    # No Cache-Control was set here at all, which left browsers free to use
+    # their own heuristic freshness lifetime for .js/.wasm — no fixed
+    # duration, but commonly hours, based on each file's own Last-Modified
+    # age. Every JS/WASM file here is baked into the image at build time
+    # with no cache-busting hash in its filename, so a browser tab open
+    # (or even just reopened without a hard refresh) across a redeploy
+    # could keep running stale JS silently — no error, just old code
+    # quietly still handling new server-side behaviour, exactly the
+    # symptom that motivated this: a Web Worker built before a given
+    # release, that simply doesn't recognise a message kind the current
+    # main-thread JS started sending, drops it with no error at all.
+    # no-cache (NOT no-store) forces a revalidation request on every load
+    # rather than disabling caching outright — nginx still answers with a
+    # cheap 304 when the file genuinely hasn't changed, so this costs a
+    # round-trip, not a re-download, on the common case.
+    location ~ \.(js|wasm)$ {
+        root          /usr/share/nginx/html;
+        add_header    Cache-Control "no-cache";
+    }
+
     # application/wasm predates some nginx builds' bundled mime.types —
     # set it explicitly so the browser's WebAssembly.instantiateStreaming
     # (which validates Content-Type) doesn't have to fall back to the
     # slower arrayBuffer path.
     location ~ \.wasm$ {
-        root         /usr/share/nginx/html;
-        default_type application/wasm;
+        root          /usr/share/nginx/html;
+        default_type  application/wasm;
+        add_header    Cache-Control "no-cache";
     }
 
     error_page   500 502 503 504  /50x.html;

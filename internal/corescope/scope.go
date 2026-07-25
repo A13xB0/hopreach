@@ -44,12 +44,20 @@ type scopeStatsResponse struct {
 	} `json:"byRegion"`
 }
 
-// MeshCore route types that carry the 4-byte transport_codes field this
-// package decodes — see decodePacketRegion. Every other route type (plain
-// flood, plain direct) carries no per-packet region information at all.
+// MeshCore's own route-type values (src/Packet.h) — the low 2 bits of a
+// packet's header byte. routeTypeFlood/routeTypeDirect carry no
+// per-packet region information at all (no transport_codes field);
+// routeTypeTransportFlood/routeTypeTransportDirect do, and that's what
+// decodePacketRegion decodes. routeTypeFlood specifically is what
+// observeUnscopedParticipation below uses to tell "this repeater relays
+// ordinary unscoped flood traffic" from "this repeater relays scoped
+// traffic under some region we do/don't recognize" — a genuinely
+// different fact, not a fallback for when scope decoding fails.
 const (
-	routeTypeTransportFlood  = 0
-	routeTypeTransportDirect = 3
+	routeTypeTransportFlood  = 0x00
+	routeTypeFlood           = 0x01
+	routeTypeDirect          = 0x02
+	routeTypeTransportDirect = 0x03
 )
 
 // FetchAllNodes fetches every node CoreScope knows about, any role — not
@@ -198,45 +206,60 @@ func decodePacketRegion(rawHex string, candidateKeys map[string][16]byte) (regio
 	return "", false
 }
 
+// Participation is one walk of GET /api/packets' real observed result —
+// see FetchRegionParticipation. Scoped is pubkey (lowercase) -> region name
+// -> observed count, exactly as before this field was split out. Unscoped
+// is pubkey (lowercase) -> how many plain, unscoped floods (routeTypeFlood
+// — no transport code, so nothing to decode a region from) that repeater
+// was observed relaying in the same window. A repeater absent from
+// Unscoped was simply never observed relaying unscoped traffic in the
+// window — see ObservedUnscoped's own doc comment for why that's a
+// reasonable (if not certain) basis for assuming it's disabled there,
+// unlike Scoped's cryptographically-confirmed observations.
+type Participation struct {
+	Scoped   map[string]map[string]int
+	Unscoped map[string]int
+}
+
 // FetchRegionParticipation walks CoreScope's GET /api/packets newest-first
 // (see the package doc on sort order this relies on), stopping once it
-// reaches packets older than since, and tallies which real region(s) each
-// resolvable repeater appears in as a relay-path participant — decoded
-// straight from each packet's own transport code (see decodePacketRegion),
-// not any secondhand classification. Returns pubkey (lowercase) -> region
-// name -> observed count.
+// reaches packets older than since, and tallies both which real region(s)
+// each resolvable repeater appears in as a relay-path participant —
+// decoded straight from each packet's own transport code (see
+// decodePacketRegion), not any secondhand classification — and which
+// repeaters it separately observes relaying plain, unscoped flood traffic.
 //
 // A repeater's own self-reported default_scope is too sparse to build a
 // map from on its own (confirmed against production: empty for ~76% of
 // real repeaters) — this observes real relay behavior instead.
-func (c *Client) FetchRegionParticipation(ctx context.Context, since time.Time, nodes []Node, regionNames []string) (map[string]map[string]int, error) {
+func (c *Client) FetchRegionParticipation(ctx context.Context, since time.Time, nodes []Node, regionNames []string) (Participation, error) {
 	idx := newPrefixIndex(nodes)
 	candidateKeys := make(map[string][16]byte, len(regionNames))
 	for _, name := range regionNames {
 		candidateKeys[name] = regionKey(name)
 	}
 
-	counts := make(map[string]map[string]int)
+	result := Participation{Scoped: make(map[string]map[string]int), Unscoped: make(map[string]int)}
 	offset := 0
 	for {
 		url := fmt.Sprintf("%s/api/packets?limit=%d&offset=%d", c.BaseURL, packetPageLimit, offset)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return nil, fmt.Errorf("corescope: building request for %s: %w", url, err)
+			return Participation{}, fmt.Errorf("corescope: building request for %s: %w", url, err)
 		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("corescope: fetching %s: %w", url, err)
+			return Participation{}, fmt.Errorf("corescope: fetching %s: %w", url, err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, fmt.Errorf("corescope: fetching %s: unexpected status %d", url, resp.StatusCode)
+			return Participation{}, fmt.Errorf("corescope: fetching %s: unexpected status %d", url, resp.StatusCode)
 		}
 		var page packetsResponse
 		err = json.NewDecoder(resp.Body).Decode(&page)
 		resp.Body.Close()
 		if err != nil {
-			return nil, fmt.Errorf("corescope: decoding response from %s: %w", url, err)
+			return Participation{}, fmt.Errorf("corescope: decoding response from %s: %w", url, err)
 		}
 		if len(page.Packets) == 0 {
 			break
@@ -252,14 +275,14 @@ func (c *Client) FetchRegionParticipation(ctx context.Context, since time.Time, 
 				reachedWindowStart = true
 				break // newest-first: everything from here on is even older
 			}
-			tallyPacket(counts, idx, candidateKeys, p)
+			tallyPacket(result, idx, candidateKeys, p)
 		}
 		if reachedWindowStart || len(page.Packets) < packetPageLimit {
 			break
 		}
 		offset += len(page.Packets)
 	}
-	return counts, nil
+	return result, nil
 }
 
 // prefixIndex resolves a short hop-path prefix (as recorded in a packet's
@@ -298,20 +321,54 @@ func (idx prefixIndex) resolve(prefix string) (string, bool) {
 	return match, match != ""
 }
 
-func tallyPacket(counts map[string]map[string]int, idx prefixIndex, candidateKeys map[string][16]byte, p packetSummary) {
-	region, ok := decodePacketRegion(p.RawHex, candidateKeys)
+// packetRouteType extracts just a packet's route-type header bits (the low
+// 2 bits of the first byte — see the routeType* constants) without
+// attempting a region decode, which needs candidate keys this doesn't have
+// a reason to require. Cheap enough (one hex decode, one byte) that
+// duplicating this much of decodePacketRegion's own parsing isn't worth
+// merging the two — decodePacketRegion stays exactly as verified against
+// real production data.
+func packetRouteType(rawHex string) (routeType int, ok bool) {
+	raw, err := hex.DecodeString(rawHex)
+	if err != nil || len(raw) < 1 {
+		return 0, false
+	}
+	return int(raw[0] & 0x03), true
+}
+
+func tallyPacket(result Participation, idx prefixIndex, candidateKeys map[string][16]byte, p packetSummary) {
+	routeType, ok := packetRouteType(p.RawHex)
 	if !ok {
 		return
 	}
-	for _, hop := range p.ParsedPath {
-		pubkey, ok := idx.resolve(hop)
+	switch routeType {
+	case routeTypeTransportFlood, routeTypeTransportDirect:
+		region, ok := decodePacketRegion(p.RawHex, candidateKeys)
 		if !ok {
-			continue
+			return
 		}
-		if counts[pubkey] == nil {
-			counts[pubkey] = make(map[string]int)
+		for _, hop := range p.ParsedPath {
+			pubkey, ok := idx.resolve(hop)
+			if !ok {
+				continue
+			}
+			if result.Scoped[pubkey] == nil {
+				result.Scoped[pubkey] = make(map[string]int)
+			}
+			result.Scoped[pubkey][region]++
 		}
-		counts[pubkey][region]++
+	case routeTypeFlood:
+		// No transport code to decode — but a repeater appearing in this
+		// plain unscoped flood's own relay path proves it does relay
+		// unscoped traffic, regardless of what regions (if any) it also
+		// holds keys for.
+		for _, hop := range p.ParsedPath {
+			pubkey, ok := idx.resolve(hop)
+			if !ok {
+				continue
+			}
+			result.Unscoped[pubkey]++
+		}
 	}
 }
 
@@ -336,4 +393,19 @@ func ObservedScopes(counts map[string]int) []string {
 	}
 	sort.Strings(regions)
 	return regions
+}
+
+// ObservedUnscoped reports whether count (this repeater's own entry in
+// Participation.Unscoped, 0 if absent) records at least one observation of
+// it relaying a plain, unscoped flood. Unlike ObservedScopes (a definite,
+// cryptographically-confirmed set — every entry either matched an HMAC or
+// it didn't), a false here is an ABSENCE of evidence, not evidence of
+// absence: a repeater that simply carried no unscoped traffic during the
+// observation window looks identical to one that has unscoped floods
+// genuinely disabled. Widening the window
+// (corescope.scope_observation.window_hours) tightens this. Callers
+// should present a false result as "not observed relaying unscoped
+// traffic in this window," not "confirmed to have it disabled."
+func ObservedUnscoped(count int) bool {
+	return count > 0
 }

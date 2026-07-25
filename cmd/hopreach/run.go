@@ -47,59 +47,60 @@ func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig)
 	return selected
 }
 
-// inferRepeaterScopes fetches CoreScope's full node directory, its list of
+// observeRepeaterScopes fetches CoreScope's full node directory, its list of
 // real known region names, and a real window's worth of packet traffic,
-// then resolves each of the given repeaters' real region(s) — see
+// then resolves each of the given repeaters' real region(s) and whether
+// each has been observed relaying unscoped traffic — see
 // internal/corescope's FetchKnownRegionNames/FetchRegionParticipation doc
 // comments for why this decodes each packet's own cryptographic transport
 // code (MeshCore's actual region-scoping mechanism) rather than trusting
 // each node's own (frequently absent) self-reported default_scope, or
 // (an earlier, incorrect version of this feature) a packet's channel name,
 // which is a related but distinct concept. A repeater can genuinely have
-// more than one region enabled at once, so this returns every region with
-// at least one confirmed observation, not just the single most-observed
-// one — see corescope.ObservedScopes. Also returns the real, currently-known
-// region name list itself (regardless of whether any repeater matched one)
-// — the caller uses this to know which per-scope coverage rasters to
-// generate, see the "computing_scope_coverage" block in run(). Errors are
-// logged and treated as "no scope data available" rather than fatal: this
-// is an enrichment nothing downstream depends on.
-func inferRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) (scopes map[string][]string, regionNames []string) {
+// more than one region enabled at once, so scopes returns every region
+// with at least one confirmed observation, not just the single
+// most-observed one — see corescope.ObservedScopes. Also returns the real,
+// currently-known region name list itself (regardless of whether any
+// repeater matched one) — the caller uses this to know which per-scope
+// coverage rasters to generate, see the "computing_scope_coverage" block in
+// run(). Errors are logged and treated as "no scope data available" rather
+// than fatal: this is an enrichment nothing downstream depends on.
+func observeRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) (scopes map[string][]string, unscopedCounts map[string]int, regionNames []string) {
 	allNodes, err := client.FetchAllNodes(ctx)
 	if err != nil {
-		log.Printf("scope inference: fetching node directory failed, skipping: %v", err)
-		return nil, nil
+		log.Printf("scope observation: fetching node directory failed, skipping: %v", err)
+		return nil, nil, nil
 	}
 	regionNames, err = client.FetchKnownRegionNames(ctx)
 	if err != nil {
-		log.Printf("scope inference: fetching known region names failed, skipping: %v", err)
-		return nil, nil
+		log.Printf("scope observation: fetching known region names failed, skipping: %v", err)
+		return nil, nil, nil
 	}
 	since := time.Now().Add(-time.Duration(windowHours * float64(time.Hour)))
-	counts, err := client.FetchRegionParticipation(ctx, since, allNodes, regionNames)
+	participation, err := client.FetchRegionParticipation(ctx, since, allNodes, regionNames)
 	if err != nil {
-		log.Printf("scope inference: fetching region participation failed, skipping: %v", err)
-		return nil, regionNames
+		log.Printf("scope observation: fetching region participation failed, skipping: %v", err)
+		return nil, nil, regionNames
 	}
 	scopes = make(map[string][]string, len(selected))
 	for _, n := range selected {
-		observed := corescope.ObservedScopes(counts[strings.ToLower(n.PublicKey)])
+		observed := corescope.ObservedScopes(participation.Scoped[strings.ToLower(n.PublicKey)])
 		if len(observed) > 0 {
 			scopes[strings.ToLower(n.PublicKey)] = observed
 		}
 	}
-	return scopes, regionNames
+	return scopes, participation.Unscoped, regionNames
 }
 
 // repeaterInScope reports whether n is a member of region scopeName, via
-// either its inferred scope set (real, cryptographically confirmed
-// observations — see inferRepeaterScopes) or its own self-reported
+// either its observed scope set (real, cryptographically confirmed
+// observations — see observeRepeaterScopes) or its own self-reported
 // default_scope — the same union public/app.js's repeaterScopesOf uses
 // client-side, so "which repeaters are in this scope" means the same thing
 // in the per-scope coverage this generates as it does in the map's own
 // scope-filter checkboxes and popups.
-func repeaterInScope(n corescope.Node, scopeName string, inferredScopes map[string][]string) bool {
-	for _, s := range inferredScopes[strings.ToLower(n.PublicKey)] {
+func repeaterInScope(n corescope.Node, scopeName string, observedScopes map[string][]string) bool {
+	for _, s := range observedScopes[strings.ToLower(n.PublicKey)] {
 		if s == scopeName {
 			return true
 		}
@@ -412,24 +413,26 @@ func run(cfg appConfig) (err error) {
 		sites = make([]propagation.Site, len(selected))
 	}
 
-	// Optional: real per-repeater region(s), decoded from each packet's own
-	// cryptographic transport code (see internal/corescope's
-	// FetchRegionParticipation/ObservedScopes doc comments) — a repeater
-	// can genuinely have more than one region enabled at once, so this is
-	// a set per repeater, not a single value. A failure here degrades
-	// gracefully — every repeater just goes without inferred_scopes, same
-	// as if the feature were disabled — rather than failing the whole run
-	// over what's fundamentally an enrichment, not something anything
+	// Optional: real per-repeater region(s) and unscoped-relay observation,
+	// decoded from each packet's own cryptographic transport code (see
+	// internal/corescope's FetchRegionParticipation/ObservedScopes/
+	// ObservedUnscoped doc comments) — a repeater can genuinely have more
+	// than one region enabled at once, so this is a set per repeater, not
+	// a single value. A failure here degrades gracefully — every repeater
+	// just goes without observed_scopes/observed_unscoped, same as if the
+	// feature were disabled — rather than failing the whole run over
+	// what's fundamentally an enrichment, not something anything
 	// downstream depends on.
-	var inferredScopes map[string][]string
+	var observedScopes map[string][]string
+	var observedUnscopedCounts map[string]int
 	var knownRegionNames []string
-	if cfg.scopeInferenceEnabled {
-		prog.Update("inferring_scopes", 0, 1, "Inferring repeater regions from CoreScope packet transport codes")
-		inferredScopes, knownRegionNames = inferRepeaterScopes(ctx, client, selected, cfg.scopeInferenceWindowHours)
-		prog.Update("inferring_scopes", 1, 1, fmt.Sprintf("Inferred region(s) for %d/%d repeaters", len(inferredScopes), len(selected)))
+	if cfg.scopeObservationEnabled {
+		prog.Update("observing_scopes", 0, 1, "Observing repeater regions from CoreScope packet transport codes")
+		observedScopes, observedUnscopedCounts, knownRegionNames = observeRepeaterScopes(ctx, client, selected, cfg.scopeObservationWindowHours)
+		prog.Update("observing_scopes", 1, 1, fmt.Sprintf("Observed region(s) for %d/%d repeaters", len(observedScopes), len(selected)))
 	}
 
-	features := buildFeatures(selected, sites, calResults, inferredScopes, cfg)
+	features := buildFeatures(selected, sites, calResults, observedScopes, observedUnscopedCounts, cfg.scopeObservationEnabled, cfg)
 	fc := featureCollection{Type: "FeatureCollection", Features: features}
 
 	counts := map[string]int{"active": 0, "degraded": 0, "silent": 0}
@@ -556,18 +559,18 @@ func run(cfg appConfig) (err error) {
 
 		// Per-scope standard-tier coverage: the same model as the "standard"
 		// tier above, but each region gets its own raster computed from only
-		// the repeaters actually in that region (inferred_scopes, falling
+		// the repeaters actually in that region (observed_scopes, falling
 		// back to default_scope — see repeaterInScope), so e.g. "#fif"'s
 		// raster shows where Fife's own repeaters actually reach, not
 		// diluted by every other region's. Reuses the whole-region grid
 		// already loaded above rather than refetching terrain per scope —
 		// each scope's own bounds (padded rangeKm around just its own
 		// repeaters, not the whole region) is a subset of what's already
-		// resident. Gated on scope inference being enabled: without it,
+		// resident. Gated on scope observation being enabled: without it,
 		// there's no reliable per-repeater region membership at scale (see
-		// inferRepeaterScopes — default_scope alone is sparse in practice),
+		// observeRepeaterScopes — default_scope alone is sparse in practice),
 		// so there'd be nothing meaningful to split by.
-		if cfg.scopeInferenceEnabled && len(knownRegionNames) > 0 {
+		if cfg.scopeObservationEnabled && len(knownRegionNames) > 0 {
 			if !cfg.standardRequiresGPU || engine.Available() {
 				tierStart := time.Now()
 				for i, scopeName := range knownRegionNames {
@@ -576,7 +579,7 @@ func run(cfg appConfig) (err error) {
 					var scopeSites []propagation.Site
 					var scopePoints []coverage.Point
 					for j, n := range selected {
-						if repeaterInScope(n, scopeName, inferredScopes) {
+						if repeaterInScope(n, scopeName, observedScopes) {
 							scopeSites = append(scopeSites, sites[j])
 							scopePoints = append(scopePoints, coverage.Point{Lat: *n.Lat, Lon: *n.Lon})
 						}

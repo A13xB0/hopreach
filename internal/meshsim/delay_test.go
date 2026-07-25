@@ -79,3 +79,18 @@ func TestRxDelayMsLowerScoreMeansLongerDelay(t *testing.T) {
 		t.Errorf("a weak-signal reception's delay (%d) should exceed a strong-signal one's (%d)", weakSignal, strongSignal)
 	}
 }
+
+// TestRxDelayMsClampsAtMaxRxDelayMs is the direct regression test for
+// Finding B in docs/SIMULATOR_PLAN_PHASE2.md item 15: real firmware never
+// holds a reception back longer than MAX_RX_DELAY_MILLIS (32s), regardless
+// of how extreme rxDelayBase or airtime are — this was declared but never
+// actually applied.
+func TestRxDelayMsClampsAtMaxRxDelayMs(t *testing.T) {
+	// A deliberately extreme combination — high rxDelayBase, worst-case
+	// score, long airtime — that without the clamp would compute a delay
+	// far past 32s.
+	got := RxDelayMs(1000, 0.0, 30_000)
+	if got != MaxRxDelayMs {
+		t.Errorf("RxDelayMs with an extreme rxDelayBase/airtime = %dms, want clamped to MaxRxDelayMs (%dms)", got, MaxRxDelayMs)
+	}
+}

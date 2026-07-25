@@ -77,7 +77,65 @@ func jsSimSuggest(this js.Value, args []js.Value) any {
 	return string(out)
 }
 
+// jsSimStress(requestJSON[, onProgress]) -> resultJSON. requestJSON decodes
+// directly to a meshsim.StressRequest; resultJSON encodes a
+// meshsim.StressResult. onProgress, if given and callable, is invoked as
+// onProgress(done, total) after each swept load level — same shape and
+// same reason as jsSimSuggest's own progress callback.
+func jsSimStress(this js.Value, args []js.Value) any {
+	var req meshsim.StressRequest
+	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
+		return jsErrorResult(err)
+	}
+
+	var progress func(done, total int)
+	if len(args) > 1 && args[1].Type() == js.TypeFunction {
+		onProgress := args[1]
+		progress = func(done, total int) {
+			onProgress.Invoke(done, total)
+		}
+	}
+
+	result := meshsim.StressTest(req, progress)
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return jsErrorResult(err)
+	}
+	return string(out)
+}
+
+// jsSimSuggestPolicy(requestJSON[, onProgress]) -> resultJSON. requestJSON
+// decodes directly to a meshsim.PolicyTuneRequest; resultJSON encodes a
+// meshsim.PolicyTuneResult. onProgress works the same as jsSimSuggest's —
+// see meshsim.SuggestPolicy's own doc comment for how this search differs
+// from the older jsSimSuggest/meshsim.Suggest (item 15c).
+func jsSimSuggestPolicy(this js.Value, args []js.Value) any {
+	var req meshsim.PolicyTuneRequest
+	if err := json.Unmarshal([]byte(args[0].String()), &req); err != nil {
+		return jsErrorResult(err)
+	}
+
+	var progress func(done, total int)
+	if len(args) > 1 && args[1].Type() == js.TypeFunction {
+		onProgress := args[1]
+		progress = func(done, total int) {
+			onProgress.Invoke(done, total)
+		}
+	}
+
+	result := meshsim.SuggestPolicy(req, progress)
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return jsErrorResult(err)
+	}
+	return string(out)
+}
+
 func registerMeshsim(api js.Value) {
 	api.Set("simRun", js.FuncOf(jsSimRun))
 	api.Set("simSuggest", js.FuncOf(jsSimSuggest))
+	api.Set("simStress", js.FuncOf(jsSimStress))
+	api.Set("simSuggestPolicy", js.FuncOf(jsSimSuggestPolicy))
 }

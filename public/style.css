@@ -313,6 +313,11 @@ header .subtitle {
   font-size: 0.75rem;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
   width: 240px;
+  /* Now docked bottom-left (see ensureSimPlaybackControl) — #map-tools
+     (the Plan/Simulate/Companion pin buttons) occupies that same corner at
+     bottom:0.75rem, so this needs enough clearance to sit above them
+     rather than overlapping. */
+  margin-bottom: 3.25rem;
 }
 .sim-playback-buttons { margin-bottom: 0.4rem; }
 .sim-playback-buttons button {
@@ -452,6 +457,9 @@ header .subtitle {
 #companion-pin-toggle.active {
   background: #f97316;
 }
+#map-declutter-toggle.active {
+  background: #f97316;
+}
 
 .alpha-badge {
   display: inline-block;
@@ -541,6 +549,29 @@ header .subtitle {
   background: linear-gradient(90deg, #f97316, #22c55e);
   transition: width 0.2s ease;
 }
+/* Item 15b's own progress bar — same shape as #sim-predict-progress above. */
+#sim-stress-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+#sim-stress-progress.hidden { display: none; }
+#sim-stress-progress-text { white-space: nowrap; flex-shrink: 0; }
+#sim-stress-progress .progress-track { flex: 1; }
+#sim-stress-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #f97316, #22c55e);
+  transition: width 0.2s ease;
+}
+/* Item 15c's policy-search results section within #sim-predictions-modal —
+   hidden until a policy search has actually run, so the existing
+   single-rule "Predict settings" output isn't cluttered for anyone not
+   using the newer search. */
+#sim-policy-section.hidden { display: none; }
 
 /* The four toolbar buttons that open a results modal (Results, Predicted
    settings, Bottleneck analysis, Rankings) start with class="hidden" and
@@ -722,6 +753,39 @@ header .subtitle {
 }
 .plan-item-label { font-weight: 600; }
 .plan-item-sub { color: var(--text-muted); font-size: 0.68rem; flex: 1; }
+
+/* Shown instead of rendering every row of a long list up front (item 10E —
+   a dense run can produce thousands of receptions) — see
+   LONG_LIST_ROW_CAP/appendShowAllButton in simulator.js. */
+.sim-show-all-btn {
+  align-self: center;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.8rem;
+}
+
+/* item 10C — discrete labelled figures replacing a run-on summary sentence
+   (see renderStatStrip in simulator.js), so the number that matters reads
+   at a glance instead of competing with the rest of the sentence. */
+.sim-stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.sim-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: rgba(255,255,255,0.04);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  min-width: 4.5rem;
+}
+.sim-stat-value { font-size: 1.05rem; font-weight: 700; line-height: 1.1; }
+.sim-stat-label { font-size: 0.65rem; color: var(--text-muted); }
+.sim-stat.sim-stat-bad .sim-stat-value { color: #f87171; }
+.sim-stat.sim-stat-bad { background: rgba(248,113,113,0.12); }
 .plan-item-actions { display: flex; gap: 0.2rem; }
 .plan-item-actions button {
   padding: 0.1rem 0.35rem;
@@ -891,6 +955,9 @@ header .subtitle {
 .sim-node-badge.sim-badge-real { background: rgba(56,189,248,0.18); color: #38bdf8; }
 .sim-node-badge.sim-badge-companion { background: rgba(251,146,60,0.18); color: #fb923c; }
 .sim-node-badge.sim-badge-region { background: rgba(168,85,247,0.18); color: #c084fc; }
+.sim-node-badge.sim-badge-direct { background: rgba(250,204,21,0.18); color: #facc15; }
+/* Item 17 — a sender's own configured path-hash size (1-3 bytes). */
+.sim-node-badge.sim-badge-hashsize { background: rgba(148,163,184,0.18); color: #94a3b8; }
 
 #sim-message-cancel-edit.hidden { display: none; }
 #sim-setup-import-file.hidden { display: none; }
@@ -968,7 +1035,11 @@ header .subtitle {
   font-size: 0.68rem;
   color: var(--text-muted);
 }
-.sim-packet-context, .sim-packet-time, .sim-packet-hop { white-space: nowrap; }
+/* .sim-packet-context deliberately wraps (unlike time/hop, always short) —
+   item 12's relay-link suffix ("⤴ relaying what arrived at 1,240ms") can
+   push it past a single line at narrower widths. */
+.sim-packet-context { white-space: normal; }
+.sim-packet-time, .sim-packet-hop { white-space: nowrap; }
 
 .sim-packet-reason {
   margin-left: auto;
@@ -983,6 +1054,11 @@ header .subtitle {
 .sim-packet-reason.sim-reason-received { background: rgba(56,189,248,0.18); color: #38bdf8; }
 .sim-packet-reason.sim-reason-dropped { background: rgba(250,204,21,0.18); color: #facc15; }
 .sim-packet-reason.sim-reason-collided { background: rgba(248,113,113,0.18); color: #f87171; }
+.sim-packet-reason.sim-reason-captured { background: rgba(167,139,250,0.18); color: #a78bfa; }
+/* tx_busy (item 13) — a miss, not a collision (nothing was ever heard) and
+   not an active drop decision — deliberately distinct from both the red
+   sim-reason-collided and the yellow sim-reason-dropped. */
+.sim-packet-reason.sim-reason-missed { background: rgba(148,163,184,0.20); color: #94a3b8; }
 
 .sim-txrx-badge {
   font-size: 0.6rem;
@@ -994,6 +1070,26 @@ header .subtitle {
 }
 .sim-txrx-badge.sim-txrx-tx { background: rgba(168,85,247,0.22); color: #c084fc; }
 .sim-txrx-badge.sim-txrx-rx { background: rgba(56,189,248,0.18); color: #38bdf8; }
+/* Distinct from plain TX (the origin's own first send) — a repeater's own
+   re-transmission of someone else's packet (item 12). */
+.sim-txrx-badge.sim-txrx-relay { background: rgba(74,222,128,0.20); color: #4ade80; }
+
+/* item 12 — linking an RX row to the relay TX it caused (or vice versa).
+   sim-jump-link is the small clickable "⤴/⤵ ..." text; sim-row-linked is
+   the hover state applied to BOTH halves of a pair via their shared
+   data-link-key, so hovering either highlights the other. */
+.sim-packet-relay-link { color: var(--text-muted); font-size: 0.65rem; }
+.sim-jump-link { cursor: pointer; text-decoration: underline dotted; }
+.sim-jump-link:hover { color: #4ade80; }
+.sim-linkable-row { cursor: default; }
+.sim-list-item.sim-row-linked { background: rgba(74,222,128,0.10); }
+/* Reuses the same flash-on-jump treatment #sim-nodes-modal's own row
+   highlight uses (see openNodesModal), scoped here to the plain-div
+   activity rows rather than table rows. */
+.sim-list-item.sim-row-highlight {
+  background: rgba(74,222,128,0.18);
+  transition: background 1.5s ease;
+}
 
 .sim-suggestion-rank {
   font-weight: 700;
@@ -1131,11 +1227,12 @@ header .subtitle {
 }
 .sim-modal.hidden { display: none; }
 
-/* Repeaters & settings has a wide table (label + 6 setting columns +
-   actions) that doesn't fit the shared 560px width without horizontal
-   scrolling — give it more room specifically, rather than widening every
-   modal. */
-#sim-nodes-modal { width: min(900px, 100%); }
+/* Repeaters & settings has a wide table (label + 11 setting columns +
+   actions) that doesn't fit the shared 560px width — give it more room
+   specifically, rather than widening every modal. The table itself still
+   scrolls horizontally within sim-config-table-scroll below for whatever
+   doesn't fit even at this width. */
+#sim-nodes-modal { width: min(1040px, 100%); }
 
 .sim-modal-header {
   display: flex;
@@ -1184,7 +1281,7 @@ header .subtitle {
 }
 .sim-bulk-apply-row button { font-size: 0.72rem; padding: 0.25rem 0.5rem; }
 
-.sim-config-table-scroll { max-height: 50vh; overflow-y: auto; }
+.sim-config-table-scroll { max-height: 50vh; overflow-y: auto; overflow-x: auto; }
 
 .sim-config-table {
   width: 100%;
@@ -1195,13 +1292,31 @@ header .subtitle {
   text-align: left;
   padding: 0.3rem 0.4rem;
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 .sim-config-table th { color: var(--text-muted); font-weight: 600; }
-.sim-config-table input[type="number"] {
+/* Sticky header + sticky first column (item 10G) — a long/wide node table
+   otherwise scrolls the node's own label out of view in both directions at
+   once, the one column you actually need to keep visible while scanning. */
+.sim-config-table thead th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.sim-config-table th.sim-col-sticky, .sim-config-table td.sim-col-sticky {
+  position: sticky;
+  left: 0;
+  background: var(--bg);
+  z-index: 2;
+  box-shadow: 1px 0 0 var(--border);
+}
+.sim-config-table thead th.sim-col-sticky { z-index: 3; }
+/* Item 16 — Duty cycle/Received result columns, shown only once a run
+   exists (see renderNodesModalTable's own hidden-class toggle). */
+.sim-config-table .sim-results-col.hidden { display: none; }
+.sim-config-table td.sim-results-col { color: var(--text-muted); white-space: nowrap; }
+.sim-config-table input[type="number"], .sim-config-table input[type="text"] {
   width: 3.6rem;
   font-size: 0.72rem;
   padding: 0.15rem 0.25rem;
 }
+.sim-config-table input[type="text"][data-field="regions"] { width: 6.5rem; }
 .sim-config-table select {
   font-size: 0.72rem;
   padding: 0.15rem 0.25rem;
@@ -1210,7 +1325,15 @@ header .subtitle {
   border: 1px solid var(--border);
   border-radius: 4px;
 }
+.sim-config-table td.sim-checkbox-cell { text-align: center; }
+.sim-radio-cell { min-width: 11rem; }
+.sim-radio-preset-select { display: block; width: 100%; margin-bottom: 0.2rem; }
+.sim-radio-fields { display: flex; gap: 0.2rem; }
+.sim-radio-fields input { width: 2.5rem !important; }
 .sim-config-table tr.sim-row-highlight {
   background: rgba(74,222,128,0.18);
   transition: background 1.5s ease;
 }
+/* Item 15b — the knee row in the stress-test capacity curve table, a
+   persistent marker rather than sim-row-highlight's fade-out flash. */
+.sim-config-table tr.sim-knee-row { background: rgba(74,222,128,0.14); font-weight: 700; }

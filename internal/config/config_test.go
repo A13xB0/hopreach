@@ -151,13 +151,13 @@ func TestValidate(t *testing.T) {
 		{"non-positive image_width", func(c *Config) { c.Coverage.ImageWidth = 0 }, true},
 		{"non-positive precision_width", func(c *Config) { c.Coverage.PrecisionWidth = -1 }, true},
 		{"invalid gpu.mode", func(c *Config) { c.GPU.Mode = "turbo" }, true},
-		{"scope_inference enabled with non-positive window_hours", func(c *Config) {
-			c.CoreScope.ScopeInference.Enabled = true
-			c.CoreScope.ScopeInference.WindowHours = 0
+		{"scope_observation enabled with non-positive window_hours", func(c *Config) {
+			c.CoreScope.ScopeObservation.Enabled = true
+			c.CoreScope.ScopeObservation.WindowHours = 0
 		}, true},
-		{"scope_inference disabled with non-positive window_hours is fine", func(c *Config) {
-			c.CoreScope.ScopeInference.Enabled = false
-			c.CoreScope.ScopeInference.WindowHours = 0
+		{"scope_observation disabled with non-positive window_hours is fine", func(c *Config) {
+			c.CoreScope.ScopeObservation.Enabled = false
+			c.CoreScope.ScopeObservation.WindowHours = 0
 		}, false},
 	}
 	for _, tc := range cases {

@@ -48,10 +48,23 @@ func RxDelayMs(rxDelayBase float64, score float64, airtimeMs uint32) int {
 	if rxDelayBase <= 0 {
 		return 0
 	}
-	return int((math.Pow(rxDelayBase, 0.85-score) - 1.0) * float64(airtimeMs))
+	delay := int((math.Pow(rxDelayBase, 0.85-score) - 1.0) * float64(airtimeMs))
+	if delay > MaxRxDelayMs {
+		return MaxRxDelayMs
+	}
+	return delay
 }
 
 // MaxRxDelayMs mirrors Dispatcher.cpp's own MAX_RX_DELAY_MILLIS clamp — real
 // firmware never holds a weak-signal reception back longer than this,
-// regardless of how low its score is.
+// regardless of how low its score is:
+//
+//	if (_delay > MAX_RX_DELAY_MILLIS) { _delay = MAX_RX_DELAY_MILLIS; }
+//
+// (Dispatcher.cpp:248-250). Previously declared here but never actually
+// applied by RxDelayMs — a real bug (see docs/SIMULATOR_PLAN_PHASE2.md item
+// 15, Finding B) that would have biased any tuning search over rxDelayBase:
+// without the clamp, a high rxDelayBase combined with a long airtime (SF12,
+// a large payload) produces delays real hardware would never actually
+// apply, making that candidate score worse than reality.
 const MaxRxDelayMs = 32000

@@ -27,11 +27,6 @@ type LoRaParams struct {
 	SF      int     `json:"sf"`      // spreading factor, 5-12
 	CR      int     `json:"cr"`      // coding rate denominator, 5-8 (i.e. 4/5 .. 4/8) — MeshCore's CLI convention
 
-	// PreambleSymbols is the LoRa preamble length in symbols. 8 is the
-	// standard LoRa/RadioLib default and not yet confirmed against
-	// MeshCore's own radio init code — override if that turns out to
-	// differ once verified.
-	PreambleSymbols int `json:"preambleSymbols"`
 	// ExplicitHeader: true for MeshCore's normal packet framing (variable
 	// payload length needs an explicit header); implicit header (false) is
 	// a fixed-length-payload LoRa mode MeshCore doesn't appear to use.
@@ -40,12 +35,15 @@ type LoRaParams struct {
 	CRCEnabled bool `json:"crcEnabled"`
 }
 
-// DefaultLoRaParams mirrors MeshCore's own documented default:
-// "set radio 869.525,250,11,5".
+// DefaultLoRaParams mirrors the EU/UK (Narrow) preset (see the "Radio
+// presets" section of docs/SIMULATOR_PLAN.md, sourced from
+// api.meshcore.nz/api/v1/config) — the current MeshCore-recommended default
+// for this region. The project's previous default, 869.525/SF11/BW250/CR5,
+// is now labelled "EU/UK (Deprecated)" in that same upstream list.
 func DefaultLoRaParams() LoRaParams {
 	return LoRaParams{
-		FreqMHz: 869.525, BWkHz: 250, SF: 11, CR: 5,
-		PreambleSymbols: 8, ExplicitHeader: true, CRCEnabled: true,
+		FreqMHz: 869.618, BWkHz: 62.5, SF: 8, CR: 8,
+		ExplicitHeader: true, CRCEnabled: true,
 	}
 }
 
@@ -57,6 +55,37 @@ func lowDataRateOptimize(symbolDurationMs float64) bool {
 	return symbolDurationMs >= 16.0
 }
 
+// preambleSymbolsForSF mirrors RadioLibWrapper::preambleLengthForSF exactly
+// (src/helpers/radiolib/RadioLibWrappers.h) — real MeshCore firmware derives
+// preamble length from spreading factor automatically; there is no user-
+// facing setting for it (unlike freq/BW/SF/CR, which the CLI's `set radio`
+// does expose), so it is deliberately NOT a LoRaParams field a caller can
+// set independently of SF — that would just reopen the drift this function
+// exists to prevent (a previous version stored a fixed PreambleSymbols: 8
+// for every SF, which undercounted airtime 4x at SF8 and below).
+func preambleSymbolsForSF(sf int) int {
+	if sf <= 8 {
+		return 32
+	}
+	return 16
+}
+
+// symbolDurationMs returns one LoRa symbol's duration under p — 2^SF/BW,
+// with BW in kHz so the result is already in ms.
+func symbolDurationMs(p LoRaParams) float64 {
+	return math.Exp2(float64(p.SF)) / p.BWkHz
+}
+
+// preambleDurationMs is the (preambleSymbolsForSF(p.SF) + 4.25) symbols a
+// receiver needs to hear and lock onto before it can even start
+// demodulating a packet's header/payload — shared by AirtimeMs (the
+// preamble is part of total time-on-air) and the capture-effect logic in
+// engine.go (an interferer arriving before this window elapses prevents
+// lock from ever happening, regardless of relative signal strength).
+func preambleDurationMs(p LoRaParams) float64 {
+	return (float64(preambleSymbolsForSF(p.SF)) + 4.25) * symbolDurationMs(p)
+}
+
 // Airtime returns how long transmitting a payloadLen-byte LoRa packet takes
 // under p, using the standard Semtech AN1200.13 time-on-air formula — the
 // same formula RadioLib (which MeshCore's own RadioLibWrapper.getEstAirtimeFor
@@ -65,9 +94,9 @@ func lowDataRateOptimize(symbolDurationMs float64) bool {
 // microseconds/1000 integer division is (matching real firmware's own
 // rounding behavior, not just mathematical convenience).
 func AirtimeMs(p LoRaParams, payloadLen int) uint32 {
-	symbolDurationMs := math.Exp2(float64(p.SF)) / p.BWkHz // 2^SF / BW, BW in kHz so this is already in ms
+	symDurMs := symbolDurationMs(p)
 	de := 0.0
-	if lowDataRateOptimize(symbolDurationMs) {
+	if lowDataRateOptimize(symDurMs) {
 		de = 1.0
 	}
 	ih := 0.0
@@ -82,8 +111,6 @@ func AirtimeMs(p LoRaParams, payloadLen int) uint32 {
 	// Semtech formula's CR is that minus 4 (1-4, i.e. "4/5" -> 1).
 	crSemtech := float64(p.CR - 4)
 
-	preamble := (float64(p.PreambleSymbols) + 4.25) * symbolDurationMs
-
 	numerator := 8*float64(payloadLen) - 4*float64(p.SF) + 28 + 16*crc - 20*ih
 	denominator := 4 * (float64(p.SF) - 2*de)
 	nPayloadSymbols := 8.0
@@ -91,6 +118,6 @@ func AirtimeMs(p LoRaParams, payloadLen int) uint32 {
 		nPayloadSymbols += math.Ceil(numerator/denominator) * (crSemtech + 4)
 	}
 
-	totalMs := preamble + nPayloadSymbols*symbolDurationMs
+	totalMs := preambleDurationMs(p) + nPayloadSymbols*symDurMs
 	return uint32(totalMs) // truncating int conversion, matching getEstAirtimeFor's own microseconds/1000 integer division
 }

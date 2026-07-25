@@ -35,6 +35,7 @@
       <button id="plan-toggle" title="Planning tools">Plan</button>
       <button id="sim-toggle" title="LoRa flood simulator">📡 Simulate <span class="alpha-badge">ALPHA</span></button>
       <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
+      <button id="map-declutter-toggle" title="Collapse (or restore) every map control at once">🧹 Declutter</button>
     </div>
     <div id="companion-pin-hint" class="plan-hint hidden">
       Click the map to drop a pin. Drag it to move. Click the button again to remove it. Search is capped to ~35km for speed.
@@ -201,6 +202,9 @@
           <button id="sim-run">▶ Run simulation</button>
           <button id="sim-predict">🎯 Predict settings</button>
         </div>
+        <div class="plan-row">
+          <button id="sim-suggest-policy" title="Item 15: searches composite multi-rule policies (dense/sparse, hilltop, articulation-point, MPR-style and more) ranked by actual delivery, not just collision rate">🧬 Search policies</button>
+        </div>
         <div id="sim-status" class="plan-hint hidden"></div>
         <div id="sim-predict-progress" class="hidden">
           <div id="sim-predict-progress-text">Searching…</div>
@@ -211,6 +215,27 @@
           <button id="sim-open-results-modal" class="hidden">📊 Results</button>
           <button id="sim-open-predictions-modal" class="hidden">🎯 Predicted settings</button>
           <button id="sim-rankings-expand" class="hidden">🏆 Rankings</button>
+        </div>
+
+        <div class="plan-section-title">Stress test</div>
+        <div class="plan-hint">
+          Pushes synthetic offered load (randomly-originated messages, not
+          your own senders above) up through the load levels below and
+          measures delivery at each — the "knee" is the highest level this
+          network still delivers acceptably at, i.e. how many messages/minute
+          it can actually handle.
+        </div>
+        <div class="plan-field-row">
+          <label for="sim-stress-levels">Load levels (msgs/min)</label>
+          <input type="text" id="sim-stress-levels" value="5, 10, 20, 40, 80, 160, 320" title="Comma-separated, increasing">
+        </div>
+        <div class="plan-row">
+          <button id="sim-stress-run">🔥 Stress test</button>
+          <button id="sim-open-stress-modal" class="hidden">📈 Capacity curve</button>
+        </div>
+        <div id="sim-stress-progress" class="hidden">
+          <div id="sim-stress-progress-text">Sweeping…</div>
+          <div class="progress-track"><div id="sim-stress-progress-fill"></div></div>
         </div>
 
         <div class="plan-section-title">Replay a real CoreScope packet</div>
@@ -226,6 +251,10 @@
           <input type="text" id="sim-replay-hash-input" placeholder="Packet hash or CoreScope link">
           <button id="sim-replay-hash-go">🔗 Replay</button>
         </div>
+        <div class="plan-field-row">
+          <label for="sim-replay-window-secs">Surrounding activity window (± seconds)</label>
+          <input type="number" id="sim-replay-window-secs" min="1" max="120" step="1" value="30" title="How much real CoreScope activity either side of the target packet to fetch and replay alongside it — capped at 120s">
+        </div>
         <div id="sim-replay-hash-status" class="plan-hint hidden"></div>
         <button id="sim-open-bottleneck-modal" class="plan-full-width-btn hidden">🔍 Bottleneck analysis</button>
       </div>
@@ -233,12 +262,23 @@
   </div>
 
   <div id="sim-modal-backdrop" class="hidden">
-    <div id="sim-nodes-modal" class="sim-modal hidden">
-      <div class="sim-modal-header"><span>Repeaters &amp; settings</span><button data-close aria-label="Close">✕</button></div>
+    <div id="sim-nodes-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-nodes-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-nodes-modal-title">Repeaters &amp; settings</span><button data-close aria-label="Close">✕</button></div>
       <div class="sim-modal-body">
-        <div class="plan-hint">Edit a node's delay/power/loop-detect settings, then Apply. Changes take effect on the next run.</div>
+        <div class="plan-hint">Edit a node's delay/power/loop-detect/scope/radio settings, then Apply. Changes take effect on the next run.</div>
         <div class="sim-bulk-apply-row">
           <span class="sim-bulk-apply-label">Set all repeaters to:</span>
+          <input type="text" id="sim-bulk-regions" placeholder="Scopes (sco, ioi)" title="Comma-delimited region list, no # — leave blank to leave unchanged">
+          <select id="sim-bulk-allow-unscoped" title="Allow unscoped">
+            <option value="">Allow unscoped: unchanged</option>
+            <option value="allow">Allow unscoped: yes</option>
+            <option value="deny">Allow unscoped: no</option>
+          </select>
+          <input type="number" step="1" min="1" id="sim-bulk-flood-max" placeholder="Flood max" title="flood.max — default 64">
+          <input type="number" step="1" min="1" id="sim-bulk-flood-max-unscoped" placeholder="Unscoped max" title="flood.max.unscoped — default 64, only gates unscoped traffic">
+          <select id="sim-bulk-radio-preset" title="Radio preset">
+            <option value="">Radio preset: unchanged</option>
+          </select>
           <input type="number" step="0.05" min="0" max="2" id="sim-bulk-tx-delay" placeholder="Tx delay" title="Tx delay factor">
           <input type="number" step="0.05" min="0" max="2" id="sim-bulk-direct-tx-delay" placeholder="Direct tx" title="Direct tx delay factor">
           <input type="number" step="0.5" min="0" max="20" id="sim-bulk-rx-delay" placeholder="Rx delay" title="Rx delay base">
@@ -255,7 +295,13 @@
         </div>
         <div class="sim-config-table-scroll">
           <table class="sim-config-table">
-            <thead><tr><th>Node</th><th>Tx delay</th><th>Direct tx</th><th>Rx delay</th><th>Tx power</th><th>Loop detect</th><th>Hash size</th><th></th></tr></thead>
+            <thead><tr>
+              <th class="sim-col-sticky">Node</th><th>Scopes</th><th>Allow unscoped</th><th>Flood max</th><th>Unscoped max</th>
+              <th>Radio</th><th>Tx delay</th><th>Direct tx</th><th>Rx delay</th><th>Tx power</th><th>Loop detect</th><th>Hash size</th>
+              <th class="sim-results-col hidden" id="sim-results-col-duty" title="Airtime spent transmitting, as a percentage of Sim duration — only shown once a run exists">Duty cycle</th>
+              <th class="sim-results-col hidden" id="sim-results-col-received" title="Distinct packets cleanly received, out of packets that could possibly have reached this node given the current topology — only shown once a run exists">Received</th>
+              <th></th>
+            </tr></thead>
             <tbody id="sim-nodes-modal-tbody"></tbody>
           </table>
         </div>
@@ -266,8 +312,8 @@
       </div>
     </div>
 
-    <div id="sim-messages-modal" class="sim-modal hidden">
-      <div class="sim-modal-header"><span>Message senders</span><button data-close aria-label="Close">✕</button></div>
+    <div id="sim-messages-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-messages-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-messages-modal-title">Message senders</span><button data-close aria-label="Close">✕</button></div>
       <div class="sim-modal-body">
         <div class="plan-hint">
           Each sender fires a batch of messages: how many, how long each
@@ -282,6 +328,10 @@
         <div class="plan-row">
           <select id="sim-message-region" title="Send as this MeshCore region (mirrors 'region default') — only repeaters holding this region's key will relay it onward">
             <option value="">Any region (unscoped)</option>
+          </select>
+          <select id="sim-message-route-type" title="Flood (broadcast to every reachable repeater) vs Direct (addressed traffic — uses each relay's own Direct tx delay, and skips the Unscoped max hop limit)">
+            <option value="flood">Route: Flood</option>
+            <option value="direct">Route: Direct</option>
           </select>
         </div>
         <div class="plan-field-row">
@@ -306,8 +356,8 @@
       <div class="sim-modal-footer"><button data-close>Close</button></div>
     </div>
 
-    <div id="sim-results-modal" class="sim-modal hidden">
-      <div class="sim-modal-header"><span>Results</span><button data-close aria-label="Close">✕</button></div>
+    <div id="sim-results-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-results-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-results-modal-title">Results</span><button data-close aria-label="Close">✕</button></div>
       <div class="sim-modal-body">
         <div id="sim-results-summary" class="plan-hint"></div>
         <div class="plan-row">
@@ -326,14 +376,14 @@
       <div class="sim-modal-footer"><button data-close>Close</button></div>
     </div>
 
-    <div id="sim-bottleneck-modal" class="sim-modal hidden">
-      <div class="sim-modal-header"><span>Proven vs. predicted — possible bottlenecks</span><button data-close aria-label="Close">✕</button></div>
+    <div id="sim-bottleneck-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-bottleneck-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-bottleneck-modal-title">Proven vs. predicted — possible bottlenecks</span><button data-close aria-label="Close">✕</button></div>
       <div class="sim-modal-body">
         <div id="sim-bottleneck-summary" class="plan-hint"></div>
 
         <div id="sim-bottleneck-replay-section" class="hidden">
-          <div class="sim-subsection-title">Replay real activity (±30s)</div>
-          <div class="plan-hint">Every real packet CoreScope observed within 30 seconds either side of this one, played back in the order it actually happened — the replayed packet itself is highlighted; everything else is context for what else was going on at the time.</div>
+          <div class="sim-subsection-title" id="sim-bottleneck-replay-title">Replay real activity (±30s)</div>
+          <div class="plan-hint">Every real packet CoreScope observed within the configured window either side of this one (see "Surrounding activity window" above), played back in the order it actually happened — the replayed packet itself is highlighted; everything else is context for what else was going on at the time.</div>
           <div class="plan-row">
             <button id="sim-bottleneck-replay">▶ Replay</button>
             <button id="sim-bottleneck-replay-skip">⏭ Skip to end</button>
@@ -352,8 +402,8 @@
       <div class="sim-modal-footer"><button data-close>Close</button></div>
     </div>
 
-    <div id="sim-predictions-modal" class="sim-modal hidden">
-      <div class="sim-modal-header"><span>Predicted settings</span><button data-close aria-label="Close">✕</button></div>
+    <div id="sim-predictions-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-predictions-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-predictions-modal-title">Predicted settings</span><button data-close aria-label="Close">✕</button></div>
       <div class="sim-modal-body">
         <div class="sim-subsection-title">Per repeater</div>
         <div class="plan-hint">Applying the top-ranked rule below to each node. A node the rule's condition doesn't cover keeps the baseline defaults.</div>
@@ -361,11 +411,38 @@
 
         <div class="sim-subsection-title">Every candidate tried, ranked</div>
         <div id="sim-suggestions-list" class="plan-list"></div>
+
+        <div id="sim-policy-section" class="hidden">
+          <div class="sim-subsection-title">🧬 Policy search results</div>
+          <div id="sim-policy-summary" class="plan-hint"></div>
+          <div id="sim-policy-suggestions-list" class="plan-list"></div>
+
+          <div class="sim-subsection-title">Action list — repeaters that need a change</div>
+          <div class="plan-hint">Only repeaters where the winning policy's own recommendation differs from what's currently set. Copy-paste the CLI line straight into that repeater's own console.</div>
+          <div class="plan-row">
+            <button id="sim-policy-export-csv">⬇ Export .csv</button>
+          </div>
+          <div id="sim-policy-actions-list" class="plan-list"></div>
+        </div>
       </div>
       <div class="sim-modal-footer"><button data-close>Close</button></div>
     </div>
 
-    <div id="sim-packet-modal" class="sim-modal hidden">
+    <div id="sim-stress-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-stress-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-stress-modal-title">Capacity curve</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div id="sim-stress-summary" class="plan-hint"></div>
+        <div class="sim-config-table-scroll">
+          <table class="sim-config-table">
+            <thead><tr><th>Load (msgs/min)</th><th>Delivery</th><th>Collision rate</th></tr></thead>
+            <tbody id="sim-stress-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <div id="sim-packet-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-packet-modal-title" tabindex="-1">
       <div class="sim-modal-header">
         <span>
           <button id="sim-packet-modal-back" class="hidden" title="Back to the previous view">← Back</button>
@@ -379,9 +456,14 @@
         <div class="plan-row">
           <select id="sim-packet-filter-outcome">
             <option value="">All outcomes</option>
-            <option value="tx">Sent (TX) only</option>
-            <option value="relayed">Relayed only</option>
-            <option value="collided">Collided only</option>
+            <option value="tx">Sent (any TX)</option>
+            <option value="tx_origin">Sent — original only</option>
+            <option value="tx_relay">Sent — relayed only</option>
+            <option value="relayed">Relayed (RX + its own TX)</option>
+            <option value="collided">Collided — any cause</option>
+            <option value="collided_no_lock">Collided — no lock</option>
+            <option value="collided_corrupted">Collided — corrupted</option>
+            <option value="tx_busy">Missed — was transmitting</option>
             <option value="dropped">Dropped only</option>
             <option value="received">Received (no further relay)</option>
           </select>

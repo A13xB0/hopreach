@@ -180,7 +180,25 @@ test("loads planned repeaters, builds links, adds a message sender, runs a simul
   await expect(page.locator("#sim-rankings-expand")).toBeVisible();
   await page.click("#sim-rankings-expand");
   await expect(page.locator("#sim-rankings-fullwindow")).toBeVisible();
-  await expect(page.locator("#sim-rankings-fullwindow-body th")).toContainText(["Repeater", "Successful", "Collisions (own)", "Contention (caused)", "Success rate"]);
+  // Item 16 extended this table with a per-repeater scoreboard (duty
+  // cycle, delivery, unique/redundant relays, ...) — "Success rate" was
+  // also relabelled "Decode rate" so it can't be conflated with genuine
+  // packet delivery (a separate, new "Received" column).
+  await expect(page.locator("#sim-rankings-fullwindow-body th")).toContainText([
+    "Repeater",
+    "Duty cycle",
+    "Received",
+    "Unique deliveries",
+    "Redundant relays",
+    "Relayed",
+    "Successful",
+    "Collisions (own)",
+    "Missed (tx busy)",
+    "Contention (caused)",
+    "Avg relay delay",
+    "Deferrals (CAD+budget)",
+    "Decode rate",
+  ]);
   await expect(page.locator("#sim-rankings-fullwindow-body tbody tr")).toHaveCount(2);
   await page.click("#sim-rankings-collapse");
 
@@ -225,6 +243,64 @@ test("repeater rankings can be sorted from the full-window view", async ({ page 
   await expect(page.locator("#sim-rankings-fullwindow")).toBeHidden();
 });
 
+// Item 15c's own search — was never exercised end-to-end by this suite
+// before (only covered at the Go unit-test level), which is exactly how a
+// real hang (a stale cached Web Worker silently dropping an unrecognised
+// message kind — see docker/default.conf.template's own Cache-Control fix)
+// slipped through undetected.
+test("search policies finds a composite policy and shows an action list", async ({ page }) => {
+  test.slow();
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+  await addMessageSenderViaModal(page);
+
+  await page.fill("#sim-trials", "3"); // keep the search fast for a CI run
+  await page.click("#sim-suggest-policy");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
+  await expect(page.locator("#sim-predictions-modal")).toBeVisible();
+  await expect(page.locator("#sim-policy-section")).toBeVisible();
+  await expect(page.locator("#sim-policy-summary")).toContainText("delivery");
+  await expect(page.locator("#sim-policy-suggestions-list .plan-list-item").first()).toBeVisible();
+  // Either a real change is recommended (a CLI-command row) or the modal
+  // explicitly says there's nothing to change — either is a valid
+  // outcome, but the section must never be left blank.
+  await expect(page.locator("#sim-policy-actions-list")).not.toBeEmpty();
+  await expect(page.locator("#sim-suggest-policy")).toBeEnabled();
+});
+
+// Item 15b's own offered-load sweep — see the comment on the policy-search
+// test above for why an end-to-end test like this matters.
+test("stress test sweeps load levels and shows a capacity curve", async ({ page }) => {
+  test.slow();
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+
+  await page.fill("#sim-stress-levels", "5, 20");
+  await page.fill("#sim-trials", "3"); // keep the sweep fast for a CI run
+  await page.click("#sim-stress-run");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
+  await expect(page.locator("#sim-stress-modal")).toBeVisible();
+  await expect(page.locator("#sim-stress-summary")).not.toBeEmpty();
+  await expect(page.locator("#sim-stress-tbody tr")).toHaveCount(2);
+  await expect(page.locator("#sim-stress-run")).toBeEnabled();
+});
+
 test("clicking a repeater marker opens the repeaters modal, and applied settings persist", async ({ page }) => {
   await page.click("#plan-toggle");
   await page.selectOption("#plan-select", TEST_PLAN.id);
@@ -236,10 +312,13 @@ test("clicking a repeater marker opens the repeaters modal, and applied settings
 
   await clickUntilVisible(page.locator(".sim-marker-icon").first(), page.locator("#sim-nodes-modal"), { force: true });
   const firstRow = page.locator("#sim-nodes-modal-tbody tr").first();
-  // txDelayFactor, directTxDelayFactor, rxDelayBase, txPowerDbm, hashSize
-  // (number inputs) plus loopDetect (its own select, not matched here).
-  await expect(firstRow.locator("input[data-field]")).toHaveCount(5);
+  // regions (text), allowUnscoped (checkbox), floodMax, floodMaxUnscoped,
+  // radioFreqMhz/radioBwKhz/radioSf/radioCr (4), txDelayFactor,
+  // directTxDelayFactor, rxDelayBase, txPowerDbm, hashSize = 13 inputs,
+  // plus loopDetect and radioPreset as their own selects (not matched here).
+  await expect(firstRow.locator("input[data-field]")).toHaveCount(13);
   await expect(firstRow.locator("select[data-field=\"loopDetect\"]")).toHaveCount(1);
+  await expect(firstRow.locator("select[data-field=\"radioPreset\"]")).toHaveCount(1);
 
   // Planned repeaters have no real pubkey yet, so a synthetic 6-byte
   // address (12 hex chars) is generated and stored at creation time —
@@ -518,13 +597,13 @@ test("packet inspector: message details and clicking a repeater after a run both
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
 
   // The per-row "📨" action in the Repeaters & settings modal is the same
-  // inspector, reachable without going back to the map. This modal was
-  // also widened (see #sim-nodes-modal's own CSS) so its config table
-  // shouldn't need horizontal scrolling at the default test viewport.
+  // inspector, reachable without going back to the map. The table now has
+  // enough columns (scopes, hop limits, radio, delay/power settings) that
+  // it does need horizontal scrolling even at the widened modal size — the
+  // sticky header/first column (see #sim-nodes-modal's own CSS) is what
+  // keeps that usable, not avoiding the scroll altogether.
   await page.click("#sim-open-nodes-modal");
   await expect(page.locator("#sim-nodes-modal-tbody tr [data-act=\"packets\"]").first()).toBeVisible();
-  const overflowsHorizontally = await page.locator(".sim-config-table-scroll").evaluate((el) => el.scrollWidth > el.clientWidth);
-  expect(overflowsHorizontally).toBe(false);
   await page.locator("#sim-nodes-modal-tbody tr [data-act=\"packets\"]").first().click();
   await expect(page.locator("#sim-packet-modal")).toBeVisible();
 });

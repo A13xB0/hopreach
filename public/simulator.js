@@ -63,6 +63,9 @@
   // rest of a run's results) in hideResults().
   let lastTuneResult = null;
   let lastAttrsList = null;
+  // The last runStressTest() result (item 15b) — kept around purely so
+  // reopening #sim-stress-modal doesn't need a fresh sweep.
+  let lastStressResult = null;
 
   // The saved setup (see loadAllSetups/saveCurrentSetup below) currently
   // loaded, if any — lets "Save" overwrite the same entry instead of always
@@ -93,6 +96,17 @@
 
   function hidePredictProgress() {
     document.getElementById("sim-predict-progress").classList.add("hidden");
+  }
+
+  function setStressProgress(done, total) {
+    const el = document.getElementById("sim-stress-progress");
+    el.classList.remove("hidden");
+    document.getElementById("sim-stress-progress-text").textContent = `Sweeping… ${done}/${total} load levels`;
+    document.getElementById("sim-stress-progress-fill").style.width = `${Math.max(2, (done / total) * 100)}%`;
+  }
+
+  function hideStressProgress() {
+    document.getElementById("sim-stress-progress").classList.add("hidden");
   }
 
   // Per-node running tally of whichever dimension simViewMode.growBy is
@@ -200,7 +214,12 @@
     for (const r of plan.repeaters) {
       const key = nodeKey("planned", r.id);
       if (existing.has(key)) continue;
-      simNodes.push({ id: randomId(), source: "planned", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, address: generatedShortAddress() });
+      // regions: ["*"] — a planned repeater's real region config is
+      // unknown, so default to accepting every scope rather than silently
+      // dropping all scoped traffic (see SimNode.Regions' own doc comment
+      // on the "*" wildcard). Editable afterwards in the nodes modal same
+      // as a real repeater's observed scopes.
+      simNodes.push({ id: randomId(), source: "planned", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, regions: ["*"], address: generatedShortAddress() });
       added++;
     }
     invalidateLinks();
@@ -258,7 +277,18 @@
     for (const r of real) {
       const key = nodeKey("real", r.id);
       if (existing.has(key)) continue;
-      simNodes.push({ id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, regions: r.scopes || [], hashSize: r.hashSize || null, address: shortAddressFromPubkey(r.id) });
+      // denyUnscoped: !r.observedUnscoped — a real repeater never yet
+      // observed relaying a plain flood defaults to unscoped disabled (the
+      // user's own rule: absence of evidence over a real, if imperfect,
+      // observation window is the best signal available — see
+      // corescope.ObservedUnscoped and planner.js's own comment on this
+      // field). Shown/editable afterwards as "derived by absence" in the
+      // nodes modal, not asserted the way observed scopes are.
+      simNodes.push({
+        id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
+        regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: !r.observedUnscoped,
+        address: shortAddressFromPubkey(r.id),
+      });
       added++;
     }
     invalidateLinks();
@@ -270,7 +300,13 @@
 
   function addCompanionAt(lat, lon) {
     companionCounter++;
-    simNodes.push({ id: randomId(), source: "companion", refId: randomId(), label: `Companion ${companionCounter}`, lat, lon, address: generatedShortAddress() });
+    // regions doesn't actually gate anything for a companion (CanRelay is
+    // always false for source:"companion", so acceptsRegion is never even
+    // consulted for its own relay decision — see canRelay/engine.go's
+    // cannot_relay check ordering) — set the same "*" wildcard anyway so
+    // the nodes modal's Scopes column doesn't show a misleading empty/deny
+    // state for it.
+    simNodes.push({ id: randomId(), source: "companion", refId: randomId(), label: `Companion ${companionCounter}`, lat, lon, regions: ["*"], address: generatedShortAddress() });
     invalidateLinks();
     renderNodeList();
     renderMessageNodeOptions();
@@ -573,8 +609,12 @@
       const node = simNodes[g.nodeIndex];
       const row = document.createElement("div");
       row.className = "plan-list-item";
+      // Item 17 — this sender's own origin repeater records its own path
+      // hop at ITS configured hash size (1-3 bytes); shown here so it's
+      // visible while a sender is being set up, not just after a run.
+      const hashSizeBadge = node ? ` <span class="sim-node-badge sim-badge-hashsize" title="This repeater's own configured path-hash size">${effectiveHashSize(node)}B</span>` : "";
       row.innerHTML = `
-        <span class="plan-item-label">${escapeHtml(node ? node.label : "?")}${g.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(g.region)}</span>` : ""}</span>
+        <span class="plan-item-label">${escapeHtml(node ? node.label : "?")}${hashSizeBadge}${g.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(g.region)}</span>` : ""}${g.direct ? ` <span class="sim-node-badge sim-badge-direct">direct</span>` : ""}</span>
         <span class="plan-item-sub">${g.count} message${g.count === 1 ? "" : "s"} · ${g.minPayload}-${g.maxPayload}B · ${g.minGapMs}-${g.maxGapMs}ms apart</span>
         <span class="plan-item-actions">
           <button data-act="edit" title="Edit">✎</button>
@@ -602,6 +642,7 @@
     document.getElementById("sim-message-node").value = String(g.nodeIndex);
     document.getElementById("sim-message-count").value = String(g.count);
     document.getElementById("sim-message-region").value = g.region || "";
+    document.getElementById("sim-message-route-type").value = g.direct ? "direct" : "flood";
     document.getElementById("sim-message-payload-min").value = String(g.minPayload);
     document.getElementById("sim-message-payload-max").value = String(g.maxPayload);
     document.getElementById("sim-message-gap-min").value = String(g.minGapMs);
@@ -628,6 +669,7 @@
     }
     const nodeIndex = Number(sel.value);
     const region = document.getElementById("sim-message-region").value;
+    const direct = document.getElementById("sim-message-route-type").value === "direct";
     const count = Math.min(500, Math.max(1, parseInt(document.getElementById("sim-message-count").value, 10) || 1));
     let minPayload = Math.min(255, Math.max(1, parseInt(document.getElementById("sim-message-payload-min").value, 10) || 1));
     let maxPayload = Math.min(255, Math.max(1, parseInt(document.getElementById("sim-message-payload-max").value, 10) || minPayload));
@@ -638,10 +680,10 @@
 
     if (editingGeneratorId) {
       const g = simMessageGenerators.find((x) => x.id === editingGeneratorId);
-      if (g) Object.assign(g, { nodeIndex, region, count, minPayload, maxPayload, minGapMs, maxGapMs });
+      if (g) Object.assign(g, { nodeIndex, region, direct, count, minPayload, maxPayload, minGapMs, maxGapMs });
       cancelEditSender();
     } else {
-      simMessageGenerators.push({ id: randomId(), nodeIndex, region, count, minPayload, maxPayload, minGapMs, maxGapMs });
+      simMessageGenerators.push({ id: randomId(), nodeIndex, region, direct, count, minPayload, maxPayload, minGapMs, maxGapMs });
     }
     renderMessageList();
   }
@@ -689,10 +731,15 @@
   function renderNodesModalTable() {
     const tbody = document.getElementById("sim-nodes-modal-tbody");
     tbody.innerHTML = "";
+    document.getElementById("sim-results-col-duty").classList.toggle("hidden", !lastReport);
+    document.getElementById("sim-results-col-received").classList.toggle("hidden", !lastReport);
     if (simNodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="plan-empty">None yet — load repeaters or place a companion location, then reopen this.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="15" class="plan-empty">None yet — load repeaters or place a companion location, then reopen this.</td></tr>';
       return;
     }
+    // Read-only result columns (item 16) — computed once for the whole
+    // table rather than per row; empty/unused unless a report exists.
+    const rankingByNode = lastReport ? computeRankings(lastReport) : null;
     nodesSortedByLabel().forEach(({ n, i: nodeIndex }) => {
       const prefs = effectivePrefsFor(n);
       let predictedTitle = "";
@@ -705,22 +752,64 @@
       }
       const loopDetect = effectiveLoopDetect(n);
       const loopDetectOptions = LOOP_DETECT_LEVELS.map((lvl) => `<option value="${lvl}" ${lvl === (loopDetect || "off") ? "selected" : ""}>${lvl}</option>`).join("");
+      const regions = effectiveRegions(n);
+      const denyUnscoped = effectiveDenyUnscoped(n);
+      const floodMax = effectiveFloodMax(n);
+      const floodMaxUnscoped = effectiveFloodMaxUnscoped(n);
+      const presetLabel = radioPresetLabelFor(prefs.radio);
+      const radioPresetOptions = RADIO_PRESETS.map((p) => `<option value="${escapeHtml(p.label)}" ${p.label === presetLabel ? "selected" : ""}>${escapeHtml(p.label)}</option>`).join("");
+      const ranking = rankingByNode ? rankingByNode[nodeIndex] : null;
+      const dutyCell = ranking ? `<td class="sim-results-col">${ranking.dutyCyclePct.toFixed(1)}%</td>` : `<td class="sim-results-col hidden"></td>`;
+      const receivedCell = ranking
+        ? `<td class="sim-results-col">${ranking.deliveryRatio == null ? "—" : `${ranking.deliveredCount}/${ranking.reachableCount} (${Math.round(ranking.deliveryRatio * 100)}%)`}</td>`
+        : `<td class="sim-results-col hidden"></td>`;
       const tr = document.createElement("tr");
       tr.dataset.nodeId = n.id;
       tr.innerHTML = `
-        <td><span class="sim-node-badge ${SOURCE_BADGE[n.source]}">${n.source}</span> <span title="${n.address ? `Address: ${n.address}` : "No address"}">${escapeHtml(n.label)}</span></td>
+        <td class="sim-col-sticky"><span class="sim-node-badge ${SOURCE_BADGE[n.source]}">${n.source}</span> <span title="${n.address ? `Address: ${n.address}` : "No address"}">${escapeHtml(n.label)}</span></td>
+        <td><input type="text" data-field="regions" value="${escapeHtml(regionsToDisplayString(regions))}" placeholder="all (*)" title="Comma-delimited region list, no # (e.g. sco, ioi). Blank = holds no region key (still relays unscoped traffic unless Allow unscoped is off). * = accept every region."></td>
+        <td class="sim-checkbox-cell"><input type="checkbox" data-field="allowUnscoped" ${denyUnscoped ? "" : "checked"} title="Whether this node relays ordinary unscoped (regionless) flood traffic. For a real repeater, defaults to off unless CoreScope has actually observed it doing so — absence over the observation window isn't proof of denial, just the best signal available."></td>
+        <td><input type="number" step="1" min="1" data-field="floodMax" value="${floodMax || ""}" placeholder="64" title="flood.max — blank uses the firmware default (64)"></td>
+        <td><input type="number" step="1" min="1" data-field="floodMaxUnscoped" value="${floodMaxUnscoped || ""}" placeholder="64" title="flood.max.unscoped — blank uses the firmware default (64); only gates unscoped traffic, additional to flood.max"></td>
+        <td class="sim-radio-cell">
+          <select data-field="radioPreset" class="sim-radio-preset-select" title="Radio preset"><option value="">Custom</option>${radioPresetOptions}</select>
+          <div class="sim-radio-fields">
+            <input type="number" step="0.001" data-field="radioFreqMhz" value="${prefs.radio.freqMhz}" title="Frequency (MHz)">
+            <input type="number" step="0.1" data-field="radioBwKhz" value="${prefs.radio.bwKhz}" title="Bandwidth (kHz)">
+            <input type="number" step="1" min="5" max="12" data-field="radioSf" value="${prefs.radio.sf}" title="Spreading factor">
+            <input type="number" step="1" min="5" max="8" data-field="radioCr" value="${prefs.radio.cr}" title="Coding rate denominator">
+          </div>
+        </td>
         <td><input type="number" step="0.05" min="0" max="2" data-field="txDelayFactor" value="${prefs.txDelayFactor}" title="${escapeHtml(predictedTitle)}"></td>
         <td><input type="number" step="0.05" min="0" max="2" data-field="directTxDelayFactor" value="${prefs.directTxDelayFactor}"></td>
         <td><input type="number" step="0.5" min="0" max="20" data-field="rxDelayBase" value="${prefs.rxDelayBase}" title="${escapeHtml(predictedTitle)}"></td>
         <td><input type="number" step="1" min="1" max="22" data-field="txPowerDbm" value="${prefs.txPowerDbm}"></td>
         <td><select data-field="loopDetect" title="Real firmware default is off — see docs.meshcore.io's loop.detect">${loopDetectOptions}</select></td>
         <td><input type="number" step="1" min="1" max="3" data-field="hashSize" value="${effectiveHashSize(n)}" title="Bytes — smaller sizes make loop.detect more prone to false positives from hash collisions between unrelated repeaters"></td>
+        ${dutyCell}
+        ${receivedCell}
         <td>
           ${lastReport ? '<button data-act="packets" title="See packets received here">📨</button>' : ""}
           ${n.source === "companion" ? '<button data-act="rename" title="Rename">✎</button>' : ""}
           <button data-act="remove" title="Remove">✕</button>
         </td>
       `;
+      const presetSelect = tr.querySelector('[data-field="radioPreset"]');
+      const radioInputs = {
+        freqMhz: tr.querySelector('[data-field="radioFreqMhz"]'),
+        bwKhz: tr.querySelector('[data-field="radioBwKhz"]'),
+        sf: tr.querySelector('[data-field="radioSf"]'),
+        cr: tr.querySelector('[data-field="radioCr"]'),
+      };
+      presetSelect.addEventListener("change", () => {
+        const preset = RADIO_PRESETS.find((p) => p.label === presetSelect.value);
+        if (!preset) return; // "Custom" chosen explicitly — leave the current field values alone
+        radioInputs.freqMhz.value = preset.freqMhz;
+        radioInputs.bwKhz.value = preset.bwKhz;
+        radioInputs.sf.value = preset.sf;
+        radioInputs.cr.value = preset.cr;
+      });
+      Object.values(radioInputs).forEach((el) => el.addEventListener("input", () => { presetSelect.value = ""; }));
       if (lastReport) tr.querySelector('[data-act="packets"]').onclick = () => openPacketInspectorForNode(nodeIndex);
       if (n.source === "companion") tr.querySelector('[data-act="rename"]').onclick = () => renameNode(n.id);
       tr.querySelector('[data-act="remove"]').onclick = () => {
@@ -738,14 +827,55 @@
       const n = simNodes.find((x) => x.id === tr.dataset.nodeId);
       if (!n) return;
       const override = {};
+      const radio = { ...effectivePrefsFor(n).radio };
+      let radioTouched = false;
       tr.querySelectorAll("[data-field]").forEach((el) => {
-        if (el.tagName === "SELECT") {
-          override[el.dataset.field] = el.value;
-        } else {
-          const v = parseFloat(el.value);
-          if (!Number.isNaN(v)) override[el.dataset.field] = v;
+        const field = el.dataset.field;
+        switch (field) {
+          case "regions":
+            override.regions = regionsFromDisplayString(el.value);
+            break;
+          case "allowUnscoped":
+            override.denyUnscoped = !el.checked;
+            break;
+          case "floodMax":
+          case "floodMaxUnscoped": {
+            const v = parseInt(el.value, 10);
+            override[field] = Number.isFinite(v) && v > 0 ? v : 0;
+            break;
+          }
+          case "radioPreset":
+            break; // UI-only — the live change listener already updated the 4 fields below
+          case "radioFreqMhz":
+            radio.freqMhz = parseFloat(el.value) || radio.freqMhz;
+            radioTouched = true;
+            break;
+          case "radioBwKhz":
+            radio.bwKhz = parseFloat(el.value) || radio.bwKhz;
+            radioTouched = true;
+            break;
+          case "radioSf": {
+            const v = parseInt(el.value, 10);
+            if (Number.isFinite(v)) radio.sf = v;
+            radioTouched = true;
+            break;
+          }
+          case "radioCr": {
+            const v = parseInt(el.value, 10);
+            if (Number.isFinite(v)) radio.cr = v;
+            radioTouched = true;
+            break;
+          }
+          default:
+            if (el.tagName === "SELECT") {
+              override[field] = el.value;
+            } else {
+              const v = parseFloat(el.value);
+              if (!Number.isNaN(v)) override[field] = v;
+            }
         }
       });
+      if (radioTouched) override.radio = radio;
       simNodePrefsOverrides[n.id] = override;
       applied++;
     });
@@ -760,6 +890,9 @@
   // delay).
   function fillAllRowsFromBulkApply() {
     const bulkFields = [
+      ["sim-bulk-regions", "regions"],
+      ["sim-bulk-flood-max", "floodMax"],
+      ["sim-bulk-flood-max-unscoped", "floodMaxUnscoped"],
       ["sim-bulk-tx-delay", "txDelayFactor"],
       ["sim-bulk-direct-tx-delay", "directTxDelayFactor"],
       ["sim-bulk-rx-delay", "rxDelayBase"],
@@ -774,6 +907,26 @@
       filledFields++;
       document.querySelectorAll(`#sim-nodes-modal-tbody [data-field="${field}"]`).forEach((el) => {
         el.value = bulkEl.value;
+      });
+    }
+    // "Allow unscoped" is a checkbox, not a value-bearing input, so it's
+    // handled separately from the generic loop above.
+    const bulkAllowUnscoped = document.getElementById("sim-bulk-allow-unscoped").value;
+    if (bulkAllowUnscoped) {
+      filledFields++;
+      document.querySelectorAll('#sim-nodes-modal-tbody [data-field="allowUnscoped"]').forEach((el) => {
+        el.checked = bulkAllowUnscoped === "allow";
+      });
+    }
+    // A radio preset fills all 4 underlying fields, via each row's own
+    // preset-select change listener (see renderNodesModalTable) — dispatch
+    // a real "change" event rather than duplicating that fill logic here.
+    const bulkRadioPreset = document.getElementById("sim-bulk-radio-preset").value;
+    if (bulkRadioPreset) {
+      filledFields++;
+      document.querySelectorAll('#sim-nodes-modal-tbody [data-field="radioPreset"]').forEach((el) => {
+        el.value = bulkRadioPreset;
+        el.dispatchEvent(new Event("change"));
       });
     }
     setStatus("sim-status", filledFields > 0 ? `Filled ${filledFields} field${filledFields === 1 ? "" : "s"} across every row — click Apply to commit.` : "Set at least one bulk value first.");
@@ -1063,28 +1216,126 @@
     return n.hashSize || 1; // 1 = the smallest, most collision-prone size, a safe/conservative default when a real repeater's own hash_size isn't known
   }
 
+  // regions/denyUnscoped/floodMax/floodMaxUnscoped follow the same
+  // override-over-node-default pattern as loopDetect/hashSize above — all
+  // editable from the same "Repeaters & settings" modal row (see
+  // renderNodesModalTable/applyNodesModalTable).
+  function effectiveRegions(n) {
+    const override = simNodePrefsOverrides[n.id];
+    if (override && override.regions !== undefined) return override.regions;
+    return n.regions || [];
+  }
+
+  function effectiveDenyUnscoped(n) {
+    const override = simNodePrefsOverrides[n.id];
+    if (override && override.denyUnscoped !== undefined) return override.denyUnscoped;
+    return !!n.denyUnscoped;
+  }
+
+  function effectiveFloodMax(n) {
+    const override = simNodePrefsOverrides[n.id];
+    if (override && override.floodMax) return override.floodMax;
+    return n.floodMax || 0;
+  }
+
+  function effectiveFloodMaxUnscoped(n) {
+    const override = simNodePrefsOverrides[n.id];
+    if (override && override.floodMaxUnscoped) return override.floodMaxUnscoped;
+    return n.floodMaxUnscoped || 0;
+  }
+
+  // Scopes are stored (and sent to the engine) with their real "#" prefix,
+  // matching every other region value in this codebase (message region
+  // select, corescope's own observed_scopes) — but shown in the modal
+  // "without the hash" per the user's own request, since a whole column of
+  // repeated "#" is just noise. "*" (the planned-repeater wildcard — see
+  // SimNode.Regions' doc comment) displays and round-trips as a literal
+  // "*", not a comma list.
+  function regionsToDisplayString(regions) {
+    if (!regions || regions.length === 0) return "";
+    if (regions.includes("*")) return "*";
+    return regions.map((r) => r.replace(/^#/, "")).join(", ");
+  }
+
+  function regionsFromDisplayString(s) {
+    const trimmed = (s || "").trim();
+    if (trimmed === "") return [];
+    if (trimmed === "*") return ["*"];
+    return trimmed
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map((x) => (x.startsWith("#") ? x : `#${x}`));
+  }
+
   function scenarioFromState() {
     return {
       nodes: simNodes.map((n) => ({
         prefs: effectivePrefsFor(n),
         canRelay: canRelay(n),
-        regions: n.regions || [],
+        regions: effectiveRegions(n),
         loopDetect: effectiveLoopDetect(n),
         hashSize: effectiveHashSize(n),
+        denyUnscoped: effectiveDenyUnscoped(n),
+        floodMax: effectiveFloodMax(n),
+        floodMaxUnscoped: effectiveFloodMaxUnscoped(n),
       })),
       links: simLinks,
     };
   }
 
+  // Baked in from https://api.meshcore.nz/api/v1/config
+  // (config.suggested_radio_settings.entries) — the live list the official
+  // MeshCore app itself offers, also mirrored at
+  // https://forum.letsmesh.net/t/meshcore-radio-setting-presets/67. Baked in
+  // rather than fetched at runtime so the tool works offline and doesn't
+  // depend on a CORS proxy; re-run the same fetch to refresh this list if
+  // upstream adds/changes entries. "EU/UK (Narrow)" (index 6) is the
+  // simulator's own default — see defaultPrefs().
+  const RADIO_PRESETS = [
+    { label: 'Australia', freqMhz: 915.8, bwKhz: 250.0, sf: 10, cr: 5 },
+    { label: 'Australia (Narrow)', freqMhz: 916.575, bwKhz: 62.5, sf: 7, cr: 8 },
+    { label: 'Australia (Mid)', freqMhz: 915.075, bwKhz: 125.0, sf: 9, cr: 5 },
+    { label: 'Australia: SA, WA', freqMhz: 923.125, bwKhz: 62.5, sf: 8, cr: 8 },
+    { label: 'Australia: QLD', freqMhz: 923.125, bwKhz: 62.5, sf: 8, cr: 5 },
+    { label: 'Brazil', freqMhz: 923.125, bwKhz: 62.5, sf: 8, cr: 8 },
+    { label: 'EU/UK (Narrow)', freqMhz: 869.618, bwKhz: 62.5, sf: 8, cr: 8 },
+    { label: 'EU/UK (Deprecated)', freqMhz: 869.525, bwKhz: 250.0, sf: 11, cr: 5 },
+    { label: 'Czech Republic (Narrow)', freqMhz: 869.432, bwKhz: 62.5, sf: 7, cr: 5 },
+    { label: 'EU 433MHz (Long Range)', freqMhz: 433.65, bwKhz: 250.0, sf: 11, cr: 5 },
+    { label: 'EU 433MHz (Narrow)', freqMhz: 433.65, bwKhz: 62.5, sf: 8, cr: 8 },
+    { label: 'Netherlands', freqMhz: 869.618, bwKhz: 62.5, sf: 7, cr: 5 },
+    { label: 'New Zealand', freqMhz: 917.375, bwKhz: 250.0, sf: 11, cr: 5 },
+    { label: 'New Zealand (Narrow)', freqMhz: 917.375, bwKhz: 62.5, sf: 7, cr: 5 },
+    { label: 'Portugal 433', freqMhz: 433.375, bwKhz: 62.5, sf: 9, cr: 6 },
+    { label: 'Portugal 868', freqMhz: 869.618, bwKhz: 62.5, sf: 7, cr: 6 },
+    { label: 'Switzerland', freqMhz: 869.618, bwKhz: 62.5, sf: 8, cr: 8 },
+    { label: 'USA/Canada (Recommended)', freqMhz: 910.525, bwKhz: 62.5, sf: 7, cr: 5 },
+    { label: 'Vietnam (Narrow)', freqMhz: 920.25, bwKhz: 62.5, sf: 8, cr: 5 },
+    { label: 'Vietnam (Deprecated)', freqMhz: 920.25, bwKhz: 250.0, sf: 11, cr: 5 },
+  ];
+
+  // Which preset (if any) a given radio config exactly matches — drives the
+  // dropdown's own selection: "Custom" whenever none of the baked-in
+  // presets match every field, e.g. after a manual edit.
+  function radioPresetLabelFor(radio) {
+    const match = RADIO_PRESETS.find((p) => p.freqMhz === radio.freqMhz && p.bwKhz === radio.bwKhz && p.sf === radio.sf && p.cr === radio.cr);
+    return match ? match.label : "";
+  }
+
   function defaultPrefs() {
     // Mirrors internal/meshsim.DefaultNodePrefs — kept in sync manually
-    // since this is plain JS, not generated from the Go struct.
+    // since this is plain JS, not generated from the Go struct. Radio
+    // defaults to the EU/UK (Narrow) preset (see RADIO_PRESETS) — preamble
+    // length isn't a field at all: real firmware derives it from SF alone
+    // (see preambleSymbolsForSF in Go), so it's never independently
+    // configurable here either.
     return {
       txDelayFactor: 0.5,
       directTxDelayFactor: 0.3,
       rxDelayBase: 0,
       txPowerDbm: 22,
-      radio: { freqMhz: 869.525, bwKhz: 250, sf: 11, cr: 5, preambleSymbols: 8, explicitHeader: true, crcEnabled: true },
+      radio: { freqMhz: 869.618, bwKhz: 62.5, sf: 8, cr: 8, explicitHeader: true, crcEnabled: true },
     };
   }
 
@@ -1136,7 +1387,7 @@
       let atMs = 0;
       for (let i = 0; i < g.count; i++) {
         if (i > 0) atMs += randomInt(rng, g.minGapMs, g.maxGapMs);
-        messages.push({ origin: g.nodeIndex, sendAtMs: atMs, payloadLen: randomInt(rng, g.minPayload, g.maxPayload), region: g.region || "" });
+        messages.push({ origin: g.nodeIndex, sendAtMs: atMs, payloadLen: randomInt(rng, g.minPayload, g.maxPayload), region: g.region || "", direct: !!g.direct });
       }
     });
     return messages;
@@ -1164,6 +1415,7 @@
       const report = MeshSim.run(scenarioFromState(), messages, seed, maxSimTimeMs);
       lastReport = report;
       lastMessages = messages;
+      rebuildLinkIndexes(report);
       renderResults(report);
       renderSentMessagesList();
       renderRankings(report);
@@ -1180,13 +1432,32 @@
     }
   }
 
+  // A run can produce thousands of receptions (5,256 measured on a dense
+  // 73-node scenario) — rendering every row up front is what made the
+  // reception log and the packet inspector's activity list slow to scroll
+  // and hard to scan. Both cap their initial render to this many rows and
+  // offer a "Show all N" control instead (item 10E).
+  const LONG_LIST_ROW_CAP = 200;
+
+  function appendShowAllButton(container, totalCount, onShowAll) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "sim-show-all-btn";
+    btn.textContent = `Show all ${totalCount}`;
+    btn.addEventListener("click", onShowAll);
+    container.appendChild(btn);
+  }
+
   // Renders report's reception log into container — used for both the
   // Results modal's own log and the map-docked playback control's live
   // copy (see ensureSimPlaybackControl), so the two never drift out of
   // sync with each other.
-  function renderReceptionLogInto(container, report) {
+  function renderReceptionLogInto(container, report, showAll) {
     container.innerHTML = "";
-    for (const r of report.receptions) {
+    const all = report.receptions;
+    const capped = !showAll && all.length > LONG_LIST_ROW_CAP;
+    const toRender = capped ? all.slice(0, LONG_LIST_ROW_CAP) : all;
+    for (const r of toRender) {
       const from = simNodes[r.fromNode];
       const to = simNodes[r.node];
       const row = document.createElement("div");
@@ -1197,6 +1468,25 @@
       `;
       container.appendChild(row);
     }
+    if (capped) appendShowAllButton(container, all.length, () => renderReceptionLogInto(container, report, true));
+  }
+
+  // item 10C — a stat strip of discrete labelled figures instead of a
+  // run-on sentence ("0 sent · 30 received · 1 relayed onward · 27
+  // collided · 2 dropped."), so the number that actually matters doesn't
+  // read with the same visual weight as everything around it. `stats` is
+  // [{label, value, tone}], tone one of "" (default) | "bad" — a bad tone
+  // is only worth calling out past a real threshold, decided by the
+  // caller, not by this shared renderer.
+  function renderStatStrip(container, stats) {
+    container.innerHTML = "";
+    container.className = "sim-stat-strip";
+    for (const s of stats) {
+      const el = document.createElement("div");
+      el.className = `sim-stat${s.tone ? ` sim-stat-${s.tone}` : ""}`;
+      el.innerHTML = `<span class="sim-stat-value">${escapeHtml(String(s.value))}</span><span class="sim-stat-label">${escapeHtml(s.label)}</span>`;
+      container.appendChild(el);
+    }
   }
 
   function renderResults(report) {
@@ -1204,9 +1494,20 @@
     ensureSimPlaybackControl();
     const total = report.receptions.length;
     const collided = report.receptions.filter((r) => r.collided).length;
-    const rate = total > 0 ? ((collided / total) * 100).toFixed(1) : "0.0";
-    const summary = `${total} reception${total === 1 ? "" : "s"}, ${collided} collided (${rate}%).`;
-    document.getElementById("sim-results-summary").textContent = summary;
+    // Item 13 — break collided into its distinct physical causes rather
+    // than one undifferentiated figure, so the dominant one is obvious at
+    // a glance instead of needing a trip into the packet inspector first.
+    const noLock = report.receptions.filter((r) => r.collisionKind === "no_lock").length;
+    const corrupted = report.receptions.filter((r) => r.collisionKind === "corrupted").length;
+    const txBusy = report.receptions.filter((r) => r.dropReason === "tx_busy").length;
+    const rate = total > 0 ? (collided / total) * 100 : 0;
+    renderStatStrip(document.getElementById("sim-results-summary"), [
+      { label: "receptions", value: total },
+      { label: `collided (${rate.toFixed(1)}%)`, value: collided, tone: rate >= 30 ? "bad" : "" },
+      { label: "— no lock", value: noLock },
+      { label: "— corrupted", value: corrupted },
+      { label: "missed (tx busy)", value: txBusy },
+    ]);
 
     renderReceptionLogInto(document.getElementById("sim-results-log"), report);
     const mapLog = document.getElementById("sim-map-results-log");
@@ -1240,7 +1541,7 @@
       row.className = `plan-list-item sim-message-row${selectedPacketId === packetId ? " sim-message-row-selected" : ""}`;
       row.dataset.packetId = String(packetId);
       row.innerHTML = `
-        <span class="plan-item-label">${escapeHtml(origin ? origin.label : "?")}${m.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(m.region)}</span>` : ""}</span>
+        <span class="plan-item-label">${escapeHtml(origin ? origin.label : "?")}${m.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(m.region)}</span>` : ""}${m.direct ? ` <span class="sim-node-badge sim-badge-direct">direct</span>` : ""}</span>
         <span class="plan-item-sub">${m.payloadLen}B at ${m.sendAtMs}ms · reached ${reachedNodes.size}, collided at ${collidedNodes.size}
           <button type="button" class="sim-message-details-btn" data-packet-id="${packetId}">Details</button>
         </span>
@@ -1265,9 +1566,11 @@
     weak_signal: "Signal too weak to decode",
     cannot_relay: "Node can't relay (client only)",
     hop_limit: "Hop limit reached",
-    already_relayed: "Already relayed this packet",
+    hop_limit_unscoped: "Unscoped hop limit reached",
+    already_seen: "Already seen this packet",
     region_mismatch: "Region mismatch — not relayed",
     loop_detect: "Dropped by loop detection",
+    tx_busy: "Missed (was transmitting)",
   };
 
   // Longer, hover-only explanations for the short DROP_REASON_LABELS —
@@ -1275,10 +1578,19 @@
   const DROP_REASON_DETAILS = {
     weak_signal: "The signal-to-noise ratio at this listener was below the minimum needed to decode a packet sent at this spreading factor.",
     cannot_relay: "This node is a plain client (e.g. a companion app), not a repeater — it never relays packets onward, regardless of its other settings.",
-    hop_limit: "The packet had already been relayed the maximum number of times allowed (MaxHopCount) before it reached this node.",
-    already_relayed: "This exact node had already relayed this exact packet once before — MeshCore's own dedup rule prevents sending the same packet twice.",
-    region_mismatch: "This node's configured region(s) don't include the region this message was tagged with, so it wasn't accepted for relay.",
+    hop_limit: "The packet had already been relayed this node's Flood max (flood.max) number of times before it reached this node — applies to every packet.",
+    hop_limit_unscoped: "This is an unscoped (regionless) packet, and it had already been relayed this node's Unscoped max (flood.max.unscoped) number of times — a separate, additional limit that only gates traffic with no region tag.",
+    already_seen: "This exact node had already decoded this exact packet once before (whether or not it went on to relay it) — MeshCore's own dedup rule (SimpleMeshTables::hasSeen) prevents ever processing the same packet twice, by any path.",
+    region_mismatch: "This node's configured region(s) don't include the region this message was tagged with, so it wasn't accepted for relay — or, for an unscoped message, this node has \"Allow unscoped\" turned off.",
     loop_detect: "This node's own loop-detect hash collided with a hash already present in the packet's path, so real firmware treats it as a likely loop and drops it — note this can trigger on a false-positive hash collision between two unrelated nodes, not just a real loop, especially at a small hash size.",
+    tx_busy: "This node's own transmitter was keyed while this packet was on the air. LoRa radios are half-duplex — they cannot receive while transmitting — so the packet was never heard at all, rather than being heard and corrupted.",
+  };
+
+  // Longer, hover-only explanations for a collision's own CollisionKind —
+  // mirrors the doc comment on internal/meshsim.Reception.CollisionKind.
+  const COLLISION_KIND_DETAILS = {
+    no_lock: "Another transmission was already on the air during this packet's own preamble/sync-word acquisition window, so the receiver's demodulator never locked onto it at all — no partial packet, no CRC failure, nothing decoded.",
+    corrupted: "This node's demodulator did lock onto the packet, but another transmission overlapping the payload wasn't beaten by the capture margin, so symbols were corrupted and the CRC failed.",
   };
 
   function dropReasonLabel(reason) {
@@ -1288,14 +1600,24 @@
   // Everything needed to render the reason column: a short badge label, a
   // CSS class for its colour, and a longer explanation shown on hover.
   function receptionOutcome(r) {
-    let label, cls, detail;
+    let label, cls, detail, relayTx = null;
     if (r.collided) {
+      // Item 13: break "Collided" into its distinct physical causes rather
+      // than one undifferentiated bucket — collisionKind is "no_lock"
+      // (demodulator never locked at all — nothing decoded) or "corrupted"
+      // (locked, but the payload was corrupted by an interferer beating
+      // the capture margin). See CollisionKind's own Go doc comment; empty
+      // only if the engine somehow didn't report a kind for a collision,
+      // which shouldn't happen, but reads as plain "Collided" rather than
+      // hiding the row if it does.
       const withLabels = (r.collidedWith || []).map(nodeLabel).join(", ");
-      label = "Collided";
+      const kindSuffix = r.collisionKind === "no_lock" ? " (no lock)" : r.collisionKind === "corrupted" ? " (corrupted)" : "";
+      label = `Collided${kindSuffix}`;
       cls = "sim-reason-collided";
+      const kindDetail = COLLISION_KIND_DETAILS[r.collisionKind] || "";
       detail = withLabels
-        ? `This reception's airtime window overlapped another transmission audible here (from ${withLabels}), corrupting it.`
-        : "This reception's airtime window overlapped another transmission audible here, corrupting it.";
+        ? `${kindDetail || "This reception's airtime window overlapped another transmission audible here, corrupting it."} (from ${withLabels})`
+        : kindDetail || "This reception's airtime window overlapped another transmission audible here, corrupting it.";
     } else if (r.dropReason === "cannot_relay") {
       // Not relaying is this node's normal, intended behaviour (a
       // companion app, or a CoreScope-labelled listener) — receiving it
@@ -1304,14 +1626,42 @@
       label = "Received";
       cls = "sim-reason-received";
       detail = "This node doesn't relay by design (a companion device, or a listener-role repeater) — successfully receiving it is what matters here, not relaying it onward.";
+    } else if (r.dropReason === "tx_busy") {
+      // A miss, not a collision or an active drop decision — real firmware
+      // never even knew this packet existed (half-duplex: its own
+      // transmitter was keyed) — kept visually distinct from both.
+      label = dropReasonLabel("tx_busy");
+      cls = "sim-reason-missed";
+      detail = DROP_REASON_DETAILS.tx_busy;
     } else if (r.dropReason) {
       label = dropReasonLabel(r.dropReason);
       cls = "sim-reason-dropped";
       detail = DROP_REASON_DETAILS[r.dropReason] || "";
     } else if (r.wasRelayed) {
-      label = "Relayed";
       cls = "sim-reason-relayed";
-      detail = "This node went on to relay the packet onward to its own neighbours.";
+      // The relay CAN be scheduled and never actually air, if the
+      // scheduled instant lands past the sim's own end (see
+      // docs/SIMULATOR_PLAN_PHASE2.md item 12, finding 2) — WasRelayed
+      // means "was eligible to relay," not "a transmission exists." Look
+      // the real Transmission up rather than assume one.
+      relayTx = transmissionIndex.get(linkKey(r.packetId, r.node)) || null;
+      if (relayTx) {
+        const delayMs = relayTx.atMs - r.atMs;
+        label = `Relayed ⤵ +${delayMs}ms`;
+        detail = `This node went on to relay the packet onward to its own neighbours, ${delayMs}ms after receiving it (that gap is the sender's own RxDelay/TxDelay settings at work — click the ⤵ to jump to the actual transmission).`;
+      } else {
+        label = "Relayed (never aired)";
+        detail = "This node was scheduled to relay the packet onward, but the scheduled instant fell after the simulation's own end (Sim duration), so it never actually went out.";
+      }
+    } else if (r.survivedCapture) {
+      // Real LoRa's capture effect: a stronger overlapping transmission
+      // was still decoded despite the interference, rather than a clean
+      // reception with nothing else audible at the time (see loraCaptured
+      // in internal/meshsim/engine.go) — distinct enough to call out, not
+      // just "Received".
+      label = "Captured";
+      cls = "sim-reason-captured";
+      detail = "Another transmission overlapped this reception's airtime window and was audible here too, but this signal was strong enough (real LoRa's capture effect) to still be decoded cleanly.";
     } else {
       label = "Received";
       cls = "sim-reason-received";
@@ -1320,12 +1670,29 @@
     if (r.senderWasCadDeferred) {
       detail += " The sender detected the channel busy (CAD) and delayed its own transmission by at least one retry before sending this.";
     }
-    return { label, cls, detail };
+    if (r.senderWasBudgetDeferred) {
+      detail += " The sender's own duty-cycle airtime budget (real firmware caps every node to roughly a 50% duty cycle) was too low, so it had to wait before this transmission could go out.";
+    }
+    return { label, cls, detail, relayTx };
   }
 
   function nodeLabel(nodeIndex) {
     const n = simNodes[nodeIndex];
     return n ? n.label : `#${nodeIndex}`;
+  }
+
+  // Item 17 — each hop in a path recorded its own path-hash at THAT
+  // repeater's own configured HashSize (1-3 bytes, real firmware's
+  // `set hash_size`), and different repeaters in the same scenario can be
+  // set to different sizes — so a single packet's own path can genuinely
+  // mix hash sizes hop to hop. Real firmware's loop.detect thresholds are
+  // defined against this size (a smaller hash is more collision-prone —
+  // see effectiveHashSize's own doc comment), so surfacing it alongside
+  // each hop is directly diagnostic, not just decorative.
+  function nodeLabelWithHashSize(nodeIndex) {
+    const n = simNodes[nodeIndex];
+    if (!n) return `#${nodeIndex}`;
+    return `${n.label} (${effectiveHashSize(n)}B)`;
   }
 
   // "Flood time" — how long after the original send this packet was still
@@ -1349,25 +1716,63 @@
   let currentPacketModalEvents = [];
   let currentPacketModalShowOpts = { showAt: false };
 
-  function buildTxEvent(packetId, m) {
-    return { kind: "tx", atMs: m.sendAtMs, packetId, node: m.origin, message: m };
+  // linkKey is the shared identity a reception and the transmission it
+  // caused — or a relay transmission and the reception it triggered —
+  // render with as data-link-key, so hovering/clicking one can find its
+  // partner. Real firmware's hasSeen dedup guarantees a node transmits any
+  // given packet at most once (see Transmission's own Go doc comment), so
+  // (packetId, node) is a safe, unambiguous pairing key — no heuristics
+  // needed.
+  function linkKey(packetId, node) {
+    return `${packetId}:${node}`;
+  }
+
+  // packetId:node -> Transmission, rebuilt whenever a fresh report loads
+  // (see runSimulation/hideResults) — every RX row's "was this relayed, and
+  // when" lookup goes through this rather than a linear scan of
+  // lastReport.transmissions per row.
+  let transmissionIndex = new Map();
+  // packetId:node -> the Reception that triggered this node's relay of
+  // that packet — the mirror of transmissionIndex, letting a relay TX row
+  // show "relaying what arrived at Xms" without a linear scan. Only ever
+  // has one entry per key: a node relays a packet based on exactly one
+  // decoded reception of it (hasSeen dedup — see Transmission's own Go doc
+  // comment), so wasRelayed is true on at most one Reception per
+  // (packetId, node).
+  let relayCauseIndex = new Map();
+
+  function rebuildLinkIndexes(report) {
+    transmissionIndex = new Map();
+    relayCauseIndex = new Map();
+    for (const tx of (report && report.transmissions) || []) {
+      transmissionIndex.set(linkKey(tx.packetId, tx.node), tx);
+    }
+    for (const r of (report && report.receptions) || []) {
+      if (r.wasRelayed) relayCauseIndex.set(linkKey(r.packetId, r.node), r);
+    }
+  }
+
+  function buildTxEvent(tx) {
+    return { kind: "tx", atMs: tx.atMs, packetId: tx.packetId, node: tx.node, transmission: tx };
   }
 
   function buildRxEvent(r) {
     return { kind: "rx", atMs: r.atMs, packetId: r.packetId, node: r.node, reception: r };
   }
 
-  // Every packet originated at nodeIndex (TX) plus every reception at
-  // nodeIndex (RX), merged into one chronological timeline — see
-  // openPacketInspectorForNode.
+  // Every transmission FROM nodeIndex (TX — the origin's own first send, or
+  // any relay) plus every reception AT nodeIndex (RX), merged into one
+  // chronological timeline — see openPacketInspectorForNode. Sourced from
+  // lastReport.transmissions (real air time, after any CAD/budget
+  // deferral), not lastMessages (only the origin's own scheduled send) —
+  // see docs/SIMULATOR_PLAN_PHASE2.md item 12's own "scheduled ≠ actual"
+  // finding.
   function buildNodeActivityEvents(nodeIndex) {
     const events = [];
-    if (lastMessages) {
-      lastMessages.forEach((m, packetId) => {
-        if (m.origin === nodeIndex) events.push(buildTxEvent(packetId, m));
-      });
-    }
     if (lastReport) {
+      for (const tx of lastReport.transmissions) {
+        if (tx.node === nodeIndex) events.push(buildTxEvent(tx));
+      }
       for (const r of lastReport.receptions) {
         if (r.node === nodeIndex) events.push(buildRxEvent(r));
       }
@@ -1376,12 +1781,15 @@
     return events;
   }
 
-  // This one packet's own send plus every reception of it anywhere — see
-  // openPacketDetails.
+  // This one packet's own transmissions (the origin's send, plus every
+  // node that went on to relay it) plus every reception of it anywhere —
+  // see openPacketDetails.
   function buildPacketActivityEvents(packetId) {
     const events = [];
-    if (lastMessages && lastMessages[packetId]) events.push(buildTxEvent(packetId, lastMessages[packetId]));
     if (lastReport) {
+      for (const tx of lastReport.transmissions) {
+        if (tx.packetId === packetId) events.push(buildTxEvent(tx));
+      }
       for (const r of lastReport.receptions) {
         if (r.packetId === packetId) events.push(buildRxEvent(r));
       }
@@ -1391,16 +1799,40 @@
   }
 
   function matchesOutcomeFilter(e, outcomeFilter) {
-    if (outcomeFilter === "tx") return e.kind === "tx";
-    if (e.kind === "tx") return outcomeFilter === ""; // TX rows only show under "All outcomes"
+    if (e.kind === "tx") {
+      switch (outcomeFilter) {
+        case "tx":
+          return true; // every TX row — original sends and relays alike
+        case "tx_origin":
+          return !e.transmission.isRelay;
+        case "tx_relay":
+        case "relayed":
+          // A relay's own TX row belongs under "Relayed" too — see the RX
+          // row's matching case below — so filtering by "relayed" surfaces
+          // both halves of the pair, not just the RX side.
+          return e.transmission.isRelay;
+        case "":
+          return true; // TX rows only show under "All outcomes" and the explicit TX filters above
+        default:
+          return false;
+      }
+    }
     const r = e.reception;
     switch (outcomeFilter) {
       case "relayed":
         return !r.collided && r.wasRelayed;
       case "collided":
         return r.collided;
+      case "collided_no_lock":
+        return r.collided && r.collisionKind === "no_lock";
+      case "collided_corrupted":
+        return r.collided && r.collisionKind === "corrupted";
+      case "tx_busy":
+        return !r.collided && r.dropReason === "tx_busy";
       case "dropped":
         // cannot_relay isn't a real drop — see receptionOutcome's own note.
+        // tx_busy IS a genuine delivery failure (see item 13), so it
+        // belongs here alongside the other drop reasons.
         return !r.collided && !!r.dropReason && r.dropReason !== "cannot_relay";
       case "received":
         return !r.collided && !r.wasRelayed && (!r.dropReason || r.dropReason === "cannot_relay");
@@ -1433,36 +1865,65 @@
   // (received) events — a single row shape covers both kinds, with a
   // colour-coded TX/RX badge as the only structural difference. Each row
   // drills into that packet's own full details.
-  function renderNodeActivityRows(container, events, { showAt, drillTo }) {
+  function renderNodeActivityRows(container, events, { showAt, drillTo, showAll }) {
     container.innerHTML = "";
     if (events.length === 0) {
       container.innerHTML = `<div class="plan-hint">Nothing to show.</div>`;
       return;
     }
+    const capped = !showAll && events.length > LONG_LIST_ROW_CAP;
+    const toRender = capped ? events.slice(0, LONG_LIST_ROW_CAP) : events;
+
+    // Only worth wiring up hover/click linking for a key whose BOTH halves
+    // are actually present in this rendered list — a relay whose RX row got
+    // filtered out (e.g. by the outcome filter) has no partner to jump to
+    // here. Counted over the full events set, not just toRender, so "Show
+    // all" doesn't change which rows are linkable out from under a user
+    // mid-hover.
+    const keyCounts = new Map();
     for (const e of events) {
+      const key = linkKey(e.packetId, e.node);
+      keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
+    }
+
+    for (const e of toRender) {
       const row = document.createElement("div");
       const atLabel = showAt ? `${escapeHtml(nodeLabel(e.node))} · ` : "";
+      const key = linkKey(e.packetId, e.node);
+      const hasLinkPartner = (keyCounts.get(key) || 0) > 1;
+      row.dataset.linkKey = key;
+
       if (e.kind === "tx") {
-        const m = e.message;
+        const tx = e.transmission;
         const own = lastReport ? lastReport.receptions.filter((r) => r.packetId === e.packetId) : [];
         const reachedCount = new Set(own.filter((r) => !r.collided).map((r) => r.node)).size;
         const collidedCount = new Set(own.filter((r) => r.collided).map((r) => r.node)).size;
+        // Every relay's own Reception (the one it decided to relay based
+        // on) is looked up here rather than re-derived — see
+        // relayCauseIndex's own doc comment.
+        const cause = tx.isRelay ? relayCauseIndex.get(key) : null;
+        const relayInfo = !tx.isRelay
+          ? ""
+          : cause
+            ? ` · <span class="sim-packet-relay-link" data-jump="1" title="Jump to the reception that triggered this relay">⤴ relaying what arrived at ${cause.atMs}ms</span>`
+            : ` · <span class="sim-packet-relay-link">⤴ relay</span>`;
         row.className = "plan-list-item sim-list-item sim-packet-row sim-clean";
         row.innerHTML = `
           <div class="sim-packet-row-top">
-            <span class="sim-txrx-badge sim-txrx-tx">TX</span>
+            <span class="sim-txrx-badge ${tx.isRelay ? "sim-txrx-relay" : "sim-txrx-tx"}">${tx.isRelay ? "RELAY" : "TX"}</span>
             <span class="plan-item-label">Packet #${e.packetId}</span>
-            ${m.region ? `<span class="sim-node-badge sim-badge-region">${escapeHtml(m.region)}</span>` : ""}
+            ${tx.region ? `<span class="sim-node-badge sim-badge-region">${escapeHtml(tx.region)}</span>` : ""}
+            ${tx.direct ? `<span class="sim-node-badge sim-badge-direct">direct</span>` : ""}
           </div>
           <div class="sim-packet-row-bottom">
-            <span class="sim-packet-context">${atLabel}${m.payloadLen}B · reached ${reachedCount}, collided at ${collidedCount}</span>
+            <span class="sim-packet-context">${atLabel}${tx.payloadLen}B · reached ${reachedCount}, collided at ${collidedCount}${relayInfo}</span>
             <span class="sim-packet-time">${e.atMs}ms</span>
           </div>
         `;
       } else {
         const r = e.reception;
         const outcome = receptionOutcome(r);
-        const pathLabels = (r.path || []).map(nodeLabel).join(" → ");
+        const pathLabels = (r.path || []).map(nodeLabelWithHashSize).join(" → ");
         row.className = `plan-list-item sim-list-item sim-packet-row ${r.collided ? "sim-collided" : r.dropReason && r.dropReason !== "cannot_relay" ? "sim-dropped" : "sim-clean"}`;
         row.innerHTML = `
           <div class="sim-packet-row-top">
@@ -1474,16 +1935,41 @@
             <span class="sim-packet-context">${atLabel}from ${escapeHtml(nodeLabel(r.fromNode))}</span>
             <span class="sim-packet-time">${r.atMs}ms</span>
             <span class="sim-packet-hop">hop ${r.hopCount}</span>
-            <span class="sim-packet-reason ${outcome.cls}" title="${escapeHtml(outcome.detail)}">${escapeHtml(outcome.label)}${r.senderWasCadDeferred ? " ⏱" : ""}</span>
+            <span class="sim-packet-reason ${outcome.cls}" data-jump="${outcome.relayTx ? "1" : ""}" title="${escapeHtml(outcome.detail)}">${escapeHtml(outcome.label)}${r.senderWasCadDeferred ? " ⏱" : ""}${r.senderWasBudgetDeferred ? " 🔋" : ""}</span>
           </div>
         `;
       }
+
+      if (hasLinkPartner) {
+        row.classList.add("sim-linkable-row");
+        row.addEventListener("mouseenter", () => {
+          container.querySelectorAll(`[data-link-key="${key}"]`).forEach((el) => el.classList.add("sim-row-linked"));
+        });
+        row.addEventListener("mouseleave", () => {
+          container.querySelectorAll(`[data-link-key="${key}"]`).forEach((el) => el.classList.remove("sim-row-linked"));
+        });
+        const jumpEl = row.querySelector('[data-jump="1"]');
+        if (jumpEl) {
+          jumpEl.classList.add("sim-jump-link");
+          jumpEl.addEventListener("click", (evt) => {
+            evt.stopPropagation(); // don't also trigger the row's own drill-down click below
+            container.querySelectorAll(`[data-link-key="${key}"]`).forEach((el) => {
+              if (el === row) return;
+              el.scrollIntoView({ block: "center", behavior: "smooth" });
+              el.classList.add("sim-row-highlight");
+              setTimeout(() => el.classList.remove("sim-row-highlight"), 1500);
+            });
+          });
+        }
+      }
+
       row.addEventListener("click", () => {
         if (drillTo === "node") openPacketInspectorForNode(e.node, "drill");
         else openPacketDetails(e.packetId, "drill");
       });
       container.appendChild(row);
     }
+    if (capped) appendShowAllButton(container, events.length, () => renderNodeActivityRows(container, events, { showAt, drillTo, showAll: true }));
   }
 
   // One row per node in the current scenario, regardless of whether it
@@ -1504,7 +1990,14 @@
     }
     nodesSortedByLabel().forEach(({ n, i }) => {
       const own = byNode.get(i) || [];
-      const received = own.some((r) => !r.collided);
+      // "Received" must mean genuinely DECODED, not merely "not collided" —
+      // weak_signal and tx_busy both leave Collided false but were never
+      // decoded at all (see their own Go doc comments: neither marks the
+      // packet seen), so excluding them here fixes a real pre-existing
+      // false-positive this checklist would otherwise show for either.
+      const received = own.some((r) => !r.collided && r.dropReason !== "weak_signal" && r.dropReason !== "tx_busy");
+      const collidedCount = own.filter((r) => r.collided).length;
+      const missedCount = own.filter((r) => !r.collided && (r.dropReason === "weak_signal" || r.dropReason === "tx_busy")).length;
       let statusCls, statusLabel, statusDetail;
       if (i === originIndex) {
         statusCls = "sim-checklist-origin";
@@ -1514,6 +2007,14 @@
         statusCls = "sim-checklist-yes";
         statusLabel = "✓ Received";
         statusDetail = "Received a clean (non-collided) copy of this packet.";
+      } else if (own.length > 0 && missedCount > 0 && collidedCount > 0) {
+        statusCls = "sim-checklist-no";
+        statusLabel = "✗ Never decoded";
+        statusDetail = `Heard ${own.length} attempts at this packet — ${collidedCount} collided, ${missedCount} never decoded (too weak, or this node's own transmitter was busy) — none successful.`;
+      } else if (own.length > 0 && missedCount > 0) {
+        statusCls = "sim-checklist-no";
+        statusLabel = "✗ Missed every attempt";
+        statusDetail = `Heard ${own.length} attempt${own.length === 1 ? "" : "s"} at this packet, but never decoded any of them (too weak to decode, or this node's own transmitter was keyed at the time).`;
       } else if (own.length > 0) {
         statusCls = "sim-checklist-no";
         statusLabel = "✗ Collided every time";
@@ -1572,13 +2073,37 @@
     const n = simNodes[nodeIndex];
     document.getElementById("sim-packet-modal-title").textContent = `Packets at ${n ? n.label : "this node"}`;
     const events = buildNodeActivityEvents(nodeIndex);
-    const txCount = events.filter((e) => e.kind === "tx").length;
+    const txEvents = events.filter((e) => e.kind === "tx").map((e) => e.transmission);
+    const originSends = txEvents.filter((tx) => !tx.isRelay).length;
+    const relayTxCount = txEvents.filter((tx) => tx.isRelay).length;
     const rxEvents = events.filter((e) => e.kind === "rx").map((e) => e.reception);
     const collided = rxEvents.filter((r) => r.collided).length;
-    const dropped = rxEvents.filter((r) => !r.collided && r.dropReason && r.dropReason !== "cannot_relay").length;
-    const relayed = rxEvents.filter((r) => r.wasRelayed).length;
-    document.getElementById("sim-packet-modal-summary").textContent =
-      `${txCount} sent · ${rxEvents.length} received · ${relayed} relayed onward · ${collided} collided · ${dropped} dropped.`;
+    // tx_busy is a miss (this node's own transmitter was keyed), not a
+    // collision and not an active drop decision — broken out from
+    // "dropped" the same way item 13's results-modal summary does, so it
+    // isn't double-counted between the two figures.
+    const txBusy = rxEvents.filter((r) => r.dropReason === "tx_busy").length;
+    const dropped = rxEvents.filter((r) => !r.collided && r.dropReason && r.dropReason !== "cannot_relay" && r.dropReason !== "tx_busy").length;
+    const scheduledRelays = rxEvents.filter((r) => r.wasRelayed).length;
+    // A relay CAN be scheduled and never actually air, if the scheduled
+    // instant lands past the sim's own end (see
+    // docs/SIMULATOR_PLAN_PHASE2.md item 12, finding 2) — every such case
+    // shows up here as a gap between what was scheduled and what actually
+    // transmitted, rather than silently vanishing.
+    const neverAired = scheduledRelays - relayTxCount;
+    const rxTotal = rxEvents.length;
+    const stats = [
+      { label: "sent (origin)", value: originSends },
+      { label: "received", value: rxTotal },
+      { label: "relayed (sent)", value: relayTxCount },
+      { label: "collided", value: collided, tone: rxTotal > 0 && collided / rxTotal >= 0.3 ? "bad" : "" },
+      { label: "missed (tx busy)", value: txBusy },
+      { label: "dropped", value: dropped },
+    ];
+    if (neverAired > 0) {
+      stats.push({ label: "scheduled, never aired", value: neverAired, tone: "bad" });
+    }
+    renderStatStrip(document.getElementById("sim-packet-modal-summary"), stats);
 
     // The delivery checklist is a per-packet view (every node's status for
     // ONE packet) — doesn't apply here, where the packet is the varying
@@ -1600,8 +2125,10 @@
     const origin = simNodes[m.origin];
     document.getElementById("sim-packet-modal-title").textContent = `Packet #${packetId} details`;
     const flood = floodTimeMs(packetId);
-    document.getElementById("sim-packet-modal-summary").textContent =
-      `From ${origin ? origin.label : "?"}${m.region ? ` (region ${m.region})` : ""} · ${m.payloadLen}B · sent at ${m.sendAtMs}ms` +
+    const summaryEl = document.getElementById("sim-packet-modal-summary");
+    summaryEl.className = "plan-hint"; // this view uses a plain sentence, not the stat strip openPacketInspectorForNode leaves behind
+    summaryEl.textContent =
+      `From ${origin ? origin.label : "?"}${m.region ? ` (region ${m.region})` : ""}${m.direct ? " (direct)" : ""} · ${m.payloadLen}B · sent at ${m.sendAtMs}ms` +
       (flood != null ? ` · flood time ${flood}ms (last activity at ${m.sendAtMs + flood}ms)` : "");
 
     document.getElementById("sim-packet-modal-checklist-section").classList.remove("hidden");
@@ -1671,16 +2198,138 @@
   let rankingsSortKey = "successCount";
   let rankingsSortDir = "desc";
 
+  // A reception that never actually got decoded at all (weak_signal,
+  // tx_busy) or was a genuine duplicate of an already-processed copy
+  // (already_seen) isn't a "delivery" in any sense worth counting — mirrors
+  // the exact same filter internal/meshsim.Report.DeliveryRatio applies on
+  // the Go side (see docs/SIMULATOR_PLAN_PHASE2.md item 15a), kept in sync
+  // manually since this is plain JS, not generated from the Go source.
+  function isCanonicalDelivery(r) {
+    return !r.collided && r.dropReason !== "weak_signal" && r.dropReason !== "tx_busy" && r.dropReason !== "already_seen";
+  }
+
+  // JS mirror of internal/meshsim.reachableFrom — a node this message could
+  // possibly ever reach, given the CURRENT scenario's own topology and
+  // per-node settings, regardless of what any specific simulated run's
+  // random draws happened to produce. Used as computeRankings' own
+  // "received x/y" denominator so an isolated/out-of-range node doesn't
+  // silently make every repeater's delivery figure look worse than it is.
+  // Gated exactly like the Go BFS: a node that can't relay or wouldn't
+  // accept this region is included itself (reachable on this hop) but
+  // doesn't extend the search past itself; the origin is exempt from both
+  // gates (it always "sends," regardless of its own relay/region config).
+  function computeReachableSet(originIndex, region) {
+    const adj = new Map();
+    for (const l of simLinks) {
+      if (!adj.has(l.from)) adj.set(l.from, []);
+      adj.get(l.from).push(l.to);
+    }
+    const reachable = new Set([originIndex]);
+    const queue = [originIndex];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (current !== originIndex) {
+        const node = simNodes[current];
+        if (!node) continue;
+        const regions = effectiveRegions(node);
+        const accepts = region === "" ? !effectiveDenyUnscoped(node) : regions.includes("*") || regions.includes(region);
+        if (!canRelay(node) || !accepts) continue; // leaf: reachable itself, but doesn't relay onward
+      }
+      for (const to of adj.get(current) || []) {
+        if (!reachable.has(to)) {
+          reachable.add(to);
+          queue.push(to);
+        }
+      }
+    }
+    return reachable;
+  }
+
+  // Item 16 — a per-repeater run scoreboard: is this repeater earning its
+  // own airtime? successCount/collisionCount/contentionCaused are the
+  // pre-existing columns; everything else here is new. dutyCyclePct and
+  // relay/deferral figures come from report.transmissions (item 12) —
+  // uniqueDeliveries/redundantRelays from attributing each canonical
+  // delivery to whichever transmission actually caused it.
   function computeRankings(report) {
-    const perNode = simNodes.map(() => ({ successCount: 0, collisionCount: 0, contentionCaused: 0 }));
+    const perNode = simNodes.map(() => ({
+      successCount: 0,
+      collisionCount: 0,
+      contentionCaused: 0,
+      txBusyCount: 0,
+      dutyAirtimeMs: 0,
+      relayedCount: 0,
+      deliveredCount: 0,
+      reachableCount: 0,
+      uniqueDeliveries: 0,
+      redundantRelays: 0,
+      relayDelaySumMs: 0,
+      relayDelayCount: 0,
+      deferrals: 0,
+    }));
+
     for (const r of report.receptions) {
       if (!perNode[r.node]) continue;
       if (r.collided) perNode[r.node].collisionCount++;
       else perNode[r.node].successCount++;
+      if (r.dropReason === "tx_busy") perNode[r.node].txBusyCount++;
       for (const other of r.collidedWith || []) {
         if (perNode[other]) perNode[other].contentionCaused++;
       }
     }
+
+    // deliveringPairs: "packetId:fromNode" — this sender's transmission of
+    // this packet is the one that actually delivered it to at least one
+    // listener (as opposed to arriving at a listener who'd already decoded
+    // it from someone else, or arriving nowhere useful at all) — the input
+    // "redundant relay" attribution below needs, at the per-packet level.
+    const deliveringPairs = new Set();
+    for (const r of report.receptions) {
+      if (!isCanonicalDelivery(r)) continue;
+      if (perNode[r.fromNode]) perNode[r.fromNode].uniqueDeliveries++;
+      if (perNode[r.node]) perNode[r.node].deliveredCount++;
+      deliveringPairs.add(`${r.packetId}:${r.fromNode}`);
+    }
+
+    for (const tx of report.transmissions || []) {
+      if (!perNode[tx.node]) continue;
+      perNode[tx.node].dutyAirtimeMs += tx.airtimeMs;
+      if (tx.cadDeferred) perNode[tx.node].deferrals++;
+      if (tx.budgetDeferred) perNode[tx.node].deferrals++;
+      if (tx.isRelay) {
+        perNode[tx.node].relayedCount++;
+        // Every one of this node's own listeners already had a canonical
+        // delivery attributed to a DIFFERENT sender for this exact packet
+        // (or never got it via any path at all) — this relay's own
+        // airtime produced zero unique deliveries, i.e. it was spent
+        // without adding coverage. Feeds item 15c's redundancy-suppress
+        // model.
+        if (!deliveringPairs.has(`${tx.packetId}:${tx.node}`)) {
+          perNode[tx.node].redundantRelays++;
+        }
+      }
+    }
+
+    for (const [key, tx] of transmissionIndex) {
+      if (!tx.isRelay) continue;
+      const cause = relayCauseIndex.get(key);
+      if (cause && perNode[tx.node]) {
+        perNode[tx.node].relayDelaySumMs += tx.atMs - cause.atMs;
+        perNode[tx.node].relayDelayCount++;
+      }
+    }
+
+    if (lastMessages) {
+      lastMessages.forEach((m) => {
+        const reachable = computeReachableSet(m.origin, m.region || "");
+        reachable.delete(m.origin);
+        for (const nodeIndex of reachable) {
+          if (perNode[nodeIndex]) perNode[nodeIndex].reachableCount++;
+        }
+      });
+    }
+
+    const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
     return simNodes.map((n, i) => {
       const p = perNode[i];
       const total = p.successCount + p.collisionCount;
@@ -1691,16 +2340,42 @@
         collisionCount: p.collisionCount,
         contentionCaused: p.contentionCaused,
         successRate: total > 0 ? p.successCount / total : null,
+        txBusyCount: p.txBusyCount,
+        // Airtime ÷ the configured sim duration, not the run's own busy
+        // span — a candidate that merely finishes early shouldn't read as
+        // lower duty cycle than one that runs the full window (see
+        // docs/SIMULATOR_PLAN_PHASE2.md item 16's own note on this).
+        dutyCyclePct: maxSimTimeMs > 0 ? (p.dutyAirtimeMs / maxSimTimeMs) * 100 : 0,
+        relayedCount: p.relayedCount,
+        deliveryRatio: p.reachableCount > 0 ? p.deliveredCount / p.reachableCount : null,
+        deliveredCount: p.deliveredCount,
+        reachableCount: p.reachableCount,
+        uniqueDeliveries: p.uniqueDeliveries,
+        redundantRelays: p.redundantRelays,
+        avgRelayDelayMs: p.relayDelayCount > 0 ? Math.round(p.relayDelaySumMs / p.relayDelayCount) : null,
+        deferrals: p.deferrals,
       };
     });
   }
 
   const RANKING_COLUMNS = [
     { key: "label", label: "Repeater" },
+    { key: "dutyCyclePct", label: "Duty cycle", format: (v) => `${v.toFixed(1)}%` },
+    {
+      key: "deliveryRatio",
+      label: "Received",
+      format: (v, r) => (v == null ? "—" : `${r.deliveredCount}/${r.reachableCount} (${Math.round(v * 100)}%)`),
+    },
+    { key: "uniqueDeliveries", label: "Unique deliveries", goodHigh: true },
+    { key: "redundantRelays", label: "Redundant relays", badHigh: true },
+    { key: "relayedCount", label: "Relayed" },
     { key: "successCount", label: "Successful", goodHigh: true },
     { key: "collisionCount", label: "Collisions (own)", badHigh: true },
+    { key: "txBusyCount", label: "Missed (tx busy)", badHigh: true },
     { key: "contentionCaused", label: "Contention (caused)", badHigh: true },
-    { key: "successRate", label: "Success rate", format: (v) => (v == null ? "—" : `${Math.round(v * 100)}%`) },
+    { key: "avgRelayDelayMs", label: "Avg relay delay", format: (v) => (v == null ? "—" : `${v}ms`) },
+    { key: "deferrals", label: "Deferrals (CAD+budget)" },
+    { key: "successRate", label: "Decode rate", format: (v) => (v == null ? "—" : `${Math.round(v * 100)}%`) },
   ];
 
   function renderRankingsTableInto(container) {
@@ -1723,7 +2398,7 @@
       .map((r) => {
         const cells = RANKING_COLUMNS.map((c) => {
           const raw = r[c.key];
-          const display = c.format ? c.format(raw) : escapeHtml(String(raw));
+          const display = c.format ? c.format(raw, r) : escapeHtml(String(raw));
           let cls = "";
           if (c.goodHigh && raw > 0) cls = "sim-rank-good";
           if (c.badHigh && raw > 0) cls = "sim-rank-bad";
@@ -1775,6 +2450,7 @@
     document.getElementById("sim-open-results-modal").classList.add("hidden");
     document.getElementById("sim-open-predictions-modal").classList.add("hidden");
     document.getElementById("sim-open-bottleneck-modal").classList.add("hidden");
+    document.getElementById("sim-open-stress-modal").classList.add("hidden");
     document.getElementById("sim-rankings-expand").classList.add("hidden");
     closeModals();
     setRankingsFullWindowOpen(false);
@@ -1783,6 +2459,12 @@
     lastMessages = null;
     lastTuneResult = null;
     lastAttrsList = null;
+    lastStressResult = null;
+    lastPolicyResult = null;
+    lastPolicyAltitudeAttrs = null;
+    lastPolicyActions = [];
+    document.getElementById("sim-policy-section").classList.add("hidden");
+    rebuildLinkIndexes(null);
     stopReplay();
     simResultsLayer.clearLayers(); // also removes every growth marker, since they live in this layer
     growthMarkers.clear();
@@ -2017,7 +2699,10 @@
   }
 
   // Mirrors internal/meshsim/rules.go's RuleCondition.matches — kept in
-  // sync manually, same as defaultPrefs() mirroring DefaultNodePrefs.
+  // sync manually, same as defaultPrefs() mirroring DefaultNodePrefs. The
+  // last three cases (item 15c) are additive — the older single-rule
+  // "Predict settings" feature never produces a rule using them, so this
+  // extension doesn't change its own existing behaviour at all.
   function ruleMatchesAttrs(rule, attrs) {
     const c = rule.condition;
     switch (c.kind) {
@@ -2029,6 +2714,12 @@
         return attrs.altitudeM <= c.threshold;
       case "neighbors_at_least":
         return attrs.neighborCount >= c.threshold;
+      case "neighbors_at_most":
+        return attrs.neighborCount <= c.threshold;
+      case "is_articulation":
+        return !!attrs.isArticulation;
+      case "marginal_coverage_at_least":
+        return attrs.marginalCoverage >= c.threshold;
       default:
         return false;
     }
@@ -2041,6 +2732,102 @@
     if (rule.directTxDelayFactor != null) out.directTxDelayFactor = rule.directTxDelayFactor;
     if (rule.rxDelayBase != null) out.rxDelayBase = rule.rxDelayBase;
     return out;
+  }
+
+  // --- item 15c: JS mirrors of the Go-side topology attributes -----------
+  //
+  // internal/meshsim.SuggestPolicy computes IsArticulation/MarginalCoverage
+  // itself and never returns them — only the winning ConfigPolicy comes
+  // back. To show which specific repeaters that policy actually changes
+  // (the action list below), this needs to re-derive the same per-node
+  // attributes client-side, from the same simLinks topology, using the
+  // same algorithms as internal/meshsim/topology.go.
+
+  function computeNeighborSets() {
+    const neighbors = simNodes.map(() => new Set());
+    for (const l of simLinks) {
+      if (neighbors[l.from]) neighbors[l.from].add(l.to);
+      if (neighbors[l.to]) neighbors[l.to].add(l.from);
+    }
+    return neighbors;
+  }
+
+  // Mirrors internal/meshsim/topology.go's findArticulationPoints (Tarjan's
+  // low-link DFS).
+  function findArticulationPointsJs(neighbors) {
+    const n = neighbors.length;
+    const disc = new Array(n).fill(0);
+    const low = new Array(n).fill(0);
+    const visited = new Array(n).fill(false);
+    const isArt = new Array(n).fill(false);
+    let timer = 0;
+    function dfs(u, parent) {
+      visited[u] = true;
+      timer++;
+      disc[u] = timer;
+      low[u] = timer;
+      let children = 0;
+      for (const v of neighbors[u]) {
+        if (v === parent) continue;
+        if (visited[v]) {
+          if (disc[v] < low[u]) low[u] = disc[v];
+          continue;
+        }
+        children++;
+        dfs(v, u);
+        if (low[v] < low[u]) low[u] = low[v];
+        if (parent !== -1 && low[v] >= disc[u]) isArt[u] = true;
+      }
+      if (parent === -1 && children > 1) isArt[u] = true;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!visited[i]) dfs(i, -1);
+    }
+    return isArt;
+  }
+
+  // Mirrors internal/meshsim/topology.go's marginalCoverageFor.
+  function marginalCoverageForJs(u, neighbors) {
+    let unique = 0;
+    for (const v of neighbors[u]) {
+      let coveredByOther = false;
+      for (const w of neighbors[u]) {
+        if (w === v) continue;
+        if (neighbors[w].has(v)) {
+          coveredByOther = true;
+          break;
+        }
+      }
+      if (!coveredByOther) unique++;
+    }
+    return unique;
+  }
+
+  // Mirrors internal/meshsim/topology.go's computeTopologyAttrs — the
+  // JS-side counterpart used purely for rendering the action list, never
+  // sent to the engine (the WASM/Go side always recomputes these itself).
+  function computeTopologyAttrsJs() {
+    const neighbors = computeNeighborSets();
+    const isArt = findArticulationPointsJs(neighbors);
+    return simNodes.map((n, i) => ({
+      neighborCount: neighbors[i].size,
+      isArticulation: isArt[i],
+      marginalCoverage: marginalCoverageForJs(i, neighbors),
+    }));
+  }
+
+  // Applies every rule in a ConfigPolicy (item 15c) to one node's baseline
+  // prefs/floodMax, in order — later rules override earlier ones per-field,
+  // mirroring internal/meshsim.applyPolicyToScenario exactly.
+  function applyPolicyToNodeState(basePrefs, baseFloodMax, policy, attrs) {
+    let prefs = basePrefs;
+    let floodMax = baseFloodMax;
+    for (const rule of policy) {
+      if (!ruleMatchesAttrs(rule, attrs)) continue;
+      prefs = applyRule(prefs, rule);
+      if (rule.floodMax != null) floodMax = rule.floodMax;
+    }
+    return { prefs, floodMax };
   }
 
   async function predictSettings() {
@@ -2110,6 +2897,97 @@
     });
   }
 
+  // --- item 15b: stress test / offered-load sweep ------------------------
+  //
+  // Deliberately synthetic traffic, not the user's own message senders
+  // above (see internal/meshsim.generateStressMessages) — the whole point
+  // is finding the network's own ceiling, not replaying one specific
+  // scenario at increasing multiples of itself.
+  async function runStressTest() {
+    if (simNodes.length === 0) {
+      setStatus("sim-status", "Load some nodes first.");
+      return;
+    }
+    if (simLinks.length === 0) {
+      setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
+      return;
+    }
+    const loadLevels = document
+      .getElementById("sim-stress-levels")
+      .value.split(",")
+      .map((s) => parseFloat(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0)
+      .sort((a, b) => a - b); // computeKnee (Go side) assumes ascending order
+    if (loadLevels.length === 0) {
+      setStatus("sim-status", "Enter at least one positive load level (msgs/min).");
+      return;
+    }
+    const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
+    const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
+    const trials = Math.min(100, Math.max(1, parseInt(document.getElementById("sim-trials").value, 10) || 20));
+    setStatus("sim-status", "Running stress sweep…");
+    setStressProgress(0, loadLevels.length);
+    document.getElementById("sim-stress-run").disabled = true;
+
+    const generation = ++predictGeneration; // shares the worker + its generation guard with predictSettings — only one search of either kind is ever live at once
+    const worker = ensurePredictWorker();
+
+    function onMessage(e) {
+      const msg = e.data;
+      if (msg.generation !== generation) return;
+      if (msg.type === "stress-progress") {
+        setStressProgress(msg.done, msg.total);
+      } else if (msg.type === "stress-result") {
+        worker.removeEventListener("message", onMessage);
+        hideStressProgress();
+        document.getElementById("sim-stress-run").disabled = false;
+        lastStressResult = msg.result;
+        renderStressResult(msg.result);
+        setStatus("sim-status", "Done.");
+        openModal("sim-stress-modal");
+      } else if (msg.type === "stress-error") {
+        worker.removeEventListener("message", onMessage);
+        hideStressProgress();
+        document.getElementById("sim-stress-run").disabled = false;
+        setStatus("sim-status", `Stress test failed: ${msg.message}`);
+      }
+    }
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({
+      kind: "stress",
+      generation,
+      stressRequest: {
+        scenario: scenarioFromState(),
+        maxSimTimeMs,
+        trials,
+        seed,
+        loadLevels,
+      },
+    });
+  }
+
+  function renderStressResult(result) {
+    document.getElementById("sim-open-stress-modal").classList.remove("hidden");
+    const knee = result.kneeMessagesPerMinute;
+    document.getElementById("sim-stress-summary").textContent =
+      knee > 0
+        ? `This network handles up to ~${knee} messages/minute before delivery drops below 95% of its best-case level.`
+        : "Delivery never held above 95% of its best-case level at any swept load — try lower load levels.";
+    const tbody = document.getElementById("sim-stress-tbody");
+    tbody.innerHTML = "";
+    for (const level of result.levels) {
+      const tr = document.createElement("tr");
+      const isKnee = level.messagesPerMinute === knee;
+      if (isKnee) tr.className = "sim-knee-row";
+      tr.innerHTML = `
+        <td>${level.messagesPerMinute}${isKnee ? " ⭐" : ""}</td>
+        <td>${(level.deliveryRatio * 100).toFixed(1)}%</td>
+        <td>${(level.collisionRate * 100).toFixed(1)}%</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
   function renderSuggestions(result) {
     document.getElementById("sim-open-predictions-modal").classList.remove("hidden");
     const list = document.getElementById("sim-suggestions-list");
@@ -2152,6 +3030,182 @@
       `;
       list.appendChild(row);
     });
+  }
+
+  // --- item 15c/15d: composite policy search + action list ---------------
+
+  let lastPolicyResult = null;
+  let lastPolicyAltitudeAttrs = null; // AltitudeM per node, as sent to SuggestPolicy — merged with computeTopologyAttrsJs() when rendering the action list
+  let lastPolicyActions = []; // for CSV export — see exportPolicyActionsCsv
+
+  async function runSuggestPolicy() {
+    if (simNodes.length === 0) {
+      setStatus("sim-status", "Load some nodes first.");
+      return;
+    }
+    if (simLinks.length === 0) {
+      setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
+      return;
+    }
+    if (simMessageGenerators.length === 0) {
+      setStatus("sim-status", "Add at least one message sender first.");
+      return;
+    }
+    const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
+    const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
+    const trials = Math.min(100, Math.max(1, parseInt(document.getElementById("sim-trials").value, 10) || 20));
+    setStatus("sim-status", "Searching policies (topology + delay models)…");
+    setPredictProgress(0, 1);
+    document.getElementById("sim-suggest-policy").disabled = true;
+
+    const grid = await ensureGrid(simNodes).catch(() => null);
+    const attrs = attrsFromState(simNodes, grid); // only altitudeM is actually read server-side — see PolicyTuneRequest's own doc comment
+    lastPolicyAltitudeAttrs = attrs;
+
+    const generation = ++predictGeneration; // shares the same worker + generation guard as predictSettings/runStressTest
+    const worker = ensurePredictWorker();
+
+    function onMessage(e) {
+      const msg = e.data;
+      if (msg.generation !== generation) return;
+      if (msg.type === "suggest-policy-progress") {
+        setPredictProgress(msg.done, msg.total);
+      } else if (msg.type === "suggest-policy-result") {
+        worker.removeEventListener("message", onMessage);
+        hidePredictProgress();
+        document.getElementById("sim-suggest-policy").disabled = false;
+        lastPolicyResult = msg.result;
+        renderPolicyResult(msg.result);
+        setStatus("sim-status", "Done.");
+        openModal("sim-predictions-modal");
+      } else if (msg.type === "suggest-policy-error") {
+        worker.removeEventListener("message", onMessage);
+        hidePredictProgress();
+        document.getElementById("sim-suggest-policy").disabled = false;
+        setStatus("sim-status", `Policy search failed: ${msg.message}`);
+      }
+    }
+    worker.addEventListener("message", onMessage);
+    worker.postMessage({
+      kind: "suggest-policy",
+      generation,
+      policyTuneRequest: {
+        scenario: scenarioFromState(),
+        messages: messagesFromState(seed),
+        attrs,
+        maxSimTimeMs,
+        trials,
+        seed,
+      },
+    });
+  }
+
+  function renderPolicyResult(result) {
+    const section = document.getElementById("sim-policy-section");
+    if (!result.suggestions || result.suggestions.length === 0) {
+      section.classList.add("hidden");
+      return;
+    }
+    section.classList.remove("hidden");
+    const best = result.suggestions[0];
+    document.getElementById("sim-policy-summary").textContent =
+      `Baseline: ${(result.baselineDelivery * 100).toFixed(1)}% delivery, ${(result.baselineCollision * 100).toFixed(1)}% collisions ` +
+      `→ best policy "${best.name}": ${(best.deliveryRatio * 100).toFixed(1)}% delivery, ${(best.collisionRate * 100).toFixed(1)}% collisions ` +
+      `(seed ${document.getElementById("sim-seed").value}, ${document.getElementById("sim-trials").value} trials — reproducible).`;
+
+    const suggList = document.getElementById("sim-policy-suggestions-list");
+    suggList.innerHTML = "";
+    result.suggestions.slice(0, 10).forEach((s, i) => {
+      const row = document.createElement("div");
+      row.className = "plan-list-item";
+      const better = s.deliveryRatio > result.baselineDelivery;
+      row.innerHTML = `
+        <span class="sim-suggestion-rank">#${i + 1}</span>
+        <span class="plan-item-label">${escapeHtml(s.name)}</span>
+        <span class="sim-suggestion-rate ${better ? "sim-rate-better" : ""}">${(s.deliveryRatio * 100).toFixed(1)}% delivery (baseline ${(result.baselineDelivery * 100).toFixed(1)}%) · ${(s.collisionRate * 100).toFixed(1)}% collisions</span>
+      `;
+      suggList.appendChild(row);
+    });
+
+    renderPolicyActionList(best);
+  }
+
+  // The per-repeater "what actually needs to change" list (item 15d) — only
+  // nodes where the winning policy's own recommendation genuinely differs
+  // from what's currently set, each with a copy-pasteable MeshCore CLI
+  // line. Recommendations are computed from defaultPrefs() (a clean
+  // baseline), the same convention the older single-rule
+  // renderPerNodePredictions already uses, not from "current + delta" —
+  // this is "what should this repeater's setting BE," not a diff of
+  // arbitrary prior manual tweaks.
+  function renderPolicyActionList(best) {
+    const topologyAttrs = computeTopologyAttrsJs();
+    const actions = [];
+    simNodes.forEach((n, i) => {
+      const attrs = {
+        altitudeM: (lastPolicyAltitudeAttrs && lastPolicyAltitudeAttrs[i] && lastPolicyAltitudeAttrs[i].altitudeM) || 0,
+        ...(topologyAttrs[i] || { neighborCount: 0, isArticulation: false, marginalCoverage: 0 }),
+      };
+      const { prefs: recPrefs, floodMax: recFloodMax } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, attrs);
+      const curPrefs = effectivePrefsFor(n);
+      const curFloodMax = effectiveFloodMax(n);
+
+      const changed = [];
+      const EPS = 1e-9;
+      if (Math.abs(recPrefs.txDelayFactor - curPrefs.txDelayFactor) > EPS) {
+        changed.push({ cli: `set txdelay ${recPrefs.txDelayFactor}`, label: `txdelay ${curPrefs.txDelayFactor} → ${recPrefs.txDelayFactor}` });
+      }
+      if (Math.abs(recPrefs.rxDelayBase - curPrefs.rxDelayBase) > EPS) {
+        changed.push({ cli: `set rxdelay ${recPrefs.rxDelayBase}`, label: `rxdelay ${curPrefs.rxDelayBase} → ${recPrefs.rxDelayBase}` });
+      }
+      if (Math.abs(recPrefs.directTxDelayFactor - curPrefs.directTxDelayFactor) > EPS) {
+        changed.push({ cli: `set direct.txdelay ${recPrefs.directTxDelayFactor}`, label: `direct.txdelay ${curPrefs.directTxDelayFactor} → ${recPrefs.directTxDelayFactor}` });
+      }
+      if (recFloodMax && recFloodMax !== (curFloodMax || 0)) {
+        changed.push({ cli: `set flood.max ${recFloodMax}`, label: `flood.max ${curFloodMax || "64 (default)"} → ${recFloodMax}` });
+      }
+      if (changed.length > 0) actions.push({ label: n.label, changed });
+    });
+
+    lastPolicyActions = actions;
+    const actionsList = document.getElementById("sim-policy-actions-list");
+    actionsList.innerHTML = "";
+    if (actions.length === 0) {
+      actionsList.innerHTML = `<div class="plan-hint">No changes — every repeater the policy covers is already at the recommended settings; ${simNodes.length} repeater${simNodes.length === 1 ? "" : "s"} left untouched.</div>`;
+      return;
+    }
+    const untouched = simNodes.length - actions.length;
+    const headerHint = document.createElement("div");
+    headerHint.className = "plan-hint";
+    headerHint.textContent = `${actions.length} repeater${actions.length === 1 ? "" : "s"} need a change${untouched > 0 ? ` — ${untouched} left at defaults` : ""}.`;
+    actionsList.appendChild(headerHint);
+    actions.forEach(({ label, changed }) => {
+      const row = document.createElement("div");
+      row.className = "plan-list-item";
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(label)}</span>
+        <span class="plan-item-sub">${changed.map((c) => `<code>${escapeHtml(c.cli)}</code>`).join(" &nbsp;·&nbsp; ")}</span>
+      `;
+      actionsList.appendChild(row);
+    });
+  }
+
+  function exportPolicyActionsCsv() {
+    if (lastPolicyActions.length === 0) {
+      setStatus("sim-status", "Nothing to export — no repeater needs a change under the current best policy.");
+      return;
+    }
+    const rows = [["Repeater", "Change", "CLI command"]];
+    for (const { label, changed } of lastPolicyActions) {
+      for (const c of changed) rows.push([label, c.label, c.cli]);
+    }
+    const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "policy-actions.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   // --- CoreScope real packet replay & bottleneck analysis ----------------
@@ -2215,6 +3269,12 @@
   // oldest edge).
   const REAL_TIMELINE_MAX_LIMIT = 4800;
 
+  // Returns {packets, hitCap}: hitCap is true when REAL_TIMELINE_MAX_LIMIT
+  // was reached before the window's oldest edge was actually covered — a
+  // wide window (see the "Surrounding activity window" control) on a busy
+  // mesh can hit this, and the caller should surface that as partial
+  // coverage rather than silently presenting it as the whole window (item
+  // 8's own requirement).
   async function fetchPacketsAroundTime(targetMs, windowMs) {
     let limit = 300;
     for (;;) {
@@ -2222,12 +3282,13 @@
       if (!resp.ok) throw new Error(`packets fetch failed: HTTP ${resp.status}`);
       const data = await resp.json();
       const packets = data.packets || [];
-      if (packets.length === 0) return [];
+      if (packets.length === 0) return { packets: [], hitCap: false };
       const withMs = packets.map((p) => ({ p, tMs: Date.parse(p.timestamp) })).filter((x) => !Number.isNaN(x.tMs));
       const oldestMs = Math.min(...withMs.map((x) => x.tMs));
       const inWindow = withMs.filter((x) => x.tMs >= targetMs - windowMs && x.tMs <= targetMs + windowMs).map((x) => x.p);
-      if (oldestMs <= targetMs - windowMs || limit >= REAL_TIMELINE_MAX_LIMIT || packets.length < limit) {
-        return inWindow;
+      const coveredOldestEdge = oldestMs <= targetMs - windowMs;
+      if (coveredOldestEdge || limit >= REAL_TIMELINE_MAX_LIMIT || packets.length < limit) {
+        return { packets: inWindow, hitCap: !coveredOldestEdge && limit >= REAL_TIMELINE_MAX_LIMIT };
       }
       limit *= 2;
     }
@@ -2265,6 +3326,11 @@
   let realTimelineIndex = 0;
   let realTimelineTimer = null;
   let realTimelineWindowStartMs = 0;
+  // The actual ± window (seconds) used for the most recent replay — read
+  // from the "Surrounding activity window" control in replayFromHash, kept
+  // here so the status strings below can report the real figure used
+  // rather than a stale hardcoded "±30s" (item 8).
+  let lastRealTimelineWindowSecs = 30;
 
   function playRealTimelineEvent(e) {
     const from = simNodes[e.from];
@@ -2284,7 +3350,12 @@
   function realTimelineStep() {
     if (realTimelineIndex >= realTimelineEvents.length) {
       realTimelineTimer = null;
-      setStatus("sim-bottleneck-replay-status", realTimelineEvents.length ? "Replay finished — showing the full ±30s window." : "No other real activity found in this packet's ±30s window.");
+      setStatus(
+        "sim-bottleneck-replay-status",
+        realTimelineEvents.length
+          ? `Replay finished — showing the full ±${lastRealTimelineWindowSecs}s window.`
+          : `No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`
+      );
       return;
     }
     const e = realTimelineEvents[realTimelineIndex];
@@ -2323,7 +3394,10 @@
     simRealActivityLayer.clearLayers();
     for (const e of realTimelineEvents) playRealTimelineEvent(e);
     realTimelineIndex = realTimelineEvents.length;
-    setStatus("sim-bottleneck-replay-status", realTimelineEvents.length ? "Showing the full ±30s window." : "No other real activity found in this packet's ±30s window.");
+    setStatus(
+      "sim-bottleneck-replay-status",
+      realTimelineEvents.length ? `Showing the full ±${lastRealTimelineWindowSecs}s window.` : `No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`
+    );
   }
 
   // A small always-on-top legend explaining the map's line colours while
@@ -2339,15 +3413,21 @@
     bottleneckLegendControl = L.control({ position: "bottomleft" });
     bottleneckLegendControl.onAdd = function () {
       const div = L.DomUtil.create("div", "sim-bottleneck-legend");
-      div.innerHTML = `
-        <div class="map-control-header-static">Map key</div>
+      // Item 14 — a real collapsible header, replacing the old static one.
+      // Kept expanded by default (the shared helper's own normal default)
+      // rather than collapsed: tests/simulator.spec.js asserts this key's
+      // own row text is present right after opening the bottleneck
+      // modal, with no prior interaction with this control itself.
+      const rows = `
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#4ade80"></span>Proven &amp; modeled</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#38bdf8"></span>Proven, outside our model</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#facc15"></span>Predicted, unconfirmed</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#f472b6"></span>Replayed packet (±30s view)</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#94a3b8"></span>Other real traffic (±30s view)</div>
       `;
+      div.innerHTML = window.HopReachMapControls.collapsibleHtml("Map key", rows, "sim-bottleneck-legend");
       L.DomEvent.disableClickPropagation(div);
+      window.HopReachMapControls.wireCollapsible(div);
       return div;
     };
     bottleneckLegendControl.addTo(map);
@@ -2411,15 +3491,18 @@
       }
       if (originPubkey === null) throw new Error("Couldn't determine this packet's origin from CoreScope's data.");
 
-      // Everything else CoreScope observed within ±30s of this packet —
-      // the surrounding real activity for the "play in time what
-      // happened" replay (see startRealTimelineReplay). Fetched now so
-      // any additional node it involves gets placed alongside the target
+      // Everything else CoreScope observed within the configured window of
+      // this packet (see "Surrounding activity window", up to ±120s) — the
+      // surrounding real activity for the "play in time what happened"
+      // replay (see startRealTimelineReplay). Fetched now so any
+      // additional node it involves gets placed alongside the target
       // packet's own nodes in one pass, rather than needing a second
       // "load more nodes" round-trip.
-      const REAL_TIMELINE_WINDOW_MS = 30_000;
-      setStatus("sim-replay-hash-status", "Fetching surrounding real activity (±30s)…");
-      const windowPackets = await fetchPacketsAroundTime(targetMs, REAL_TIMELINE_WINDOW_MS);
+      const windowSecs = Math.min(120, Math.max(1, parseInt(document.getElementById("sim-replay-window-secs").value, 10) || 30));
+      lastRealTimelineWindowSecs = windowSecs;
+      const REAL_TIMELINE_WINDOW_MS = windowSecs * 1000;
+      setStatus("sim-replay-hash-status", `Fetching surrounding real activity (±${windowSecs}s)…`);
+      const { packets: windowPackets, hitCap } = await fetchPacketsAroundTime(targetMs, REAL_TIMELINE_WINDOW_MS);
       for (const p of windowPackets) {
         for (const k of p.resolved_path || []) if (k) allPubkeys.add(k.toLowerCase());
         if (p.observer_id) allPubkeys.add(p.observer_id.toLowerCase());
@@ -2448,10 +3531,12 @@
       stopRealTimelineReplay();
       simRealActivityLayer.clearLayers();
       document.getElementById("sim-bottleneck-replay-section").classList.toggle("hidden", realTimelineEvents.length === 0);
+      document.getElementById("sim-bottleneck-replay-title").textContent = `Replay real activity (±${windowSecs}s)`;
+      const capNote = hitCap ? ` — CoreScope's recent-packet cap was reached before the window's oldest edge, so this may be partial` : "";
       setStatus(
         "sim-bottleneck-replay-status",
         realTimelineEvents.length
-          ? `${windowPackets.length} real packet${windowPackets.length === 1 ? "" : "s"} observed within ±30s — ready to replay.`
+          ? `${windowPackets.length} real packet${windowPackets.length === 1 ? "" : "s"} observed within ±${windowSecs}s${capNote} — ready to replay.`
           : ""
       );
 
@@ -2632,16 +3717,60 @@
   // stays a short, fixed list of controls instead of growing a long
   // scrolling stack of mostly-empty sections. Only one modal is open at a
   // time — opening a new one closes whichever was already up.
+  // Where focus was before a modal opened — restored on close so keyboard/
+  // screen-reader users land back where they were, not at the top of the
+  // document (see openModal/closeModals).
+  let modalReturnFocusEl = null;
+
+  const MODAL_FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
   function openModal(id) {
     document.querySelectorAll(".sim-modal").forEach((m) => m.classList.add("hidden"));
-    document.getElementById(id).classList.remove("hidden");
+    const modal = document.getElementById(id);
+    modal.classList.remove("hidden");
     document.getElementById("sim-modal-backdrop").classList.remove("hidden");
+    modalReturnFocusEl = document.activeElement;
+    const firstFocusable = modal.querySelector(MODAL_FOCUSABLE_SELECTOR);
+    (firstFocusable || modal).focus({ preventScroll: true });
   }
 
   function closeModals() {
     document.getElementById("sim-modal-backdrop").classList.add("hidden");
     document.querySelectorAll(".sim-modal").forEach((m) => m.classList.add("hidden"));
+    if (modalReturnFocusEl && document.body.contains(modalReturnFocusEl)) modalReturnFocusEl.focus({ preventScroll: true });
+    modalReturnFocusEl = null;
   }
+
+  // Escape either pops one level of the packet inspector's own node<->packet
+  // drill history (mirroring "← Back", since that history exists precisely
+  // so a user can back out of a detour without losing their place) or, with
+  // nothing to pop, closes the modal outright.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (document.getElementById("sim-modal-backdrop").classList.contains("hidden")) return;
+    if (packetModalHistory.length > 0) goBackPacketModal();
+    else closeModals();
+  });
+
+  // A simple focus trap: Tab/Shift+Tab wrap within whichever modal is open
+  // rather than escaping to the page underneath (which the backdrop hides
+  // visually but doesn't otherwise block from keyboard focus).
+  document.getElementById("sim-modal-backdrop").addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const modal = document.querySelector(".sim-modal:not(.hidden)");
+    if (!modal) return;
+    const focusable = Array.from(modal.querySelectorAll(MODAL_FOCUSABLE_SELECTOR)).filter((el) => el.offsetParent !== null);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
 
   // --- "Simulator view" map control --------------------------------------
   //
@@ -2723,7 +3852,7 @@
 
   function ensureSimPlaybackControl() {
     if (simPlaybackControl) return;
-    simPlaybackControl = L.control({ position: "bottomright" });
+    simPlaybackControl = L.control({ position: "bottomleft" });
     simPlaybackControl.onAdd = function () {
       const div = L.DomUtil.create("div", "sim-playback-control");
       const logBody = `<div id="sim-map-results-log" class="plan-list sim-map-results-log"></div>`;
@@ -2821,6 +3950,9 @@
   document.getElementById("sim-message-cancel-edit").addEventListener("click", cancelEditSender);
   document.getElementById("sim-run").addEventListener("click", runSimulation);
   document.getElementById("sim-predict").addEventListener("click", predictSettings);
+  document.getElementById("sim-suggest-policy").addEventListener("click", runSuggestPolicy);
+  document.getElementById("sim-stress-run").addEventListener("click", runStressTest);
+  document.getElementById("sim-policy-export-csv").addEventListener("click", exportPolicyActionsCsv);
   document.getElementById("sim-replay").addEventListener("click", startReplay);
   document.getElementById("sim-skip-to-end").addEventListener("click", skipToEnd);
   document.getElementById("sim-replay-hash-go").addEventListener("click", replayFromHash);
@@ -2839,13 +3971,25 @@
   });
   document.getElementById("sim-open-results-modal").addEventListener("click", () => openModal("sim-results-modal"));
   document.getElementById("sim-open-predictions-modal").addEventListener("click", () => openModal("sim-predictions-modal"));
+  document.getElementById("sim-open-stress-modal").addEventListener("click", () => openModal("sim-stress-modal"));
   document.getElementById("sim-open-bottleneck-modal").addEventListener("click", () => openModal("sim-bottleneck-modal"));
   document.getElementById("sim-modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "sim-modal-backdrop") closeModals();
   });
   document.querySelectorAll("#sim-modal-backdrop [data-close]").forEach((btn) => btn.addEventListener("click", closeModals));
 
+  function populateBulkRadioPresetSelect() {
+    const sel = document.getElementById("sim-bulk-radio-preset");
+    for (const p of RADIO_PRESETS) {
+      const opt = document.createElement("option");
+      opt.value = p.label;
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    }
+  }
+
   initSimScopeFilter();
+  populateBulkRadioPresetSelect();
   renderNodeList();
   renderMessageList();
   refreshSetupSelect();

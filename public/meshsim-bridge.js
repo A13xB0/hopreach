@@ -44,9 +44,36 @@
     return call("simSuggest", tuneRequest, onProgress);
   }
 
+  // stress(stressRequest[, onProgress]) -> StressResult
+  // stressRequest: {scenario, maxSimTimeMs, trials, seed, minPayload,
+  //   maxPayload, loadLevels}
+  // onProgress (optional): (done, total) => void, called after each swept
+  // load level finishes — see wasm/meshsim.go's jsSimStress/
+  // internal/meshsim.StressTest. Same reasoning as suggest's own
+  // onProgress: each level is itself `trials` full simulation runs, and
+  // public/meshsim-worker.js is what actually calls this off the main
+  // thread.
+  function stress(stressRequest, onProgress) {
+    return call("simStress", stressRequest, onProgress);
+  }
+
+  // suggestPolicy(policyTuneRequest[, onProgress]) -> PolicyTuneResult
+  // policyTuneRequest: {scenario, messages, attrs, maxSimTimeMs, trials, seed}
+  // Item 15c's own search — composite multi-rule ConfigPolicies (not one
+  // ConfigRule at a time, unlike suggest()), ranked by DeliveryRatio, and
+  // including topology-derived models (articulation points, MPR-style
+  // marginal coverage) suggest()'s own grid doesn't have. See
+  // wasm/meshsim.go's jsSimSuggestPolicy/internal/meshsim.SuggestPolicy —
+  // suggest() itself is untouched, this is a separate, additive search.
+  function suggestPolicy(policyTuneRequest, onProgress) {
+    return call("simSuggestPolicy", policyTuneRequest, onProgress);
+  }
+
   self.MeshSim = {
     ready: self.__hopreachWasmReadyPromise,
     run,
     suggest,
+    stress,
+    suggestPolicy,
   };
 })();

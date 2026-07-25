@@ -103,17 +103,17 @@ func TestTallyPacketCountsResolvedHopsForTheDecodedRegion(t *testing.T) {
 	}
 	idx := newPrefixIndex(nodes)
 	keys := candidateKeysFor("#sco", "#ioi", "#edi", "#fif")
-	counts := make(map[string]map[string]int)
+	result := Participation{Scoped: make(map[string]map[string]int), Unscoped: make(map[string]int)}
 
-	tallyPacket(counts, idx, keys, packetSummary{
+	tallyPacket(result, idx, keys, packetSummary{
 		RawHex:     realTransportFloodPacketRawHex,
 		ParsedPath: []string{"61", "39", "6e", "e4"},
 	})
 
 	for _, n := range nodes {
 		pk := n.PublicKey
-		if counts[pk]["#ioi"] != 1 {
-			t.Errorf("expected %s to be tallied once for #ioi, got %+v", pk, counts[pk])
+		if result.Scoped[pk]["#ioi"] != 1 {
+			t.Errorf("expected %s to be tallied once for #ioi, got %+v", pk, result.Scoped[pk])
 		}
 	}
 }
@@ -121,15 +121,85 @@ func TestTallyPacketCountsResolvedHopsForTheDecodedRegion(t *testing.T) {
 func TestTallyPacketSkipsUnresolvableHops(t *testing.T) {
 	idx := newPrefixIndex([]Node{{PublicKey: "aabbccdd"}})
 	keys := candidateKeysFor("#sco", "#ioi", "#edi", "#fif")
-	counts := make(map[string]map[string]int)
+	result := Participation{Scoped: make(map[string]map[string]int), Unscoped: make(map[string]int)}
 
-	tallyPacket(counts, idx, keys, packetSummary{
+	tallyPacket(result, idx, keys, packetSummary{
 		RawHex:     realTransportFloodPacketRawHex,
 		ParsedPath: []string{"ffffff"}, // matches no known node
 	})
 
-	if len(counts) != 0 {
-		t.Errorf("expected no tallies for an unresolvable hop, got %+v", counts)
+	if len(result.Scoped) != 0 {
+		t.Errorf("expected no tallies for an unresolvable hop, got %+v", result.Scoped)
+	}
+}
+
+func TestPacketRouteType(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawHex string
+		want   int
+		wantOK bool
+	}{
+		{"transport flood (real captured packet)", realTransportFloodPacketRawHex, routeTypeTransportFlood, true},
+		{"plain flood, low 2 bits = 01", "01", routeTypeFlood, true},
+		{"plain direct, low 2 bits = 10", "02", routeTypeDirect, true},
+		{"transport direct, low 2 bits = 11", "03", routeTypeTransportDirect, true},
+		{"higher bits ignored", "f1", routeTypeFlood, true}, // 0xf1 & 0x03 == 0x01
+		{"empty hex", "", 0, false},
+		{"malformed hex", "zz", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := packetRouteType(tt.rawHex)
+			if ok != tt.wantOK {
+				t.Fatalf("packetRouteType(%q) ok = %v, want %v", tt.rawHex, ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Errorf("packetRouteType(%q) = %d, want %d", tt.rawHex, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTallyPacketCountsUnscopedFloodRelayHops is the direct regression test
+// for observing unscoped participation: a plain flood packet (routeTypeFlood
+// — no transport code, nothing decodePacketRegion could ever match) must
+// still tally its resolvable relay-path hops into Participation.Unscoped,
+// and must NOT touch Scoped at all (it carries no region information to
+// attribute there).
+func TestTallyPacketCountsUnscopedFloodRelayHops(t *testing.T) {
+	nodes := []Node{{PublicKey: "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbcc"}}
+	idx := newPrefixIndex(nodes)
+	keys := candidateKeysFor("#sco", "#ioi")
+	result := Participation{Scoped: make(map[string]map[string]int), Unscoped: make(map[string]int)}
+
+	// "01": a single byte whose low 2 bits are routeTypeFlood — sufficient
+	// for packetRouteType (the only thing tallyPacket reads before
+	// dispatching on route type for this case); the unscoped path never
+	// calls decodePacketRegion, so it has no need for a fully-formed
+	// packet body.
+	tallyPacket(result, idx, keys, packetSummary{
+		RawHex:     "01",
+		ParsedPath: []string{"aabbcc"},
+	})
+
+	if len(result.Scoped) != 0 {
+		t.Errorf("expected an unscoped flood to leave Scoped untouched, got %+v", result.Scoped)
+	}
+	if result.Unscoped[nodes[0].PublicKey] != 1 {
+		t.Errorf("expected %s tallied once in Unscoped, got %+v", nodes[0].PublicKey, result.Unscoped)
+	}
+}
+
+func TestObservedUnscoped(t *testing.T) {
+	if ObservedUnscoped(0) {
+		t.Error("ObservedUnscoped(0) should be false — zero observations in the window")
+	}
+	if !ObservedUnscoped(1) {
+		t.Error("ObservedUnscoped(1) should be true — at least one real observation")
+	}
+	if !ObservedUnscoped(50) {
+		t.Error("ObservedUnscoped(50) should be true")
 	}
 }
 

@@ -15,6 +15,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -99,20 +100,44 @@ type RegionConfig struct {
 // CoreScopeConfig points at the CoreScope instance to pull repeater nodes
 // and reach data from.
 type CoreScopeConfig struct {
-	APIURL                string         `yaml:"api_url"`
-	RequestTimeoutSeconds float64        `yaml:"request_timeout_seconds"`
-	ScopeInference        ScopeInference `yaml:"scope_inference"`
+	APIURL                string  `yaml:"api_url"`
+	RequestTimeoutSeconds float64 `yaml:"request_timeout_seconds"`
+
+	// ScopeObservation is the resolved, canonical value after Load merges
+	// the "scope_observation" key with its deprecated "scope_inference"
+	// alias (see ScopeObservationRaw/ScopeInferenceRaw and Load's own
+	// merge step). This is the only field anything outside this package
+	// (or Load itself) should ever read.
+	ScopeObservation ScopeObservationConfig `yaml:"-"`
+
+	// ScopeObservationRaw/ScopeInferenceRaw are decode-only — never read
+	// directly outside Load's merge step, which resolves them into
+	// ScopeObservation above. Pointers so "the key was literally present
+	// in the YAML" is distinguishable from "absent, Default()'s value
+	// stands" without relying on a fragile zero-value comparison.
+	// ScopeInferenceRaw exists purely as a deprecated alias for
+	// ScopeObservationRaw: this exact key ("scope_inference") lives in a
+	// deployed production config.yaml, so renaming it out from under that
+	// file without a fallback would silently disable scope observation
+	// there (falling back to the enabled:false zero value) and
+	// reintroduce the missing-scope-coverage bug this key was already
+	// used to fix once. Drop ScopeInferenceRaw a release after every known
+	// deployment has migrated its config.yaml to the new key.
+	ScopeObservationRaw *ScopeObservationConfig `yaml:"scope_observation"`
+	ScopeInferenceRaw   *ScopeObservationConfig `yaml:"scope_inference"`
 }
 
-// ScopeInference controls the optional real-scope-tagging pass: which
-// channel each repeater actually relays most, inferred from CoreScope's own
-// packet data (decoded_json.channel) rather than each node's own
-// self-reported default_scope, which in production is empty for roughly
-// three quarters of real repeaters. Off by default — it means fetching
-// (and prefix-resolving) a real window's worth of raw packet traffic from
-// CoreScope, real extra load neither every deployment needs nor every
-// CoreScope instance may welcome.
-type ScopeInference struct {
+// ScopeObservationConfig controls the optional real-scope-tagging pass:
+// which region(s) each repeater actually relays, and whether it relays
+// unscoped traffic, observed from CoreScope's own real packet data (each
+// packet's own cryptographic transport code — see
+// internal/corescope.ObservedScopes/ObservedUnscoped) rather than each
+// node's own self-reported default_scope, which in production is empty for
+// roughly three quarters of real repeaters. Off by default — it means
+// fetching (and prefix-resolving) a real window's worth of raw packet
+// traffic from CoreScope, real extra load neither every deployment needs
+// nor every CoreScope instance may welcome.
+type ScopeObservationConfig struct {
 	Enabled     bool    `yaml:"enabled"`
 	WindowHours float64 `yaml:"window_hours"`
 }
@@ -260,7 +285,7 @@ func Default() Config {
 		CoreScope: CoreScopeConfig{
 			APIURL:                "https://scotmesh-corescope.mm7roq.compute.oarc.uk",
 			RequestTimeoutSeconds: 30,
-			ScopeInference: ScopeInference{
+			ScopeObservation: ScopeObservationConfig{
 				Enabled:     false,
 				WindowHours: 168, // 7 days
 			},
@@ -368,6 +393,19 @@ func Load(flagVal string) (Config, string, error) {
 		return Config{}, path, fmt.Errorf("config: parsing %s: %w", path, err)
 	}
 
+	// Resolve corescope.scope_observation vs. its deprecated alias
+	// corescope.scope_inference — see CoreScopeConfig's own doc comment.
+	switch {
+	case cfg.CoreScope.ScopeObservationRaw != nil:
+		cfg.CoreScope.ScopeObservation = *cfg.CoreScope.ScopeObservationRaw
+		if cfg.CoreScope.ScopeInferenceRaw != nil {
+			log.Printf("config: %s sets both corescope.scope_observation and its deprecated alias corescope.scope_inference — using scope_observation, ignoring scope_inference", path)
+		}
+	case cfg.CoreScope.ScopeInferenceRaw != nil:
+		cfg.CoreScope.ScopeObservation = *cfg.CoreScope.ScopeInferenceRaw
+		log.Printf("config: %s uses the deprecated corescope.scope_inference key — rename it to corescope.scope_observation (same shape); using it for now", path)
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, path, fmt.Errorf("config: %s: %w", path, err)
 	}
@@ -386,8 +424,8 @@ func (c Config) Validate() error {
 	if c.CoreScope.APIURL == "" {
 		return fmt.Errorf("corescope.api_url must not be empty")
 	}
-	if c.CoreScope.ScopeInference.Enabled && c.CoreScope.ScopeInference.WindowHours <= 0 {
-		return fmt.Errorf("corescope.scope_inference.window_hours must be positive when scope_inference.enabled is true")
+	if c.CoreScope.ScopeObservation.Enabled && c.CoreScope.ScopeObservation.WindowHours <= 0 {
+		return fmt.Errorf("corescope.scope_observation.window_hours must be positive when scope_observation.enabled is true")
 	}
 	if c.Coverage.ImageWidth <= 0 {
 		return fmt.Errorf("coverage.image_width must be positive")

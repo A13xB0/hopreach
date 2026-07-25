@@ -21,12 +21,12 @@ type appConfig struct {
 	// default_scope matches "#"+requiredScope. Empty disables this filter.
 	requiredScope string
 
-	// scopeInferenceEnabled/scopeInferenceWindowHours: the optional real
+	// scopeObservationEnabled/scopeObservationWindowHours: the optional real
 	// per-repeater scope tagging pass (see internal/corescope's own doc
-	// comment on ScopeInference for why this exists instead of trusting
+	// comment on ObservedScopes for why this exists instead of trusting
 	// each node's self-reported default_scope). Disabled by default.
-	scopeInferenceEnabled     bool
-	scopeInferenceWindowHours float64
+	scopeObservationEnabled     bool
+	scopeObservationWindowHours float64
 
 	// regionBoundaryPath/regionBoundaryURL configure geo.LoadBoundary — a
 	// local file, a downloaded GeoJSON, or (both empty, the default) the
@@ -120,8 +120,8 @@ func toAppConfig(yc yconfig.Config) appConfig {
 
 		requiredScope: strings.TrimPrefix(yc.Region.RequiredScope, "#"),
 
-		scopeInferenceEnabled:     yc.CoreScope.ScopeInference.Enabled,
-		scopeInferenceWindowHours: yc.CoreScope.ScopeInference.WindowHours,
+		scopeObservationEnabled:     yc.CoreScope.ScopeObservation.Enabled,
+		scopeObservationWindowHours: yc.CoreScope.ScopeObservation.WindowHours,
 
 		regionBoundaryPath:  yc.Region.BoundaryPath,
 		regionBoundaryURL:   yc.Region.BoundaryURL,

@@ -154,6 +154,154 @@ func TestRunDetectsCollisionAtSharedListener(t *testing.T) {
 	}
 }
 
+// TestLoraCapturedRequiresLockThenMargin is the direct unit test for the
+// capture-effect gate itself: an interferer arriving before the wanted
+// transmission's own preamble/sync window elapses prevents capture no
+// matter how dominant the wanted signal is (lock was never established to
+// capture); one arriving after that window is captured only if it clears
+// captureMarginDB.
+func TestLoraCapturedRequiresLockThenMargin(t *testing.T) {
+	radio := DefaultLoRaParams()
+	preambleMs := uint32(preambleDurationMs(radio))
+	tx := transmission{startMs: 1000, radio: radio}
+
+	tests := []struct {
+		name          string
+		otherStartMs  uint32
+		wantedSNR     float64
+		interfererSNR float64
+		wantCaptured  bool
+	}{
+		{
+			name:          "interferer during preamble, huge SNR margin — still not captured",
+			otherStartMs:  tx.startMs + preambleMs/2,
+			wantedSNR:     20,
+			interfererSNR: -20,
+			wantCaptured:  false,
+		},
+		{
+			name:          "interferer right at lock deadline — captured given margin",
+			otherStartMs:  tx.startMs + preambleMs,
+			wantedSNR:     10,
+			interfererSNR: 0,
+			wantCaptured:  true,
+		},
+		{
+			name:          "interferer after lock, margin exactly met (6dB) — captured",
+			otherStartMs:  tx.startMs + preambleMs + 50,
+			wantedSNR:     6,
+			interfererSNR: 0,
+			wantCaptured:  true,
+		},
+		{
+			name:          "interferer after lock, margin just short — not captured",
+			otherStartMs:  tx.startMs + preambleMs + 50,
+			wantedSNR:     5,
+			interfererSNR: 0,
+			wantCaptured:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			other := transmission{startMs: tt.otherStartMs, radio: radio}
+			got := loraCaptured(tt.wantedSNR, tt.interfererSNR, tx, other)
+			if got != tt.wantCaptured {
+				t.Errorf("loraCaptured(wanted=%v, interferer=%v, otherStart=%d) = %v, want %v",
+					tt.wantedSNR, tt.interfererSNR, tt.otherStartMs, got, tt.wantCaptured)
+			}
+		})
+	}
+}
+
+// TestRunCaptureEffectSurvivesWeakLateInterferer is the end-to-end (via
+// Run, not the unit-level loraCaptured above) proof that a dominant signal
+// is decoded through a weaker, late-arriving co-channel interferer instead
+// of both being destroyed — the real behavior "any time-overlap destroys
+// both" (the previous model) gets wrong.
+func TestRunCaptureEffectSurvivesWeakLateInterferer(t *testing.T) {
+	const strong, weak, listener = 0, 1, 2
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false), testNode(false)},
+		Links: []Link{
+			{From: strong, To: listener, SNRdB: 15}, // wanted signal
+			{From: weak, To: listener, SNRdB: 0},    // interferer: 15dB below wanted, well past captureMarginDB
+		},
+	}
+	// weak starts after strong's own preamble window has elapsed (so its
+	// signal is arriving mid-payload, not preventing lock), but still
+	// overlaps strong's own airtime window.
+	preambleMs := uint32(preambleDurationMs(DefaultLoRaParams()))
+	messages := []Message{
+		{Origin: strong, SendAtMs: 0, PayloadLen: 20},
+		{Origin: weak, SendAtMs: preambleMs + 20, PayloadLen: 20},
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var atListenerFromStrong *Reception
+	for i := range report.Receptions {
+		r := &report.Receptions[i]
+		if r.Node == listener && r.FromNode == strong {
+			atListenerFromStrong = r
+		}
+	}
+	if atListenerFromStrong == nil {
+		t.Fatal("expected a reception at the listener from the strong sender")
+	}
+	if atListenerFromStrong.Collided {
+		t.Errorf("expected the dominant signal to survive the weak, late interferer via capture, got Collided=true: %+v", atListenerFromStrong)
+	}
+	if !atListenerFromStrong.SurvivedCapture {
+		t.Errorf("expected SurvivedCapture=true (an interferer was present but didn't win), got: %+v", atListenerFromStrong)
+	}
+	if len(atListenerFromStrong.CollidedWith) != 0 {
+		t.Errorf("expected an empty CollidedWith for a captured reception, got %v", atListenerFromStrong.CollidedWith)
+	}
+}
+
+// TestRunCollidedWithOnlyListsNonCapturedInterferers proves CollidedWith's
+// own doc comment ("every genuine cause of Collided") stays accurate now
+// that some overlapping/audible transmissions can be survived via capture:
+// a reception with one captured (weak, late) interferer and one genuinely
+// colliding (comparable-strength, early) interferer must list only the
+// latter.
+func TestRunCollidedWithOnlyListsNonCapturedInterferers(t *testing.T) {
+	const wanted, capturedAway, realCollider, listener = 0, 1, 2, 3
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false), testNode(false), testNode(false)},
+		Links: []Link{
+			{From: wanted, To: listener, SNRdB: 15},
+			{From: capturedAway, To: listener, SNRdB: 0},  // 15dB below — captured, given it arrives late enough
+			{From: realCollider, To: listener, SNRdB: 14}, // only 1dB below — genuinely collides
+		},
+	}
+	preambleMs := uint32(preambleDurationMs(DefaultLoRaParams()))
+	messages := []Message{
+		{Origin: wanted, SendAtMs: 0, PayloadLen: 20},
+		{Origin: capturedAway, SendAtMs: preambleMs + 20, PayloadLen: 20}, // late enough to be capturable
+		{Origin: realCollider, SendAtMs: 0, PayloadLen: 20},               // simultaneous with wanted — during its preamble, and only 1dB down anyway
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var atListenerFromWanted *Reception
+	for i := range report.Receptions {
+		r := &report.Receptions[i]
+		if r.Node == listener && r.FromNode == wanted {
+			atListenerFromWanted = r
+		}
+	}
+	if atListenerFromWanted == nil {
+		t.Fatal("expected a reception at the listener from the wanted sender")
+	}
+	if !atListenerFromWanted.Collided {
+		t.Fatalf("expected Collided=true (realCollider genuinely collides), got: %+v", atListenerFromWanted)
+	}
+	if len(atListenerFromWanted.CollidedWith) != 1 || atListenerFromWanted.CollidedWith[0] != realCollider {
+		t.Errorf("CollidedWith = %v, want [%d] (capturedAway should be excluded, having been captured over)", atListenerFromWanted.CollidedWith, realCollider)
+	}
+}
+
 // TestRunCollidedWithEmptyNotNilWhenClean is the JSON-shape counterpart to
 // Report's own "never nil" convention (see Run's report initialization) —
 // a clean reception's CollidedWith must marshal to [], not null, so JS
@@ -322,10 +470,10 @@ func TestRunRelaysOnlyOnce(t *testing.T) {
 		if r.FromNode == 1 {
 			sendsFromB++
 		}
-		if r.Node == 1 && r.DropReason == "already_relayed" {
+		if r.Node == 1 && r.DropReason == "already_seen" {
 			sawAlreadyRelayedAtB = true
 			if r.WasRelayed {
-				t.Errorf("reception dropped for already_relayed should not also be WasRelayed: %+v", r)
+				t.Errorf("reception dropped for already_seen should not also be WasRelayed: %+v", r)
 			}
 		}
 	}
@@ -336,22 +484,187 @@ func TestRunRelaysOnlyOnce(t *testing.T) {
 		t.Errorf("node 1 (B) appears to have relayed more than once: %d receptions attributed to it as sender", sendsFromB)
 	}
 	// C relays the packet back to B after B already relayed it once — B's
-	// second hearing of the same packetID should be tagged already_relayed.
+	// second hearing of the same packetID should be tagged already_seen.
 	if !sawAlreadyRelayedAtB {
-		t.Error("expected node 1 (B) to have a reception with DropReason \"already_relayed\" (hearing C's relay of its own earlier relay)")
+		t.Error("expected node 1 (B) to have a reception with DropReason \"already_seen\" (hearing C's relay of its own earlier relay)")
+	}
+}
+
+// TestLoopDetectDropDoesNotResurrectOnALaterPath is the direct regression
+// test for a real bug: a node that dropped an earlier copy of a packet for
+// loop_detect must not relay a LATER copy of the exact same packet arriving
+// via a different path — real firmware's hasSeen() dedup (SimpleMeshTables,
+// keyed on payload only, not path — see Packet::calculatePacketHash) catches
+// every decoded copy regardless of route, not just ones that went on to
+// relay. Before this fix, only `relayed` (set exclusively when a node
+// actually relayed) gated re-relay, so a copy dropped for loop_detect left
+// no trace and a later copy via a different path sailed through and
+// relayed — defeating loop detection.
+func TestLoopDetectDropDoesNotResurrectOnALaterPath(t *testing.T) {
+	// loop.detect only ever looks at the packet's *accumulated* path-hash
+	// sequence, which starts empty at the origin and only gains an entry
+	// when a node actually relays (see transmission.path's own doc
+	// comment) — so the colliding node must be an intermediate relayer,
+	// not the origin itself; a direct origin->listener hop can never
+	// trigger loop_detect (empty path). Search among indices >= 1 so index
+	// 0 is free to be a distinct origin.
+	x, d := 0, 0
+	found := false
+	seenHash := map[uint32]int{}
+	for i := 1; i < 300; i++ {
+		h := nodeHash(i, 1)
+		if j, ok := seenHash[h]; ok {
+			x, d = j, i
+			found = true
+			break
+		}
+		seenHash[h] = i
+	}
+	if !found {
+		t.Fatal("expected to find a 1-byte hash collision among node indices 1..299")
+	}
+
+	const origin = 0
+	n := x
+	if d > n {
+		n = d
+	}
+	// y1/y2: a second, longer relay path (origin -> y1 -> y2 -> D) that
+	// never touches X's hash, so loop_detect alone would happily let this
+	// second copy through — only hasSeen should catch it. The extra hop
+	// (vs. X's single hop) also separates the two copies' arrival times at
+	// D enough that they don't collide with each other there.
+	y1, y2 := n+1, n+2
+	total := n + 3
+	nodes := make([]SimNode, total)
+	for i := range nodes {
+		nodes[i] = testNode(true)
+	}
+	nodes[x].HashSize = 1
+	nodes[d].HashSize = 1
+	nodes[d].LoopDetect = "strict"
+	if nodeHash(y2, 1) == nodeHash(d, 1) {
+		t.Fatal("test setup: y2 must not itself collide with d's hash, or this no longer isolates hasSeen from loop_detect — pick different indices")
+	}
+
+	scenario := Scenario{
+		Nodes: nodes,
+		Links: []Link{
+			// Path 1 (arrives first): origin -> X -> D. X relays,
+			// appending its own hash; D's first copy is dropped for
+			// loop_detect since X's hash collides with D's at this
+			// 1-byte size.
+			{From: origin, To: x, SNRdB: 20},
+			{From: x, To: d, SNRdB: 20},
+			// Path 2 (arrives later, one hop longer): origin -> y1 -> y2
+			// -> D. Neither y1 nor y2 collides with D, so loop_detect on
+			// its own would allow this second copy through.
+			{From: origin, To: y1, SNRdB: 20},
+			{From: y1, To: y2, SNRdB: 20},
+			{From: y2, To: d, SNRdB: 20},
+		},
+	}
+	messages := []Message{{Origin: origin, SendAtMs: 0, PayloadLen: 20}}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var atD []Reception
+	for i := range report.Receptions {
+		if report.Receptions[i].Node == d {
+			atD = append(atD, report.Receptions[i])
+		}
+	}
+	if len(atD) < 2 {
+		t.Fatalf("expected D to receive 2 copies of the packet (via X, then via y1/y2), got %d: %+v", len(atD), atD)
+	}
+	for _, r := range atD {
+		if r.Collided {
+			t.Fatalf("test setup: the two copies collided with each other at D instead of arriving sequentially — timing needs more separation: %+v", atD)
+		}
+		if r.WasRelayed {
+			t.Errorf("D must never relay this packet — its first copy was dropped for loop_detect, and hasSeen must catch every later copy regardless of path: %+v", r)
+		}
+	}
+	// The first (via X) copy should show loop_detect; the later one (via
+	// y1/y2) must show already_seen, not sail through as a fresh relay
+	// candidate just because loop_detect itself doesn't fire on that path.
+	if atD[0].DropReason != "loop_detect" {
+		t.Errorf("D's first reception DropReason = %q, want %q (full: %+v)", atD[0].DropReason, "loop_detect", atD)
+	}
+	if atD[1].DropReason != "already_seen" {
+		t.Errorf("D's second reception DropReason = %q, want %q (full: %+v)", atD[1].DropReason, "already_seen", atD)
+	}
+}
+
+// TestCollidedReceptionDoesNotMarkSeen is the counterpart to the above: a
+// reception that COLLIDED was never actually decoded, so it must not count
+// as "seen" — a later, clean copy of the same packet must still be able to
+// relay normally, not be dropped as a spurious already_seen.
+func TestCollidedReceptionDoesNotMarkSeen(t *testing.T) {
+	// Two senders (A, X) both audible to listener L, overlapping in time,
+	// both carrying DIFFERENT packets — but we only care about A's packet.
+	// A's own transmission to L collides (X's overlaps it). A SECOND,
+	// later, non-overlapping transmission of A's same packet (relayed by a
+	// side path through node M, arriving after X's transmission ends) must
+	// still be able to relay at L.
+	const aOrigin, x, l, m = 0, 1, 2, 3
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(true), testNode(true), testNode(true), testNode(true)},
+		Links: []Link{
+			{From: aOrigin, To: l, SNRdB: 0},
+			{From: x, To: l, SNRdB: 0},
+			{From: aOrigin, To: m, SNRdB: 0},
+			{From: m, To: l, SNRdB: 0},
+		},
+	}
+	messages := []Message{
+		{Origin: aOrigin, SendAtMs: 0, PayloadLen: 20}, // reaches L directly, collides with X
+		{Origin: x, SendAtMs: 0, PayloadLen: 20},       // the interferer
+	}
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var collidedAtL, laterCleanAtL *Reception
+	for i := range report.Receptions {
+		r := &report.Receptions[i]
+		if r.Node != l || r.PacketID != 0 {
+			continue
+		}
+		if r.Collided && collidedAtL == nil {
+			collidedAtL = r
+		} else if !r.Collided {
+			laterCleanAtL = r
+		}
+	}
+	if collidedAtL == nil {
+		t.Fatal("expected packet 0's direct reception at L to collide with X's transmission")
+	}
+	if laterCleanAtL == nil {
+		t.Fatal("expected a later, clean copy of packet 0 to reach L via M (A -> M -> L)")
+	}
+	if laterCleanAtL.DropReason == "already_seen" {
+		t.Error("a collided reception must not mark the packet as seen — the later clean copy via M should relay normally, not be dropped as already_seen")
+	}
+	if !laterCleanAtL.WasRelayed {
+		t.Errorf("expected the later clean copy to relay (L is a repeater, not yet hop-limited): %+v", laterCleanAtL)
 	}
 }
 
 // TestRunRespectsHopLimit checks that a flood doesn't propagate forever
-// around a cycle — MaxHopCount must cut it off.
+// around a cycle — a node's own effectiveFloodMax must cut it off.
 func TestRunRespectsHopLimit(t *testing.T) {
 	// A ring of repeaters, each only in range of its two neighbours —
-	// without a hop limit this would circulate indefinitely.
+	// without a hop limit this would circulate indefinitely. Explicit
+	// small FloodMax (well under the real 20-node ring circumference, and
+	// far under the real default of 64) so the limit is the thing that
+	// actually cuts this off, not hasSeen dedup naturally exhausting the
+	// ring on its own after one full pass.
 	const ringSize = 20
+	const smallFloodMax = 5
 	nodes := make([]SimNode, ringSize)
 	var links []Link
 	for i := 0; i < ringSize; i++ {
 		nodes[i] = testNode(true)
+		nodes[i].FloodMax = smallFloodMax
 		next := (i + 1) % ringSize
 		links = append(links, Link{From: i, To: next, SNRdB: 0}, Link{From: next, To: i, SNRdB: 0})
 	}
@@ -373,11 +686,126 @@ func TestRunRespectsHopLimit(t *testing.T) {
 			}
 		}
 	}
-	if maxHop > MaxHopCount {
-		t.Errorf("max hop count observed = %d, want <= MaxHopCount (%d)", maxHop, MaxHopCount)
+	if maxHop > smallFloodMax {
+		t.Errorf("max hop count observed = %d, want <= FloodMax (%d)", maxHop, smallFloodMax)
 	}
 	if !sawHopLimitDrop {
-		t.Error("expected at least one reception with DropReason \"hop_limit\" — the ring should keep circulating until MaxHopCount cuts it off")
+		t.Error("expected at least one reception with DropReason \"hop_limit\" — the ring should keep circulating until FloodMax cuts it off")
+	}
+}
+
+// TestEffectiveFloodMaxDefaults locks in the real firmware defaults (64,
+// 64, 8 — examples/simple_repeater/MyMesh.cpp) that apply whenever a
+// SimNode leaves FloodMax/FloodMaxUnscoped unset (zero).
+func TestEffectiveFloodMaxDefaults(t *testing.T) {
+	var n SimNode
+	if got := n.effectiveFloodMax(); got != DefaultFloodMax {
+		t.Errorf("effectiveFloodMax() with unset FloodMax = %d, want default %d", got, DefaultFloodMax)
+	}
+	if got := n.effectiveFloodMaxUnscoped(); got != DefaultFloodMaxUnscoped {
+		t.Errorf("effectiveFloodMaxUnscoped() with unset FloodMaxUnscoped = %d, want default %d", got, DefaultFloodMaxUnscoped)
+	}
+	n.FloodMax = 10
+	n.FloodMaxUnscoped = 20
+	if got := n.effectiveFloodMax(); got != 10 {
+		t.Errorf("effectiveFloodMax() with FloodMax=10 = %d, want 10", got)
+	}
+	if got := n.effectiveFloodMaxUnscoped(); got != 20 {
+		t.Errorf("effectiveFloodMaxUnscoped() with FloodMaxUnscoped=20 = %d, want 20", got)
+	}
+}
+
+// TestRunUnscopedHopLimitOnlyAppliesToUnscopedMessages proves
+// FloodMaxUnscoped is a genuinely separate, additional gate: a node with a
+// tight FloodMaxUnscoped but a generous FloodMax lets a REGION-SCOPED
+// message go further than an UNSCOPED one over the exact same topology.
+func TestRunUnscopedHopLimitOnlyAppliesToUnscopedMessages(t *testing.T) {
+	buildRing := func(tightUnscoped bool) Scenario {
+		const ringSize = 10
+		nodes := make([]SimNode, ringSize)
+		var links []Link
+		for i := 0; i < ringSize; i++ {
+			nodes[i] = testNode(true)
+			nodes[i].FloodMax = 100 // generous — not the limit under test
+			if tightUnscoped {
+				nodes[i].FloodMaxUnscoped = 2
+			}
+			nodes[i].Regions = []string{"sco"} // so a #sco-scoped message can actually be relayed at all
+			next := (i + 1) % ringSize
+			links = append(links, Link{From: i, To: next, SNRdB: 0}, Link{From: next, To: i, SNRdB: 0})
+		}
+		return Scenario{Nodes: nodes, Links: links}
+	}
+	maxHopFor := func(region string) int {
+		scenario := buildRing(true)
+		messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20, Region: region}}
+		report := Run(scenario, messages, zeroRNG{}, 600_000)
+		maxHop := 0
+		for _, r := range report.Receptions {
+			if r.HopCount > maxHop {
+				maxHop = r.HopCount
+			}
+		}
+		return maxHop
+	}
+
+	unscopedMaxHop := maxHopFor("")
+	scopedMaxHop := maxHopFor("sco")
+
+	if unscopedMaxHop > 2 {
+		t.Errorf("unscoped message's max hop = %d, want <= FloodMaxUnscoped (2)", unscopedMaxHop)
+	}
+	if scopedMaxHop <= unscopedMaxHop {
+		t.Errorf("scoped message's max hop (%d) should exceed the unscoped one (%d) — FloodMaxUnscoped must not gate a scoped message", scopedMaxHop, unscopedMaxHop)
+	}
+
+	scenario := buildRing(true)
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20, Region: ""}}
+	report := Run(scenario, messages, zeroRNG{}, 600_000)
+	sawUnscopedHopLimit := false
+	for _, r := range report.Receptions {
+		if r.DropReason == "hop_limit_unscoped" {
+			sawUnscopedHopLimit = true
+		}
+		if r.DropReason == "hop_limit" {
+			t.Errorf("expected the tight FloodMaxUnscoped case to report \"hop_limit_unscoped\", not the generic \"hop_limit\": %+v", r)
+		}
+	}
+	if !sawUnscopedHopLimit {
+		t.Error("expected at least one reception with DropReason \"hop_limit_unscoped\"")
+	}
+}
+
+// TestAcceptsRegionDenyUnscoped proves DenyUnscoped is a simulator what-if
+// knob layered on top of firmware's real default (regions are additive —
+// holding keys never revokes plain unscoped relaying, see acceptsRegion's
+// doc comment): unset, an unscoped message is always accepted regardless of
+// Regions; set, it's refused even with no Regions configured at all.
+func TestAcceptsRegionDenyUnscoped(t *testing.T) {
+	plain := SimNode{}
+	if !plain.acceptsRegion("") {
+		t.Error("a node with DenyUnscoped unset should accept an unscoped (empty-region) message")
+	}
+	denied := SimNode{DenyUnscoped: true}
+	if denied.acceptsRegion("") {
+		t.Error("a node with DenyUnscoped set should refuse an unscoped (empty-region) message")
+	}
+	// DenyUnscoped must never affect a genuinely scoped message either way.
+	scoped := SimNode{DenyUnscoped: true, Regions: []string{"sco"}}
+	if !scoped.acceptsRegion("sco") {
+		t.Error("DenyUnscoped should not affect a scoped message the node holds the region key for")
+	}
+}
+
+// TestAcceptsRegionWildcard proves the "*" sentinel (used as a planned
+// repeater's default, since its real region config is unknown) accepts
+// every region, not just the ones literally listed.
+func TestAcceptsRegionWildcard(t *testing.T) {
+	n := SimNode{Regions: []string{"*"}}
+	for _, region := range []string{"sco", "ioi", "anything"} {
+		if !n.acceptsRegion(region) {
+			t.Errorf("a node with Regions=[\"*\"] should accept region %q", region)
+		}
 	}
 }
 
@@ -655,5 +1083,566 @@ func TestLoopDetectOffNeverBlocksRelay(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected the listener to receive the packet — loop.detect is off, so the hash collision between nodes a and b should never matter")
+	}
+}
+
+// TestRunDirectMessageSkipsUnscopedHopLimit proves flood_max_unscoped only
+// gates ROUTE_TYPE_FLOOD traffic (see Message.Direct's own doc comment,
+// mirroring MyMesh.cpp's forwarding gate) — an unscoped Direct message must
+// never be dropped for hop_limit_unscoped, even under a FloodMaxUnscoped
+// tight enough that an equivalent flood message would be.
+func TestRunDirectMessageSkipsUnscopedHopLimit(t *testing.T) {
+	const ringSize = 10
+	nodes := make([]SimNode, ringSize)
+	var links []Link
+	for i := 0; i < ringSize; i++ {
+		nodes[i] = testNode(true)
+		nodes[i].FloodMax = 100 // generous — not the limit under test
+		nodes[i].FloodMaxUnscoped = 2
+		next := (i + 1) % ringSize
+		links = append(links, Link{From: i, To: next, SNRdB: 0}, Link{From: next, To: i, SNRdB: 0})
+	}
+	scenario := Scenario{Nodes: nodes, Links: links}
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20, Direct: true}}
+
+	report := Run(scenario, messages, zeroRNG{}, 600_000)
+
+	maxHop := 0
+	for _, r := range report.Receptions {
+		if r.DropReason == "hop_limit_unscoped" {
+			t.Errorf("a Direct message must never be dropped for hop_limit_unscoped: %+v", r)
+		}
+		if r.HopCount > maxHop {
+			maxHop = r.HopCount
+		}
+	}
+	if maxHop <= 2 {
+		t.Errorf("expected the Direct message to propagate past FloodMaxUnscoped (2), got max hop %d", maxHop)
+	}
+}
+
+// TestRunDirectMessageUsesDirectTxDelayFactor proves a Direct message's
+// relay timing is computed from NodePrefs.DirectTxDelayFactor, not
+// TxDelayFactor — give the two wildly different values and confirm a
+// relay's actual timing reflects whichever one applies.
+func TestRunDirectMessageUsesDirectTxDelayFactor(t *testing.T) {
+	relayAtMs := func(direct bool) uint32 {
+		relay := testNode(true)
+		relay.Prefs.TxDelayFactor = 0.5
+		relay.Prefs.DirectTxDelayFactor = 0.1
+		scenario := Scenario{
+			Nodes: []SimNode{testNode(false), relay, testNode(false)},
+			Links: []Link{
+				{From: 0, To: 1, SNRdB: 20}, {From: 1, To: 0, SNRdB: 20},
+				{From: 1, To: 2, SNRdB: 20},
+			},
+		}
+		messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20, Direct: direct}}
+		report := Run(scenario, messages, fixedRNG{pickMax: true}, 60_000)
+		for _, r := range report.Receptions {
+			if r.Node == 2 {
+				return r.AtMs
+			}
+		}
+		t.Fatal("node 2 (two hops from the origin) never received the packet")
+		return 0
+	}
+
+	floodAt := relayAtMs(false)
+	directAt := relayAtMs(true)
+	if directAt >= floodAt {
+		t.Errorf("Direct relay (factor 0.1) should arrive sooner than flood relay (factor 0.5) under the same fixed-max RNG draw: direct=%dms, flood=%dms", directAt, floodAt)
+	}
+}
+
+// --- item 9: airtime duty-cycle budget -----------------------------------
+//
+// txBudget's own formulas are cheap and precise to test directly, rather
+// than only proving the behavior indirectly through a Run() that needs to
+// drain a full simulated hour's worth of airtime — see
+// TestRunDutyCycleBudgetThrottlesHeavySender below for that integration
+// check.
+
+func TestTxBudgetInitialValueIsHalfTheWindow(t *testing.T) {
+	b := newTxBudget()
+	want := dutyCycleWindowMs * dutyCycleFactor
+	if b.remainingMs != want {
+		t.Errorf("newTxBudget().remainingMs = %v, want %v (real firmware boots with a full 50%% duty-cycle budget)", b.remainingMs, want)
+	}
+}
+
+func TestTxBudgetRefillCapsAtMax(t *testing.T) {
+	b := newTxBudget()
+	b.remainingMs = 0
+	b.refill(dutyCycleWindowMs * 10) // absurdly long elapsed time
+	want := dutyCycleWindowMs * dutyCycleFactor
+	if b.remainingMs != want {
+		t.Errorf("refill after a huge elapsed time = %v, want capped at %v", b.remainingMs, want)
+	}
+}
+
+func TestTxBudgetRefillAccruesAtDutyCycleFactor(t *testing.T) {
+	b := txBudget{remainingMs: 0, lastUpdateMs: 0}
+	b.refill(1000)
+	want := 1000.0 * dutyCycleFactor
+	if b.remainingMs != want {
+		t.Errorf("refill(1000ms) = %v, want %v (dutyCycleFactor %v)", b.remainingMs, want, dutyCycleFactor)
+	}
+}
+
+func TestTxBudgetDeferralMsZeroWhenBudgetSufficient(t *testing.T) {
+	b := newTxBudget()
+	if got := b.deferralMs(1000); got != 0 {
+		t.Errorf("deferralMs with a full budget = %d, want 0", got)
+	}
+}
+
+func TestTxBudgetDeferralMsWaitsForHalfTheEstAirtime(t *testing.T) {
+	// Needs 300/2=150ms of budget but only has 100 — a 50ms deficit at a
+	// 0.5 refill rate takes 100ms of elapsed time to make up.
+	b := txBudget{remainingMs: 100}
+	got := b.deferralMs(300)
+	want := uint32(100)
+	if got != want {
+		t.Errorf("deferralMs(300) with 100ms budget = %d, want %d", got, want)
+	}
+}
+
+func TestTxBudgetSpendFloorsAtZero(t *testing.T) {
+	b := txBudget{remainingMs: 50}
+	b.spend(200)
+	if b.remainingMs != 0 {
+		t.Errorf("spend(200) with 50ms budget = %v, want floored at 0", b.remainingMs)
+	}
+}
+
+// TestRunDutyCycleBudgetThrottlesHeavySender is the Run()-level integration
+// check: a node sending far more near-max-size traffic than a 50% duty
+// cycle allows must eventually get throttled — a real listener sees at
+// least one reception whose sender was deferred by its own budget, a
+// distinct cause from every other gate this package already models (CAD,
+// hop limits, loop.detect).
+func TestRunDutyCycleBudgetThrottlesHeavySender(t *testing.T) {
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false)},
+		Links: []Link{{From: 0, To: 1, SNRdB: 20}},
+	}
+
+	airtime := AirtimeMs(DefaultNodePrefs().Radio, maxTransUnitBytes)
+	// Enough near-max-size messages, 1ms apart, to exhaust a full
+	// dutyCycleWindowMs*dutyCycleFactor budget with room to spare.
+	n := int(dutyCycleWindowMs*dutyCycleFactor/float64(airtime)) + 200
+	messages := make([]Message, n)
+	for i := range messages {
+		messages[i] = Message{Origin: 0, SendAtMs: uint32(i), PayloadLen: maxTransUnitBytes}
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, dutyCycleWindowMs*2)
+
+	sawDeferred := false
+	for _, r := range report.Receptions {
+		if r.SenderWasBudgetDeferred {
+			sawDeferred = true
+			break
+		}
+	}
+	if !sawDeferred {
+		t.Error("expected at least one reception whose sender was deferred by its own duty-cycle budget after far exceeding a 50% duty cycle")
+	}
+}
+
+// --- item 12: Transmissions as first-class events ------------------------
+
+// TestRunRelayCADDeferralReportsActualAirTime is the direct regression test
+// for finding 1 in docs/SIMULATOR_PLAN_PHASE2.md item 12: a relay's reported
+// AtMs must be when it ACTUALLY went out, not when it was scheduled — CAD
+// backoff can and does push those apart.
+func TestRunRelayCADDeferralReportsActualAirTime(t *testing.T) {
+	// Node 1 finishes receiving packet 0 at exactly this instant, and (per
+	// zeroRNG — every random draw picks the minimum — and the default
+	// RxDelayBase of 0, i.e. disabled) would schedule its relay for exactly
+	// this same instant: both RxDelayMs and RetransmitDelayMs are 0.
+	scheduledRelayAt := AirtimeMs(DefaultLoRaParams(), 20)
+
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(true), testNode(false), testNode(false)},
+		Links: []Link{
+			{From: 0, To: 1, SNRdB: 0}, // origin -> relay
+			{From: 2, To: 1, SNRdB: 0}, // interferer, audible to the relay
+			{From: 1, To: 3, SNRdB: 0}, // relay -> listener
+		},
+	}
+	messages := []Message{
+		{Origin: 0, SendAtMs: 0, PayloadLen: 20}, // packet 0: what node 1 will relay
+		// packet 1: starts exactly as node 1 finishes receiving packet 0 —
+		// so it does NOT overlap (and therefore does not collide with)
+		// packet 0's own reception window, but IS on the air, audible to
+		// node 1, at the exact instant node 1 tries to key up for its own
+		// scheduled relay — the CAD condition under test.
+		{Origin: 2, SendAtMs: scheduledRelayAt, PayloadLen: 250},
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	foundReception := false
+	for _, r := range report.Receptions {
+		if r.PacketID == 0 && r.Node == 1 {
+			foundReception = true
+			if r.Collided {
+				t.Fatalf("test setup assumes node 1's reception of packet 0 does not collide with the interferer — adjust the fixture: %+v", r)
+			}
+			if r.AtMs != scheduledRelayAt {
+				t.Fatalf("test setup assumes node 1 finishes receiving packet 0 at exactly %dms, got %dms — adjust the fixture", scheduledRelayAt, r.AtMs)
+			}
+		}
+	}
+	if !foundReception {
+		t.Fatal("expected node 1 to receive packet 0 from the origin")
+	}
+
+	var relayTx *Transmission
+	for i := range report.Transmissions {
+		if report.Transmissions[i].PacketID == 0 && report.Transmissions[i].Node == 1 {
+			relayTx = &report.Transmissions[i]
+		}
+	}
+	if relayTx == nil {
+		t.Fatal("expected node 1 to relay packet 0")
+	}
+	if !relayTx.CADDeferred {
+		t.Errorf("expected node 1's relay to be reported as CAD-deferred: %+v", relayTx)
+	}
+	if relayTx.AtMs <= scheduledRelayAt {
+		t.Errorf("expected node 1's relay to actually air later than its scheduled time (%dms) due to CAD, got %dms", scheduledRelayAt, relayTx.AtMs)
+	}
+	if !relayTx.IsRelay {
+		t.Errorf("expected node 1's transmission of packet 0 to be marked IsRelay: %+v", relayTx)
+	}
+}
+
+// TestRunTransmissionsPacketNodeKeyIsUnique proves (PacketID, Node) never
+// appears twice in Report.Transmissions — real firmware's hasSeen dedup
+// guarantees a node transmits any given packet at most once, so a caller
+// can pair a Reception with its causing Transmission by that key alone (see
+// finding 3 in docs/SIMULATOR_PLAN_PHASE2.md item 12). A dense ring is a
+// deliberately adversarial topology: every node repeatedly hears copies of
+// the same packet arriving from both directions.
+func TestRunTransmissionsPacketNodeKeyIsUnique(t *testing.T) {
+	const ringSize = 20
+	nodes := make([]SimNode, ringSize)
+	var links []Link
+	for i := 0; i < ringSize; i++ {
+		nodes[i] = testNode(true)
+		next := (i + 1) % ringSize
+		links = append(links, Link{From: i, To: next, SNRdB: 0}, Link{From: next, To: i, SNRdB: 0})
+	}
+	scenario := Scenario{Nodes: nodes, Links: links}
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20}}
+
+	report := Run(scenario, messages, zeroRNG{}, 600_000)
+
+	seen := make(map[[2]int]bool)
+	for _, tx := range report.Transmissions {
+		key := [2]int{tx.PacketID, tx.Node}
+		if seen[key] {
+			t.Fatalf("(PacketID, Node) = %v appears more than once in Transmissions", key)
+		}
+		seen[key] = true
+	}
+	if len(report.Transmissions) == 0 {
+		t.Fatal("expected at least one transmission in this ring")
+	}
+}
+
+// TestRunTransmissionsOriginAndRelayHopCounts proves the origin's own first
+// send is reported as IsRelay:false/HopCount:0, and a first-hop relay as
+// IsRelay:true/HopCount:1.
+func TestRunTransmissionsOriginAndRelayHopCounts(t *testing.T) {
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(true), testNode(false)},
+		Links: []Link{
+			{From: 0, To: 1, SNRdB: 0},
+			{From: 1, To: 2, SNRdB: 0},
+		},
+	}
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20}}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var origin, relay *Transmission
+	for i := range report.Transmissions {
+		switch report.Transmissions[i].Node {
+		case 0:
+			origin = &report.Transmissions[i]
+		case 1:
+			relay = &report.Transmissions[i]
+		}
+	}
+	if origin == nil || relay == nil {
+		t.Fatalf("expected transmissions from both the origin and the relay, got %+v", report.Transmissions)
+	}
+	if origin.IsRelay || origin.HopCount != 0 {
+		t.Errorf("origin's own send should be IsRelay:false, HopCount:0, got %+v", origin)
+	}
+	if !relay.IsRelay || relay.HopCount != 1 {
+		t.Errorf("first-hop relay should be IsRelay:true, HopCount:1, got %+v", relay)
+	}
+}
+
+// TestRunTransmissionOmittedWhenRelayScheduledPastSimWindow is the direct
+// regression test for finding 2 in docs/SIMULATOR_PLAN_PHASE2.md item 12: a
+// Reception can report WasRelayed:true (the relay was scheduled) while the
+// scheduled instant itself falls past maxSimTimeMs and is dropped by the
+// sim-window guard — in which case no Transmission is ever produced for it.
+// A caller must therefore treat a reception's WasRelayed as "was eligible
+// to relay," not as proof a Transmission exists.
+func TestRunTransmissionOmittedWhenRelayScheduledPastSimWindow(t *testing.T) {
+	relay := testNode(true)
+	// Deliberately huge — pushes the relay's own RxDelayMs holdback (real
+	// firmware's score-based "let the best-positioned node go first" delay)
+	// out far past any reasonable sim window.
+	relay.Prefs.RxDelayBase = 1000
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), relay},
+		// Default radio is SF8 (EU/UK Narrow — see DefaultLoRaParams),
+		// whose own decode threshold is -10dB (snrThresholdDB[1]). Just
+		// above that threshold gives a PacketScore near 0, which maximises
+		// RxDelayMs's (0.85-score) exponent and therefore the delay.
+		Links: []Link{{From: 0, To: 1, SNRdB: -9.9}},
+	}
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20}}
+
+	const maxSimTimeMs = 2000
+	report := Run(scenario, messages, zeroRNG{}, maxSimTimeMs)
+
+	var reception *Reception
+	for i := range report.Receptions {
+		if report.Receptions[i].Node == 1 {
+			reception = &report.Receptions[i]
+		}
+	}
+	if reception == nil {
+		t.Fatal("expected node 1 to receive the packet")
+	}
+	if !reception.WasRelayed {
+		t.Fatal("test setup expects node 1 to have been ELIGIBLE to relay (WasRelayed) even though the relay itself never actually airs — adjust the fixture if this fails")
+	}
+	for _, tx := range report.Transmissions {
+		if tx.Node == 1 {
+			t.Errorf("expected no Transmission for node 1 (its relay was scheduled past maxSimTimeMs=%d), got %+v", maxSimTimeMs, tx)
+		}
+	}
+}
+
+// --- item 13: collision taxonomy (tx_busy / no_lock / corrupted) ---------
+
+// TestRunTxBusyWhenListenerIsTransmitting is the direct regression test for
+// the half-duplex bug found in docs/SIMULATOR_PLAN_PHASE2.md item 13: a
+// node cannot receive while its own transmitter is on the air. Node 0
+// begins its own send at t=0; node 1 sends a packet to it at the same
+// instant. Node 0 must report the reception as tx_busy — not collided, not
+// decoded — rather than the bug's actual prior behaviour (received and
+// even relayed while transmitting).
+func TestRunTxBusyWhenListenerIsTransmitting(t *testing.T) {
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false)},
+		Links: []Link{{From: 1, To: 0, SNRdB: 0}},
+	}
+	messages := []Message{
+		{Origin: 0, SendAtMs: 0, PayloadLen: 20}, // node 0's own outbound send, keeping its radio busy
+		{Origin: 1, SendAtMs: 0, PayloadLen: 20}, // arrives at node 0 during that same window
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var reception *Reception
+	for i := range report.Receptions {
+		if report.Receptions[i].PacketID == 1 && report.Receptions[i].Node == 0 {
+			reception = &report.Receptions[i]
+		}
+	}
+	if reception == nil {
+		t.Fatal("expected a reception record for packet 1 at node 0")
+	}
+	if reception.DropReason != "tx_busy" {
+		t.Errorf("expected DropReason \"tx_busy\", got %q: %+v", reception.DropReason, reception)
+	}
+	if reception.Collided {
+		t.Errorf("tx_busy is a miss, not a collision — Collided should be false: %+v", reception)
+	}
+	if reception.WasRelayed {
+		t.Errorf("a packet never heard at all can't have been relayed: %+v", reception)
+	}
+}
+
+// TestRunTxBusyDoesNotMarkSeen proves a tx_busy miss doesn't count as
+// "decoded" for hasSeen dedup purposes: node 0 misses packet A's direct
+// copy (busy transmitting its own packet at the same instant), but a LATER
+// copy of the same packet, arriving via a longer path once node 0 is free
+// again, must still be received cleanly and relayed onward — exactly the
+// same rule weak_signal already follows (see item 1's own ordering notes).
+func TestRunTxBusyDoesNotMarkSeen(t *testing.T) {
+	scenario := Scenario{
+		// 0: busy-then-relaying node under test. 1: listener, observes
+		// whether 0 relays packet A. 2: packet A's origin, never relays.
+		// 3: bridges packet A's alternate (longer, later-arriving) path —
+		// must itself be able to relay.
+		Nodes: []SimNode{testNode(true), testNode(false), testNode(false), testNode(true)},
+		Links: []Link{
+			{From: 2, To: 0, SNRdB: 0}, // packet A's direct path to node 0 — missed (tx_busy)
+			{From: 2, To: 3, SNRdB: 0}, // packet A's alternate path, hop 1
+			{From: 3, To: 0, SNRdB: 0}, // packet A's alternate path, hop 2 — arrives once node 0 is free
+			{From: 0, To: 1, SNRdB: 0}, // observes whether node 0 goes on to relay packet A
+		},
+	}
+	messages := []Message{
+		{Origin: 0, SendAtMs: 0, PayloadLen: 20}, // packet 0: node 0's own send, busy for [0, airtime20)
+		{Origin: 2, SendAtMs: 0, PayloadLen: 20}, // packet 1 ("packet A"): same payload size, so its direct copy's window exactly matches node 0's busy window
+	}
+
+	airtime20 := AirtimeMs(DefaultLoRaParams(), 20)
+	// The alternate path's second hop can only arrive once node 3 has
+	// itself received AND relayed packet A — at the very earliest 2 ×
+	// airtime20 (one airtime for node 3's own reception, one more for its
+	// relay) — which must land after node 0's busy window
+	// ([0, airtime20)) has already ended, or this test doesn't actually
+	// exercise "seen despite the miss."
+	if 2*airtime20 <= airtime20 {
+		t.Fatal("test setup assumes the alternate path's second hop arrives after node 0's own busy window ends — adjust the fixture")
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var missedAt, cleanAt *Reception
+	for i := range report.Receptions {
+		r := &report.Receptions[i]
+		if r.PacketID != 1 || r.Node != 0 {
+			continue
+		}
+		if r.DropReason == "tx_busy" {
+			missedAt = r
+		} else {
+			cleanAt = r
+		}
+	}
+	if missedAt == nil {
+		t.Fatal("expected node 0 to miss packet A's direct copy as tx_busy")
+	}
+	if cleanAt == nil {
+		t.Fatal("expected node 0 to still cleanly receive packet A's later copy via the alternate path, despite the earlier tx_busy miss")
+	}
+	if !cleanAt.WasRelayed {
+		t.Errorf("expected node 0 to relay packet A after receiving it cleanly: %+v", cleanAt)
+	}
+
+	sawAtListener := false
+	for _, r := range report.Receptions {
+		if r.PacketID == 1 && r.Node == 1 && !r.Collided {
+			sawAtListener = true
+		}
+	}
+	if !sawAtListener {
+		t.Error("expected node 1 to eventually receive packet A via node 0's relay — propagation should continue normally past the tx_busy miss")
+	}
+}
+
+// TestLoraCaptureOutcomeDistinguishesNoLockFromCorrupted is
+// TestLoraCapturedRequiresLockThenMargin's own fixture, re-run against
+// loraCaptureOutcome to prove it reports WHICH of the two ways capture
+// failed (not just that it failed) — the direct source for
+// Reception.CollisionKind.
+func TestLoraCaptureOutcomeDistinguishesNoLockFromCorrupted(t *testing.T) {
+	radio := DefaultLoRaParams()
+	preambleMs := uint32(preambleDurationMs(radio))
+	tx := transmission{startMs: 1000, radio: radio}
+
+	tests := []struct {
+		name          string
+		otherStartMs  uint32
+		wantedSNR     float64
+		interfererSNR float64
+		want          captureOutcome
+	}{
+		{"interferer during preamble — no_lock regardless of SNR margin", tx.startMs + preambleMs/2, 20, -20, outcomeNoLock},
+		{"interferer after lock, margin met — captured", tx.startMs + preambleMs + 50, 10, 0, outcomeCaptured},
+		{"interferer after lock, margin short — corrupted", tx.startMs + preambleMs + 50, 5, 0, outcomeCorrupted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			other := transmission{startMs: tt.otherStartMs, radio: radio}
+			got := loraCaptureOutcome(tt.wantedSNR, tt.interfererSNR, tx, other)
+			if got != tt.want {
+				t.Errorf("loraCaptureOutcome(...) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunCollisionKindNoLockDominatesCorrupted proves that when a reception
+// has BOTH a no_lock-causing interferer and a corrupted-causing interferer
+// at once, CollisionKind reports "no_lock" — without lock, whatever a
+// different interferer did at the payload level is moot.
+func TestRunCollisionKindNoLockDominatesCorrupted(t *testing.T) {
+	radio := DefaultLoRaParams()
+	preambleMs := uint32(preambleDurationMs(radio))
+
+	scenario := Scenario{
+		// 0: wanted signal's origin. 1: causes no_lock (starts alongside
+		// 0, inside its preamble window). 2: causes corrupted (starts
+		// after 0's lock deadline, with insufficient SNR margin). 3: the
+		// listener under test.
+		Nodes: []SimNode{testNode(false), testNode(false), testNode(false), testNode(false)},
+		Links: []Link{
+			{From: 0, To: 3, SNRdB: 10},
+			{From: 1, To: 3, SNRdB: 0},
+			{From: 2, To: 3, SNRdB: 6}, // 10 - 6 = 4 < captureMarginDB (6) — insufficient margin, i.e. "corrupted" on its own
+		},
+	}
+	messages := []Message{
+		{Origin: 0, SendAtMs: 0, PayloadLen: 20},
+		{Origin: 1, SendAtMs: 0, PayloadLen: 20},              // starts alongside packet 0 — inside its preamble window
+		{Origin: 2, SendAtMs: preambleMs + 1, PayloadLen: 20}, // starts just after packet 0's own lock deadline
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var reception *Reception
+	for i := range report.Receptions {
+		if report.Receptions[i].PacketID == 0 && report.Receptions[i].Node == 3 {
+			reception = &report.Receptions[i]
+		}
+	}
+	if reception == nil {
+		t.Fatal("expected a reception of packet 0 at node 3")
+	}
+	if !reception.Collided {
+		t.Fatalf("test setup assumes this reception collides (two interferers) — adjust the fixture: %+v", reception)
+	}
+	if reception.CollisionKind != "no_lock" {
+		t.Errorf("expected CollisionKind \"no_lock\" (it dominates \"corrupted\"), got %q: %+v", reception.CollisionKind, reception)
+	}
+}
+
+// TestRunCollisionKindEmptyWhenNotCollided proves CollisionKind stays empty
+// on a clean, uncontended reception — it only ever explains a collision,
+// never anything else.
+func TestRunCollisionKindEmptyWhenNotCollided(t *testing.T) {
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false)},
+		Links: []Link{{From: 0, To: 1, SNRdB: 0}}, // well above every SF's threshold, nothing else audible
+	}
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20}}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	if len(report.Receptions) != 1 {
+		t.Fatalf("expected exactly 1 reception, got %d: %+v", len(report.Receptions), report.Receptions)
+	}
+	r := report.Receptions[0]
+	if r.Collided {
+		t.Fatalf("test setup assumes a clean reception — adjust the fixture: %+v", r)
+	}
+	if r.CollisionKind != "" {
+		t.Errorf("expected CollisionKind empty on an uncollided reception, got %q: %+v", r.CollisionKind, r)
 	}
 }

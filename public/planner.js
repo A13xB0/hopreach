@@ -632,17 +632,29 @@
         label: f.properties.name,
         lat: useCalibrated ? f.properties.calibrated_lat : f.geometry.coordinates[1],
         lon: useCalibrated ? f.properties.calibrated_lon : f.geometry.coordinates[0],
-        // Every region this repeater is believed to be in (inferred_scopes
-        // union default_scope) — lets other tools (the simulator's own
-        // region filter) reuse the same "which scopes is this repeater in"
-        // logic as the main map's, see app.js's repeaterScopesOf.
-        scopes: Array.from(new Set([...(f.properties.inferred_scopes || []), ...(f.properties.default_scope ? [f.properties.default_scope] : [])])),
+        // Every region this repeater is believed to be in (observed_scopes
+        // union default_scope; falls back to the older inferred_scopes
+        // property for one release — see app.js's repeaterScopesOf) — lets
+        // other tools (the simulator's own region filter) reuse the same
+        // "which scopes is this repeater in" logic as the main map's, see
+        // app.js's repeaterScopesOf.
+        scopes: Array.from(
+          new Set([...(f.properties.observed_scopes || f.properties.inferred_scopes || []), ...(f.properties.default_scope ? [f.properties.default_scope] : [])])
+        ),
         // This repeater's own real configured path-hash size (1-3 bytes,
         // `set` via MeshCore's own hash_size setting) — the simulator's
         // loop.detect modeling (see internal/meshsim's own HashSize doc
         // comment) needs this to reproduce real collision-prone-at-small-
         // sizes behavior, not a guess.
         hashSize: f.properties.hash_size || null,
+        // Whether this repeater has ever been seen relaying a plain
+        // (unscoped) flood packet — undefined when corescope.scope_observation
+        // is disabled server-side (the property is omitted entirely, see
+        // output.go's buildFeatures), which the simulator treats the same
+        // as "not observed" (see SimNode's own default). See
+        // corescope.ObservedUnscoped's doc comment for why absence isn't
+        // proof of denial, just the best signal available.
+        observedUnscoped: f.properties.observed_unscoped === true,
       };
     }
     renderAllRealNeighbors(); // keep the "show all real neighbours" overlay in sync with whatever's now loaded/filtered

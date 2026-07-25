@@ -54,7 +54,7 @@ test("repeater stats eventually populate from real data", async ({ page }) => {
 // isolated the same way. This only checks that the control itself renders
 // with a real, live region list and that toggling one filters markers —
 // see the test below for actually checking a per-scope coverage overlay
-// renders (skipped here since that needs corescope.scope_inference to be
+// renders (skipped here since that needs corescope.scope_observation to be
 // enabled, off by default, so meta.json's scope_coverage may legitimately
 // be empty on a given instance).
 test("scope filter control renders real CoreScope regions and filters markers", async ({ page }) => {
@@ -81,7 +81,7 @@ test("scope filter control renders real CoreScope regions and filters markers", 
 // pre-rendered server-side, nightly — same reliability as the main
 // coverage layer, unlike an earlier version of this feature that computed
 // live client-side WASM rasters on every tick. Skips (rather than fails)
-// when scope_coverage is empty: corescope.scope_inference is off by
+// when scope_coverage is empty: corescope.scope_observation is off by
 // default, so a CI instance running the image's built-in config
 // legitimately has none — this only verifies real rendering behaviour
 // when real per-scope tiles do exist.
@@ -91,7 +91,7 @@ test("checking a region with real coverage tiles renders that region's own overl
   expect(metaResp.ok()).toBeTruthy();
   const meta = await metaResp.json();
   const scopeNames = Object.keys(meta.scope_coverage || {});
-  test.skip(scopeNames.length === 0, "no scope_coverage on this instance (scope_inference disabled, or no region has any member repeater yet)");
+  test.skip(scopeNames.length === 0, "no scope_coverage on this instance (scope_observation disabled, or no region has any member repeater yet)");
 
   const name = scopeNames[0];
   const control = page.locator(".scope-filter-control");

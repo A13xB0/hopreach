@@ -4,22 +4,43 @@ import "testing"
 
 // TestAirtimeMsMatchesHandComputedExample checks one full hand-computed
 // case against the standard Semtech AN1200.13 formula, using
-// DefaultLoRaParams (SF11, BW250kHz, CR5, preamble 8, explicit header, CRC
-// on) and a 20-byte payload:
+// DefaultLoRaParams (the EU/UK (Narrow) preset: SF8, BW62.5kHz, CR8,
+// explicit header, CRC on — preamble derived from SF via
+// preambleSymbolsForSF, 32 symbols at SF8) and a 20-byte payload:
 //
-//	symbolDurationMs = 2^11/250 = 8.192ms
-//	low data rate optimize: 8.192 < 16 -> DE=0
-//	preamble = (8+4.25) * 8.192 = 100.352ms
-//	numerator = 8*20 - 4*11 + 28 + 16*1 - 20*0 = 160-44+28+16 = 160
-//	denominator = 4*(11-0) = 44
-//	ceil(160/44) = ceil(3.636) = 4
-//	crSemtech = 5-4 = 1
-//	nPayloadSymbols = 8 + 4*(1+4) = 28
-//	total = 100.352 + 28*8.192 = 100.352 + 229.376 = 329.728ms -> truncates to 329
+//	symbolDurationMs = 2^8/62.5 = 4.096ms
+//	low data rate optimize: 4.096 < 16 -> DE=0
+//	preamble = (32+4.25) * 4.096 = 148.48ms
+//	numerator = 8*20 - 4*8 + 28 + 16*1 - 20*0 = 160-32+28+16 = 172
+//	denominator = 4*(8-0) = 32
+//	ceil(172/32) = ceil(5.375) = 6
+//	crSemtech = 8-4 = 4
+//	nPayloadSymbols = 8 + 6*(4+4) = 56
+//	total = 148.48 + 56*4.096 = 148.48 + 229.376 = 377.856ms -> truncates to 377
 func TestAirtimeMsMatchesHandComputedExample(t *testing.T) {
 	got := AirtimeMs(DefaultLoRaParams(), 20)
-	if got != 329 {
-		t.Errorf("AirtimeMs(default params, 20 bytes) = %d, want 329", got)
+	if got != 377 {
+		t.Errorf("AirtimeMs(default params, 20 bytes) = %d, want 377", got)
+	}
+}
+
+// TestPreambleSymbolsForSF locks in the exact firmware boundary
+// (RadioLibWrapper::preambleLengthForSF, src/helpers/radiolib/
+// RadioLibWrappers.h): 32 symbols for SF<=8, 16 for SF>8. Getting this
+// backwards previously undercounted airtime 4x at SF8, which cascades into
+// every collision window, CAD check, and relay delay in the engine.
+func TestPreambleSymbolsForSF(t *testing.T) {
+	tests := []struct {
+		sf   int
+		want int
+	}{
+		{5, 32}, {6, 32}, {7, 32}, {8, 32}, // <= 8
+		{9, 16}, {10, 16}, {11, 16}, {12, 16}, // > 8
+	}
+	for _, tt := range tests {
+		if got := preambleSymbolsForSF(tt.sf); got != tt.want {
+			t.Errorf("preambleSymbolsForSF(%d) = %d, want %d", tt.sf, got, tt.want)
+		}
 	}
 }
 
