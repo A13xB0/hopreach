@@ -81,9 +81,8 @@ func TestTennMeshBandsAreMonotonic(t *testing.T) {
 
 // TestSuggestPolicyIncludesCommunityMethods proves BuiltinMeshMethods are
 // actually in SuggestPolicy's own candidate set, prefixed for the UI to
-// tell them apart from this package's own topology models — the concrete
-// integration point docs/SIMULATOR_PLAN_PHASE4.md work item 5 asks for
-// ("load your own repeaters, run both directions, get a measured answer").
+// tell them apart from this package's own topology models — so a user can
+// load their own repeaters, run both directions and get a measured answer.
 func TestSuggestPolicyIncludesCommunityMethods(t *testing.T) {
 	scenario, messages := lockstepCollisionScenario()
 	result := SuggestPolicy(PolicyTuneRequest{

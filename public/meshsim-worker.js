@@ -61,7 +61,6 @@ self.onmessage = async (e) => {
     // this one onmessage handler would block this same event loop for the
     // whole optimization, exactly the problem that makes "suggest"/
     // "suggest-policy" uncancellable mid-search — see
-    // docs/SIMULATOR_PLAN_PHASE4.md work item 4's own writeup and
     // MeshSim.optimizeStep's doc comment. The caller (simulator.js) is
     // what actually drives the round-by-round loop: it sends one
     // "optimize-step" message, waits for this reply, decides whether to

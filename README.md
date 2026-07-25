@@ -188,6 +188,11 @@ a secondhand approximation — compiled to the same shared WASM module as the
 [planning tools](#planning-tools) (`wasm/meshsim.go`; see
 [WASM shared core](#wasm-shared-core)).
 
+[`docs/simulator-model.md`](docs/simulator-model.md) documents what the
+model actually covers — the event model, airtime and frame sizing, the
+capture/collision rules, timing, region scoping, and the places it
+deliberately diverges from real firmware.
+
 Docks to the right edge like Plan, but noticeably wider (480px vs Plan's
 320px) — a loaded node list, a full results log, and a per-repeater
 prediction breakdown need more room than that, while still leaving the

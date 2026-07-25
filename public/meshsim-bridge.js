@@ -111,8 +111,7 @@
   }
 
   // optimizeValidate(optimizeRequest, policy) -> {delivery, collision}
-  // Hold-out validation (docs/SIMULATOR_PLAN_PHASE4.md work item 4) —
-  // re-evaluates policy against optimizeRequest's own holdoutSeed/
+  // Hold-out validation — re-evaluates policy against optimizeRequest's own holdoutSeed/
   // holdoutTrials, seeds the search itself never drew from. Called once,
   // after optimizeStep-driven iteration stops — see wasm/meshsim.go's
   // jsSimOptimizeValidate/internal/meshsim.OptimizeValidate.

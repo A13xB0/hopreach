@@ -18,7 +18,7 @@ func TestConditionNeighborsAtMostMatchesAndRejects(t *testing.T) {
 // TestApplyPolicyToScenarioSingleRuleMatchesApplyRuleToScenario proves a
 // single-rule ConfigPolicy behaves identically to today's
 // applyRuleToScenario with that same rule — the backward-compatibility
-// property docs/SIMULATOR_PLAN_PHASE2.md item 15c explicitly asks for.
+// property a multi-rule policy has to preserve.
 func TestApplyPolicyToScenarioSingleRuleMatchesApplyRuleToScenario(t *testing.T) {
 	scenario := Scenario{
 		Nodes: []SimNode{testNode(true), testNode(true)},
@@ -455,8 +455,8 @@ func TestAssignPolicyNodeMatchingGlobalAndTierRuleReportsBoth(t *testing.T) {
 }
 
 // TestAssignPolicyResultSumsCoverEveryNode is the "nothing silently
-// dropped" check docs/SIMULATOR_PLAN_PHASE4.md work item 6 asks for: every
-// loaded node gets exactly one PolicyAssignment, matched or not.
+// dropped" check: every loaded node gets exactly one PolicyAssignment,
+// matched or not.
 func TestAssignPolicyResultCoversEveryNode(t *testing.T) {
 	scenario := Scenario{Nodes: []SimNode{testNode(true), testNode(true), testNode(true), testNode(true)}}
 	policy := ConfigPolicy{{Condition: RuleCondition{Kind: ConditionNodeIndexIn, Nodes: []int{1}}, TxDelayFactor: floatPtr(1.0)}}

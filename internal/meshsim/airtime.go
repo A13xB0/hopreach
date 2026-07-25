@@ -35,8 +35,7 @@ type LoRaParams struct {
 	CRCEnabled bool `json:"crcEnabled"`
 }
 
-// DefaultLoRaParams mirrors the EU/UK (Narrow) preset (see the "Radio
-// presets" section of docs/SIMULATOR_PLAN.md, sourced from
+// DefaultLoRaParams mirrors the EU/UK (Narrow) preset (sourced from
 // api.meshcore.nz/api/v1/config) — the current MeshCore-recommended default
 // for this region. The project's previous default, 869.525/SF11/BW250/CR5,
 // is now labelled "EU/UK (Deprecated)" in that same upstream list.

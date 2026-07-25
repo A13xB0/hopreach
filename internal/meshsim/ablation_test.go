@@ -3,8 +3,7 @@ package meshsim
 import "testing"
 
 // TestRunWithAblationZeroValueMatchesRun is the mandatory equivalence
-// check docs/SIMULATOR_PLAN_PHASE4.md work item 8 requires: Run must be
-// byte-for-byte identical to RunWithAblation with a zero-value
+// check: Run must be byte-for-byte identical to RunWithAblation with a zero-value
 // AblationFlags, for every fixed seed — Run's own existing 39 test call
 // sites and 4 non-test callers depend on Run's behaviour being completely
 // unaffected by this file's own addition.

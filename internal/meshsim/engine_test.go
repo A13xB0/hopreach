@@ -1283,8 +1283,8 @@ func TestRunDutyCycleBudgetThrottlesHeavySender(t *testing.T) {
 
 // --- item 12: Transmissions as first-class events ------------------------
 
-// TestRunRelayCADDeferralReportsActualAirTime is the direct regression test
-// for finding 1 in docs/SIMULATOR_PLAN_PHASE2.md item 12: a relay's reported
+// TestRunRelayCADDeferralReportsActualAirTime is a direct regression test:
+// a relay's reported
 // AtMs must be when it ACTUALLY went out, not when it was scheduled — CAD
 // backoff can and does push those apart.
 func TestRunRelayCADDeferralReportsActualAirTime(t *testing.T) {
@@ -1356,8 +1356,8 @@ func TestRunRelayCADDeferralReportsActualAirTime(t *testing.T) {
 // TestRunTransmissionsPacketNodeKeyIsUnique proves (PacketID, Node) never
 // appears twice in Report.Transmissions — real firmware's hasSeen dedup
 // guarantees a node transmits any given packet at most once, so a caller
-// can pair a Reception with its causing Transmission by that key alone (see
-// finding 3 in docs/SIMULATOR_PLAN_PHASE2.md item 12). A dense ring is a
+// can pair a Reception with its causing Transmission by that key alone.
+// A dense ring is a
 // deliberately adversarial topology: every node repeatedly hears copies of
 // the same packet arriving from both directions.
 func TestRunTransmissionsPacketNodeKeyIsUnique(t *testing.T) {
@@ -1422,9 +1422,8 @@ func TestRunTransmissionsOriginAndRelayHopCounts(t *testing.T) {
 	}
 }
 
-// TestRunTransmissionOmittedWhenRelayScheduledPastSimWindow is the direct
-// regression test for finding 2 in docs/SIMULATOR_PLAN_PHASE2.md item 12: a
-// Reception can report WasRelayed:true (the relay was scheduled) while the
+// TestRunTransmissionOmittedWhenRelayScheduledPastSimWindow is a direct
+// regression test: a Reception can report WasRelayed:true (the relay was scheduled) while the
 // scheduled instant itself falls past maxSimTimeMs and is dropped by the
 // sim-window guard — in which case no Transmission is ever produced for it.
 // A caller must therefore treat a reception's WasRelayed as "was eligible
@@ -1470,8 +1469,8 @@ func TestRunTransmissionOmittedWhenRelayScheduledPastSimWindow(t *testing.T) {
 // --- item 13: collision taxonomy (tx_busy / no_lock / corrupted) ---------
 
 // TestRunTxBusyWhenListenerIsTransmitting is the direct regression test for
-// the half-duplex bug found in docs/SIMULATOR_PLAN_PHASE2.md item 13: a
-// node cannot receive while its own transmitter is on the air. Node 0
+// a half-duplex bug: a node cannot receive while its own transmitter is on
+// the air. Node 0
 // begins its own send at t=0; node 1 sends a packet to it at the same
 // instant. Node 0 must report the reception as tx_busy — not collided, not
 // decoded — rather than the bug's actual prior behaviour (received and
@@ -1689,8 +1688,7 @@ func TestRunCollisionKindEmptyWhenNotCollided(t *testing.T) {
 // travels unchanged with the packet — a relay appends its own hash at the
 // PACKET's size, never its own configured one (Mesh::routeRecvPacket,
 // src/Mesh.cpp:335), and loop.detect reads the packet's size too
-// (MyMesh::isLooped, examples/simple_repeater/MyMesh.cpp:404). See
-// docs/SIMULATOR_PLAN_PHASE3.md for the full citations and rationale.
+// (MyMesh::isLooped, examples/simple_repeater/MyMesh.cpp:404).
 
 // TestMessageEffectiveHashSizeDefaultsAndClamps proves Message.HashSize's
 // resolution: unset/zero falls back to defaultMessageHashSize, and
@@ -1847,8 +1845,8 @@ func TestRunRelayAppendsAtPacketHashSizeNotItsOwn(t *testing.T) {
 	}
 }
 
-// TestRunLoopDetectUsesPacketHashSizeNotListeners is the direct regression
-// test for finding A in docs/SIMULATOR_PLAN_PHASE3.md: a listener's own
+// TestRunLoopDetectUsesPacketHashSizeNotListeners is a direct regression
+// test: a listener's own
 // configured SimNode.HashSize must never drive its own loop.detect
 // evaluation — only the packet's own HashSize does (MyMesh::isLooped reads
 // packet->getPathHashSize(), examples/simple_repeater/MyMesh.cpp:404).

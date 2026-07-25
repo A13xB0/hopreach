@@ -1,8 +1,8 @@
 package meshsim
 
 // MeshMethod is a named ConfigPolicy sourced from a real MeshCore
-// community's own published tuning convention — docs/SIMULATOR_PLAN_
-// PHASE4.md work item 5's "the X method (e.g. Sydney method)" request.
+// community's own published tuning convention — "the X method", e.g. the
+// Sydney method.
 //
 // Source is REQUIRED (see BuiltinMeshMethods and its own test) — a
 // community-reported convention must never render with the same authority
@@ -11,8 +11,7 @@ package meshsim
 // cited page directly, not from a search-engine summary: summaries
 // describing this exact material got MeshSydney's own direction backwards
 // twice, both times attributing WNY's numbers to Sydney (see the
-// accuracy-warning note on MeshSydney below and
-// docs/SIMULATOR_PLAN_PHASE4.md work item 5's own write-up of this).
+// accuracy-warning note on MeshSydney below).
 type MeshMethod struct {
 	Name   string       `json:"name"`
 	Policy ConfigPolicy `json:"policy"`
@@ -91,9 +90,8 @@ func communityMethodCandidates(hasAltitude bool) []policyCandidate {
 // Only CRITICAL/LINK/STANDARD/LOCAL are encoded here. BACKBONE, MOBILE and
 // BRIDGE are deployment-role facts ("this is a point-to-point link," "this
 // is a vehicle"), not anything derivable from topology — no altitude or
-// neighbour-count condition can express them, and per
-// docs/SIMULATOR_PLAN_PHASE4.md work item 5's own instruction, skipping is
-// the honest option rather than fabricating a mapping. There's a second,
+// neighbour-count condition can express them, and skipping is the honest
+// option rather than fabricating a mapping. There's a second,
 // sharper reason to drop BACKBONE specifically: its own stated neighbour
 // range (1-2) OVERLAPS LOCAL's (1-3) while its delay (0.25) is the
 // OPPOSITE end of the scale from LOCAL's (1.4) — a real backbone
@@ -146,8 +144,7 @@ var wnyAltitudeBoundaries = []float64{150, 400, 700}
 // and claims its own values are "nearly identical" to Sydney's — that
 // claim does not survive checking against meshsydney.com/wiki directly
 // (Sydney's own top/bottom tiers are 0.3/1.4; WNY's are 2.0/0.3, close to
-// a mirror image) and is not repeated here; see
-// docs/SIMULATOR_PLAN_PHASE4.md work item 5's own write-up.
+// a mirror image) and is not repeated here.
 //
 // txdelay VALUES are WNY's own (2.0/1.5/0.8/0.3) — only the altitude
 // BOUNDARIES at which each applies are approximated (wnyAltitudeBoundaries
@@ -231,8 +228,8 @@ func w6hsMethod() MeshMethod {
 // txdelay >= 1.6 (8 backoff slots, vs 0.5 default), direct.txdelay >= 1 (5
 // slots, vs 0.3 default). NOT a community method — a single proposed
 // global floor, and NOT maintainer-endorsed: the issue shows no
-// maintainer response, and the related auto-tuning discussion (#2053,
-// see docs/SIMULATOR_PLAN_PHASE4.md work item 8) records maintainers
+// maintainer response, and the related auto-tuning discussion (#2053)
+// records maintainers
 // declining to merge similar work without "convincing test results."
 // Included as a real, citable candidate worth searching, labelled
 // honestly as a proposal rather than a recommendation.

@@ -280,7 +280,7 @@ test("search policies finds a composite policy and shows an action list", async 
   await expect(page.locator("#sim-policy-actions-list")).not.toBeEmpty();
   await expect(page.locator("#sim-suggest-policy")).toBeEnabled();
 
-  // Profile breakdown (docs/SIMULATOR_PLAN_PHASE4.md work item 6) — fills
+  // Profile breakdown — fills
   // in asynchronously after the rest of the results (see
   // renderPolicyProfileSummary's own doc comment), so poll for it rather
   // than asserting immediately. Whichever policy actually won this run,
@@ -326,8 +326,8 @@ test("adaptive optimizer refuses to run before a policy search", async ({ page }
 // tested at the Go level, never exercised through the real worker/WASM/UI
 // pipeline in a browser — the exact gap that let a silently-dropped
 // message kind read as an indefinite hang. This test drives the real
-// chunked worker round-trip loop (docs/SIMULATOR_PLAN_PHASE4.md work item
-// 4), not just internal/meshsim's own Go tests for OptimizeStep.
+// chunked worker round-trip loop, not just internal/meshsim's own Go tests
+// for OptimizeStep.
 test("adaptive optimizer runs after a policy search and shows a result with hold-out validation", async ({ page }) => {
   test.slow();
 
@@ -490,8 +490,7 @@ test("clicking a repeater marker opens the repeaters modal, and applied settings
 
   // A fresh node with no explicit override defaults to "minimal", a
   // deliberate divergence from real firmware's own "off" default — see
-  // DEFAULT_LOOP_DETECT's own comment in simulator.js and
-  // docs/SIMULATOR_PLAN_PHASE3.md.
+  // DEFAULT_LOOP_DETECT's own comment in simulator.js.
   await expect(firstRow.locator('select[data-field="loopDetect"]')).toHaveValue("minimal");
 
   // Planned repeaters have no real pubkey yet, so a synthetic 6-byte
@@ -627,8 +626,7 @@ test("editing an existing message sender updates it in place instead of adding a
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getMessageCount())).toBe(8);
 });
 
-// Regression test for phase 3 (docs/SIMULATOR_PLAN_PHASE3.md): path-hash
-// size is a property of the MESSAGE (what its sender stamps on the packet
+// Regression test: path-hash size is a property of the MESSAGE (what its sender stamps on the packet
 // at send time — real firmware's Mesh::sendFlood), not of the repeater
 // sending it. The sender form's own hash-size select must default to 3
 // bytes, and editing it must actually round-trip through the sender list's
@@ -746,8 +744,8 @@ test("packet inspector: message details and clicking a repeater after a run both
   await expect(page.locator("#sim-packet-modal-summary")).toContainText("flood time");
   // The packet's own hash size (defaults to 3 bytes — see
   // DEFAULT_MESSAGE_HASH_SIZE) is shown once for the whole packet, not
-  // per hop — real MeshCore packets can never mix hash sizes hop to hop
-  // (see docs/SIMULATOR_PLAN_PHASE3.md), so a path breadcrumb must never
+  // per hop — real MeshCore packets can never mix hash sizes hop to hop,
+  // so a path breadcrumb must never
   // show a per-hop "(NB)" suffix.
   await expect(page.locator("#sim-packet-modal-summary")).toContainText("3B hops");
   const pathTexts = await page.locator(".sim-packet-path").allTextContents();

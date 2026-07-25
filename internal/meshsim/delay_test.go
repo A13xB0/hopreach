@@ -80,8 +80,8 @@ func TestRxDelayMsLowerScoreMeansLongerDelay(t *testing.T) {
 	}
 }
 
-// TestRxDelayMsClampsAtMaxRxDelayMs is the direct regression test for
-// Finding B in docs/SIMULATOR_PLAN_PHASE2.md item 15: real firmware never
+// TestRxDelayMsClampsAtMaxRxDelayMs is a direct regression test: real
+// firmware never
 // holds a reception back longer than MAX_RX_DELAY_MILLIS (32s), regardless
 // of how extreme rxDelayBase or airtime are — this was declared but never
 // actually applied.

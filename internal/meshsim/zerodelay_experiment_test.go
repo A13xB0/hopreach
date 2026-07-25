@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestZeroDelayExperiment is docs/SIMULATOR_PLAN_PHASE4.md work item 8: an
+// TestZeroDelayExperiment is an
 // independent sweep of the same question github.com/meshcore-dev/MeshCore
 // discussion #2053 investigated (does backing off before relaying help or
 // hurt delivery), NOT a replication — stachuman's own topologies, metric
@@ -48,17 +48,16 @@ func TestZeroDelayExperiment(t *testing.T) {
 				fullDelayDelivery = avgDelivery
 			}
 		}
-		// The actual regression guard this experiment exists to provide
-		// (docs/SIMULATOR_PLAN_PHASE4.md work item 8: "if our optimizer
-		// trends toward zero/minimal delays, that is a red flag, not a
-		// discovery — add it as an explicit sanity check"). Zero delays
+		// The actual regression guard this experiment exists to provide:
+		// if the optimizer trends toward zero/minimal delays that is a red
+		// flag, not a discovery, so it gets an explicit sanity check. Zero delays
 		// outright BEATING a real backoff on a contention-heavy topology
 		// would reproduce the exact result field-tested as wrong
 		// (discussion #2053) — a future engine change that reintroduces
 		// that must fail this test, not slip by silently. Not asserted
 		// for the sparse topology, which never has a real gap either way.
 		if topo.name != "sparse (6-node chain)" && zeroDelivery > fullDelayDelivery {
-			t.Errorf("%s: zero-delay delivery (%.3f) exceeded full-delay delivery (%.3f) — this reproduces the exact 'zero delays win' result field-tested as wrong in github.com/meshcore-dev/MeshCore discussion #2053; see this file's own doc comment and docs/SIMULATOR_PLAN_PHASE4.md work item 8 before dismissing this failure",
+			t.Errorf("%s: zero-delay delivery (%.3f) exceeded full-delay delivery (%.3f) — this reproduces the exact 'zero delays win' result field-tested as wrong in github.com/meshcore-dev/MeshCore discussion #2053; see this file's own doc comment before dismissing this failure",
 				topo.name, zeroDelivery, fullDelayDelivery)
 		}
 	}

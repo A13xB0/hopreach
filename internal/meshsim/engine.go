@@ -226,9 +226,9 @@ type Scenario struct {
 }
 
 // ChannelParams turns the reception model from an all-or-nothing hard SNR
-// threshold with a fixed per-link SNR into a probabilistic one — the two
-// physical-fidelity gaps a hard threshold has (docs/SIMULATOR_PLAN_
-// PHASE7.md): real reception near the sensitivity floor is a smooth
+// threshold with a fixed per-link SNR into a probabilistic one, closing the
+// two physical-fidelity gaps a hard threshold has: real reception near the
+// sensitivity floor is a smooth
 // packet-error-rate curve over a few dB, not a step, and a real link's
 // instantaneous SNR varies packet-to-packet (fast fading) rather than
 // sitting at one fixed value forever. Both default off (zero value) so
@@ -304,8 +304,8 @@ type Message struct {
 	// see effectiveHashSize.
 	HashSize int `json:"hashSize,omitempty"`
 	// Background marks this as a FIXED, non-relaying transmission rather than
-	// a flood to propagate — docs/SIMULATOR_PLAN_PHASE8.md's "replay
-	// everything else as background" design. It models one real observed hop
+	// a flood to propagate — the "tune the floods, replay everything else as
+	// background" split a packet replay relies on. It models one real observed hop
 	// of surrounding traffic (a direct/channel/anon packet, or a specific
 	// relay of a flood we're not itself reproducing): node Origin keys the
 	// radio at SendAtMs for FrameBytes' worth of airtime and nothing more.
@@ -618,17 +618,16 @@ func (q *eventQueue) Pop() any {
 }
 
 // AblationFlags disables individual real-firmware mechanisms this package
-// models — docs/SIMULATOR_PLAN_PHASE4.md work item 8's own research
-// instrument for explaining WHICH mechanism accounts for a measured
+// models — a research instrument for explaining WHICH mechanism accounts
+// for a measured
 // difference (e.g. "does zero-delay behave differently with and without
 // half-duplex modeled"), not a user-facing setting. All fields default
 // false — the zero value means "every mechanism enabled," i.e. identical
 // behaviour to Run before this type existed, which is what
 // TestRunWithAblationZeroValueMatchesRun asserts byte-for-byte.
 //
-// Deliberately NOT exposed in the main UI (see docs/SIMULATOR_PLAN_
-// PHASE4.md's own "don't expose ablation flags as a user setting" —
-// someone disabling half-duplex to "improve" their numbers would get
+// Deliberately NOT exposed in the main UI: someone disabling half-duplex
+// to "improve" their numbers would get
 // confidently wrong answers, exactly the failure mode this whole
 // simulator exists to avoid). A debug-only surface at most.
 type AblationFlags struct {

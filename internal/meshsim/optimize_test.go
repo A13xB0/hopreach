@@ -63,10 +63,9 @@ func TestOptimizeStepFirstCallMeasuresBaselineOnly(t *testing.T) {
 }
 
 // TestOptimizeStepNeverRegressesDelivery is the direct regression test for
-// this file's own delivery-first acceptance gate
-// (docs/SIMULATOR_PLAN_PHASE4.md work item 4's "accept only if delivery
-// does not regress" — the phase-2 "collision rate is the wrong objective"
-// lesson applied here). Runs the full loop to completion and checks
+// this file's own delivery-first acceptance gate: accept only if delivery
+// does not regress, because collision rate on its own is the wrong
+// objective. Runs the full loop to completion and checks
 // EVERY round's own CurrentDelivery never drops below the measured
 // baseline by more than DeliveryTolerance.
 func TestOptimizeStepNeverRegressesDelivery(t *testing.T) {
@@ -203,10 +202,9 @@ func TestOptimizeStepDeterministicForFixedSeed(t *testing.T) {
 
 // TestOptimizeDeviationsHaveReasons proves every accepted deviation
 // carries a non-empty, meaningful Reason — the per-repeater "why" the
-// plan asks the UI to show, not just a bare settings change. Also checks
-// each move kind changed its value in the expected direction (phase 6
-// widened the move set beyond pure txdelay back-off — see
-// docs/SIMULATOR_PLAN_PHASE6.md work item C).
+// the UI shows, not just a bare settings change. Also checks each move
+// kind changed its value in the expected direction — the move set is
+// wider than pure txdelay back-off.
 func TestOptimizeDeviationsHaveReasons(t *testing.T) {
 	req := baseOptimizeRequest()
 	state := OptimizeStep(req, OptimizeState{})
@@ -420,7 +418,7 @@ func TestOptimizeStepEscalatesStepWhenStartingFromZero(t *testing.T) {
 	}
 }
 
-// --- Phase 6 (docs/SIMULATOR_PLAN_PHASE6.md) ---------------------------
+// --- Top-K / tabu search ------------------------------------------------
 
 // TestOptimizeStepUnlimitedRoundsIgnoresMaxRounds proves the explicit
 // UnlimitedRounds flag actually overrides MaxRounds, not just a large
@@ -685,7 +683,7 @@ func TestOptimizeStepPicksBestAmongCandidates(t *testing.T) {
 	}
 }
 
-// --- Phase 6 Tier 2/3 (docs/SIMULATOR_PLAN_PHASE6.md) -------------------
+// --- Tier 2/3 (racing, LAHC, SPSA, learned weights) ---------------------
 
 // TestRacingCompareStopsEarlyOnADecisiveDifference is work item D's own
 // direct test: a candidate with an obvious, large contention improvement

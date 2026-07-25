@@ -21,8 +21,7 @@
   // sender with no explicit hash size falls back to this. 3 bytes,
   // deliberately diverging from real firmware (which has no built-in
   // default; every real sendFlood caller passes one explicitly) to
-  // minimise hash collisions between unrelated repeaters by default — see
-  // docs/SIMULATOR_PLAN_PHASE3.md.
+  // minimise hash collisions between unrelated repeaters by default.
   const DEFAULT_MESSAGE_HASH_SIZE = 3;
 
   // Each entry: {id, source: 'planned'|'real'|'companion', refId, label, lat, lon}.
@@ -105,7 +104,7 @@
   // own `result` field — a single request/response round-trip, not a
   // progress-reporting search like suggest/stress/suggestPolicy each
   // have their own bespoke onmessage handler for. Built for the adaptive
-  // optimizer (docs/SIMULATOR_PLAN_PHASE4.md work item 4): each ROUND is
+  // optimizer: each ROUND is
   // its own such round-trip, driven by runOptimizeAdaptive's own loop —
   // see that function's own comment on why the loop lives here in JS and
   // not inside the worker.
@@ -527,9 +526,8 @@
       maxSimTimeMs: document.getElementById("sim-max-time").value,
       trials: document.getElementById("sim-trials").value,
       // A reconstructed CoreScope episode's provenance + real observations,
-      // so reloading the setup restores the actual-vs-predicted comparison
-      // (docs/SIMULATOR_PLAN_PHASE8.md work item 5). Already plain
-      // arrays/objects, so it serialises directly.
+      // so reloading the setup restores the actual-vs-predicted comparison.
+      // Already plain arrays/objects, so it serialises directly.
       episode: lastEpisode || undefined,
     };
     saveAllSetups(all);
@@ -717,8 +715,7 @@
       // Mesh::sendFlood(packet, delay, path_hash_size)), not of the
       // repeater sending it — a relay appends its own hash at the
       // packet's own size, never its own configured one, so a single
-      // path can never mix hash sizes hop to hop. See
-      // docs/SIMULATOR_PLAN_PHASE3.md.
+      // path can never mix hash sizes hop to hop.
       const hashSizeBadge = ` <span class="sim-node-badge sim-badge-hashsize" title="Path-hash size this sender stamps onto its own packets — one size applies to the whole path">${g.hashSize || DEFAULT_MESSAGE_HASH_SIZE}B</span>`;
       if (g.fixed) {
         // A reconstructed real transmission (see reconstructEpisodeFromWindow)
@@ -865,7 +862,7 @@
   // loop-suppression behaviour most real deployments actually want to
   // reason about. Explicitly selecting "off" in the settings table still
   // means off; this only governs a node with no explicit choice made yet.
-  // See docs/SIMULATOR_PLAN_PHASE3.md. internal/meshsim's own
+  // internal/meshsim's own
   // loopDetectThreshold is NOT changed to match — an empty LoopDetect
   // there must keep meaning "never triggers" so an explicit "off" set
   // from here is honoured, not silently upgraded.
@@ -1671,7 +1668,7 @@
     const messages = [];
     simMessageGenerators.forEach((g, gi) => {
       // A "fixed" generator is one reconstructed real transmission at an
-      // absolute time (docs/SIMULATOR_PLAN_PHASE8.md) — a real flood sender,
+      // absolute time — a real flood sender,
       // or a fixed background transmission of surrounding traffic. It expands
       // to exactly one message, unlike the random count/gap/payload
       // generators below.
@@ -1948,8 +1945,7 @@
     } else if (r.wasRelayed) {
       cls = "sim-reason-relayed";
       // The relay CAN be scheduled and never actually air, if the
-      // scheduled instant lands past the sim's own end (see
-      // docs/SIMULATOR_PLAN_PHASE2.md item 12, finding 2) — WasRelayed
+      // scheduled instant lands past the sim's own end — WasRelayed
       // means "was eligible to relay," not "a transmission exists." Look
       // the real Transmission up rather than assume one.
       relayTx = transmissionIndex.get(linkKey(r.packetId, r.node)) || null;
@@ -2058,9 +2054,8 @@
   // any relay) plus every reception AT nodeIndex (RX), merged into one
   // chronological timeline — see openPacketInspectorForNode. Sourced from
   // lastReport.transmissions (real air time, after any CAD/budget
-  // deferral), not lastMessages (only the origin's own scheduled send) —
-  // see docs/SIMULATOR_PLAN_PHASE2.md item 12's own "scheduled ≠ actual"
-  // finding.
+  // deferral), not lastMessages (only the origin's own scheduled send):
+  // scheduled is not the same as actual.
   function buildNodeActivityEvents(nodeIndex) {
     const events = [];
     if (lastReport) {
@@ -2435,8 +2430,7 @@
     const dropped = rxEvents.filter((r) => !r.collided && r.dropReason && r.dropReason !== "cannot_relay" && r.dropReason !== "tx_busy").length;
     const scheduledRelays = rxEvents.filter((r) => r.wasRelayed).length;
     // A relay CAN be scheduled and never actually air, if the scheduled
-    // instant lands past the sim's own end (see
-    // docs/SIMULATOR_PLAN_PHASE2.md item 12, finding 2) — every such case
+    // instant lands past the sim's own end — every such case
     // shows up here as a gap between what was scheduled and what actually
     // transmitted, rather than silently vanishing.
     const neverAired = scheduledRelays - relayTxCount;
@@ -2580,7 +2574,7 @@
   // tx_busy) or was a genuine duplicate of an already-processed copy
   // (already_seen) isn't a "delivery" in any sense worth counting — mirrors
   // the exact same filter internal/meshsim.Report.DeliveryRatio applies on
-  // the Go side (see docs/SIMULATOR_PLAN_PHASE2.md item 15a), kept in sync
+  // the Go side, kept in sync
   // manually since this is plain JS, not generated from the Go source.
   function isCanonicalDelivery(r) {
     return !r.collided && r.dropReason !== "weak_signal" && r.dropReason !== "tx_busy" && r.dropReason !== "already_seen";
@@ -2721,8 +2715,7 @@
         txBusyCount: p.txBusyCount,
         // Airtime ÷ the configured sim duration, not the run's own busy
         // span — a candidate that merely finishes early shouldn't read as
-        // lower duty cycle than one that runs the full window (see
-        // docs/SIMULATOR_PLAN_PHASE2.md item 16's own note on this).
+        // lower duty cycle than one that runs the full window.
         dutyCyclePct: maxSimTimeMs > 0 ? (p.dutyAirtimeMs / maxSimTimeMs) * 100 : 0,
         relayedCount: p.relayedCount,
         deliveryRatio: p.reachableCount > 0 ? p.deliveredCount / p.reachableCount : null,
@@ -3510,7 +3503,7 @@
   // Mirrors internal/meshsim/rules.go's ConfigRule.ApplyWithAttrs
   // (attrs is required, not optional, unlike Go's plain Apply — every JS
   // caller already has NodeAttrs on hand, see applyPolicyToNodeState).
-  // Phase 4 (docs/SIMULATOR_PLAN_PHASE4.md work item 1): a rule's own
+  // A rule's own
   // Scale, when set, computes txDelayFactor from a node attribute instead
   // of the constant txDelayFactor field — same Scale-wins tie-break as
   // the Go side if a rule somehow sets both.
@@ -4024,8 +4017,8 @@
     });
     lastPolicyProfiles = groups;
 
-    // "Nothing silently dropped" check (docs/SIMULATOR_PLAN_PHASE4.md work
-    // item 6) — every loaded repeater must land in exactly one group,
+    // "Nothing silently dropped" check — every loaded repeater must land
+    // in exactly one group,
     // including "No profile."
     const totalGrouped = Array.from(groups.values()).reduce((sum, arr) => sum + arr.length, 0);
     if (totalGrouped !== simNodes.length) {
@@ -4178,10 +4171,10 @@
     URL.revokeObjectURL(a.href);
   }
 
-  // --- phase 4 work item 4: adaptive optimizer ----------------------------
+  // --- adaptive optimizer -------------------------------------------------
   //
-  // "slowly adjusts from seeing collisions etc and contention on specific
-  // repeaters etc until it disappears" (docs/SIMULATOR_PLAN_PHASE4.md) —
+  // Slowly adjusts from seeing collisions and contention on specific
+  // repeaters until they disappear —
   // a closed loop: measure -> find the worst offender -> back it off ->
   // re-measure -> keep or revert -> repeat, starting from Search policies'
   // own winning result rather than from nothing (see internal/meshsim.
@@ -4218,22 +4211,20 @@
   // against cumulative drift is maxDeliveryRegression, enforced Go-side
   // against the run's own baseline — see OptimizeRequest's own docs.
   //
-  // Max rounds / stale-rounds-limit are now user-settable
-  // (docs/SIMULATOR_PLAN_PHASE6.md work item G, #sim-optimize-max-rounds/
-  // #sim-optimize-stale-limit) rather than hardcoded here — see
+  // Max rounds / stale-rounds-limit are user-settable
+  // (#sim-optimize-max-rounds/#sim-optimize-stale-limit) rather than
+  // hardcoded here — see
   // roundBudgetField and runOptimizeAdaptive.
   const OPTIMIZE_MIN_IMPROVEMENT = 0.5;
   const OPTIMIZE_DELIVERY_TOLERANCE = 0.005;
   // How long Cancel waits for the in-flight round to finish gracefully
-  // before force-terminating the worker outright (docs/SIMULATOR_PLAN_
-  // PHASE4.md work item 4's own "terminate() as the hard stop" —
-  // graceful-then-forced, not either/or). This is exactly what makes
-  // "unlimited rounds" (work item G) safe to offer at all — see that
+  // before force-terminating the worker outright: terminate() is the hard
+  // stop, graceful-then-forced rather than either/or. This is exactly what
+  // makes "unlimited rounds" safe to offer at all — see that
   // field's own doc comment on internal/meshsim.OptimizeRequest.
   const OPTIMIZE_CANCEL_FORCE_TIMEOUT_MS = 8000;
 
-  // Reads a "0/blank means unlimited" round-budget field
-  // (docs/SIMULATOR_PLAN_PHASE6.md work item G) — deliberately a distinct
+  // Reads a "0/blank means unlimited" round-budget field — deliberately a distinct
   // {value, unlimited} pair rather than overloading 0, mirroring
   // internal/meshsim.OptimizeRequest's own Unlimited* bools: a blank or
   // non-positive field is a real, explicit "run without this limit"
@@ -4270,7 +4261,7 @@
     const maxRoundsField = roundBudgetField("sim-optimize-max-rounds");
     const staleLimitField = roundBudgetField("sim-optimize-stale-limit");
     const allowFloodMax = document.getElementById("sim-optimize-allow-floodmax").checked;
-    // Tier 2/3 (docs/SIMULATOR_PLAN_PHASE6.md) — each independent, off by
+    // Tier 2/3 — each independent, off by
     // default, matching the Go side's own opt-in defaults exactly.
     const adaptiveTrials = document.getElementById("sim-optimize-adaptive-trials").checked;
     const lateAcceptance = document.getElementById("sim-optimize-late-acceptance").checked;
@@ -4296,7 +4287,7 @@
       unlimitedRounds: maxRoundsField.unlimited,
       staleRoundsLimit: staleLimitField.value,
       unlimitedStaleRounds: staleLimitField.unlimited,
-      // docs/SIMULATOR_PLAN_PHASE6.md work item C/H: txdelay/rxdelay are
+      // txdelay/rxdelay are
       // always on (the Go side's own default), floodMax is the one knob
       // with its own explicit, default-off UI checkbox — see that field's
       // own tooltip on why it's categorically riskier than the delay
@@ -4372,8 +4363,8 @@
     }
   }
 
-  // Graceful-then-forced cancellation (docs/SIMULATOR_PLAN_PHASE4.md work
-  // item 4's own "do both" instruction). Setting optimizeCancelled lets
+  // Graceful-then-forced cancellation — both, not either/or.
+  // Setting optimizeCancelled lets
   // the CURRENT in-flight round finish normally and the loop above exit
   // cleanly next time it checks — the common case, since each round is a
   // small, bounded amount of work. If that doesn't happen within
@@ -4412,8 +4403,7 @@
   }
 
   // Renders the final optimizer result: search-vs-hold-out delivery side
-  // by side (docs/SIMULATOR_PLAN_PHASE4.md work item 4's own "guarding
-  // against overfitting" requirement — a long greedy search WILL overfit
+  // by side, guarding against overfitting — a long greedy search WILL overfit
   // to its own specific random draws, and the output here is CLI commands
   // someone pastes into real radios), plus the per-repeater "what changed
   // and why" list.
@@ -4430,8 +4420,7 @@
     const contentionDelta = state.currentContention - state.baselineContention;
     const sign = (v) => (v >= 0 ? "+" : "");
 
-    // docs/SIMULATOR_PLAN_PHASE6.md work item G's own "the interaction
-    // that will otherwise confuse people": a generous max-rounds budget
+    // The interaction that otherwise confuses people: a generous max-rounds budget
     // does nothing if the stale-rounds limit trips first, and that looks
     // exactly like "the setting was ignored" unless the summary says so
     // explicitly.
@@ -4485,8 +4474,8 @@
     });
   }
 
-  // docs/SIMULATOR_PLAN_PHASE6.md work item C widened the optimizer past
-  // a single "back off txdelay" move — these two helpers are the one
+  // The optimizer's move set is wider than a single "back off txdelay"
+  // move — these two helpers are the one
   // place that knows how each move Kind maps to a real firmware CLI
   // command and a display value, so the deviations list and the CSV
   // export (exportOptimizeDeviationsCsv) can't drift apart on it.
@@ -4576,9 +4565,9 @@
   }
 
   // Human-readable labels for the move-kind slugs Go sends — used in the
-  // history table's own "Move" column (docs/SIMULATOR_PLAN_PHASE6.md work
-  // item B: seeing what kind of move was tried each round, not just
-  // which node, is part of "showing improvement over time" honestly).
+  // history table's own "Move" column: seeing what kind of move was tried
+  // each round, not just which node, is part of showing improvement over
+  // time honestly.
   const MOVE_KIND_LABELS = {
     tx_delay_backoff: "back off txdelay",
     tx_delay_speedup: "speed up txdelay",
@@ -4760,8 +4749,7 @@
   // The origin (true sender) of a real packet, lowercased, if identifiable —
   // only ADVERTs self-identify (their decoded pubKey). Everything else's true
   // origin is one hop upstream of the first observed relay and not in the
-  // data (see docs/SIMULATOR_PLAN_PHASE8.md's origin-identification table),
-  // so callers fall back to the first observed relay.
+  // data, so callers fall back to the first observed relay.
   function originPubkeyOfPacket(p) {
     try {
       const dec = JSON.parse(p.decoded_json || "{}");
@@ -4976,8 +4964,8 @@
   }
 
   // Reconstructs the real CoreScope time window around the packet in the
-  // replay input as a fully editable simulator setup (docs/SIMULATOR_PLAN_
-  // PHASE8.md): real repeaters at their real positions, connectivity from the
+  // replay input as a fully editable simulator setup: real repeaters at
+  // their real positions, connectivity from the
   // real proven relay edges observed in the window, and every real packet as
   // either a flood sender (real payload/hash size) or — for direct/channel/
   // anon traffic we don't route — a fixed background transmission that still

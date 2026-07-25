@@ -6,11 +6,9 @@ import (
 	"math/rand/v2"
 )
 
-// OptimizeRequest configures the adaptive optimizer — phase 4 work item 4
-// (docs/SIMULATOR_PLAN_PHASE4.md): "slowly adjusts from seeing collisions
-// etc and contention on specific repeaters etc until it disappears." Phase
-// 6 (docs/SIMULATOR_PLAN_PHASE6.md) turned the single-candidate greedy
-// search into a top-K best-improvement search with tabu memory — see
+// OptimizeRequest configures the adaptive optimizer: it slowly adjusts
+// from seeing collisions and contention on specific repeaters until they
+// disappear. The search is top-K best-improvement with tabu memory — see
 // OptimizeStep's own doc comment for the shape of one round.
 //
 // BasePolicy is REQUIRED and is not searched for here — it's the starting
@@ -33,9 +31,9 @@ type OptimizeRequest struct {
 	MaxSimTimeMs uint32       `json:"maxSimTimeMs"`
 
 	// Trials is the CHEAP screening sample size for each candidate move —
-	// "a cheap screening pass followed by a more-trials confirmation
-	// before committing" (docs/SIMULATOR_PLAN_PHASE4.md work item 4's own
-	// guidance against chasing noise). Trials < 1 is treated as 1.
+	// a cheap screening pass followed by a more-trials confirmation
+	// before committing, so the search doesn't chase noise. Trials < 1 is
+	// treated as 1.
 	Trials int `json:"trials"`
 	// ConfirmTrials re-evaluates the single BEST screened candidate with a
 	// larger sample before actually accepting it — ConfirmTrials < Trials
@@ -68,8 +66,7 @@ type OptimizeRequest struct {
 	// however many individually-within-tolerance moves led there. Without
 	// this, a long run could ratchet delivery down indefinitely, one
 	// "negligible" step at a time — exactly the degenerate "make every
-	// node silent" outcome docs/SIMULATOR_PLAN_PHASE4.md warns about,
-	// just reached slowly. 0 falls back to a sensible default (see
+	// node silent" outcome, just reached slowly. 0 falls back to a sensible default (see
 	// optimizeDefaults), never to "unlimited".
 	MaxDeliveryRegression float64 `json:"maxDeliveryRegression"`
 	// MinDeliveryGain is what counts as a REAL delivery win — a move
@@ -89,12 +86,11 @@ type OptimizeRequest struct {
 	// documented in simulator.js).
 	MinImprovement float64 `json:"minImprovement"`
 
-	// MaxRounds/StaleRoundsLimit are the two normal stopping conditions
-	// (docs/SIMULATOR_PLAN_PHASE4.md work item 4: "no accepted move in N
-	// consecutive rounds; a wall-clock/iteration budget"). <= 0 falls back
-	// to a sensible default UNLESS the matching Unlimited* flag is set —
-	// see docs/SIMULATOR_PLAN_PHASE6.md work item G on why this needed an
-	// explicit flag rather than overloading 0 to mean "unlimited": an
+	// MaxRounds/StaleRoundsLimit are the two normal stopping conditions:
+	// no accepted move in N consecutive rounds, and an iteration budget.
+	// <= 0 falls back to a sensible default UNLESS the matching Unlimited*
+	// flag is set — an explicit flag rather than overloading 0 to mean
+	// "unlimited", because an
 	// unset field (the common case, a caller that doesn't care) must
 	// still get a bounded default, and only an EXPLICIT request should
 	// ever mean "run forever".
@@ -104,8 +100,7 @@ type OptimizeRequest struct {
 	// UnlimitedStaleRounds is only safe because cancellation genuinely
 	// works (phase 4's chunked worker + force-terminate backstop, covered
 	// by a Playwright test) — if that ever regresses, both Unlimited*
-	// flags need to go with it. See docs/SIMULATOR_PLAN_PHASE6.md work
-	// item G's own safety note.
+	// flags need to go with it.
 	UnlimitedStaleRounds bool `json:"unlimitedStaleRounds"`
 
 	// MoveSet controls which kinds of adjustment the optimizer may
@@ -116,36 +111,33 @@ type OptimizeRequest struct {
 	// will do nothing and say so, rather than silently substituting a
 	// default the caller didn't ask for). A plain (non-pointer)
 	// OptimizeMoveSet couldn't make this distinction: its zero value and
-	// "everything explicitly off" serialize identically over JSON. See
-	// docs/SIMULATOR_PLAN_PHASE6.md work item H.
+	// "everything explicitly off" serialize identically over JSON.
 	MoveSet *OptimizeMoveSet `json:"moveSet,omitempty"`
 
 	// TopK is how many worst-contention AND how many most-starved nodes
 	// (see generateOptimizeCandidates) are screened each round before
-	// picking the single best move — docs/SIMULATOR_PLAN_PHASE6.md work
-	// item B, "evaluate the top-K offenders per round, take the best"
-	// rather than always trying the single worst. < 1 falls back to 3.
+	// picking the single best move: evaluate the top-K offenders per
+	// round and take the best, rather than always trying the single
+	// worst. < 1 falls back to 3.
 	TopK int `json:"topK"`
 	// TabuTenure is how many rounds a rejected (node, move kind) pair is
-	// forbidden from being retried — docs/SIMULATOR_PLAN_PHASE6.md work
-	// items A1/A2, directly implementing "back off if a repeater could
-	// not be optimised more and try another for a bit." <= 0 falls back
+	// forbidden from being retried: back off if a repeater could not be
+	// optimised further and try another for a bit. <= 0 falls back
 	// to a scenario-sized default (see optimizeDefaults).
 	TabuTenure int `json:"tabuTenure"`
 	// TabuAspirationDelta is how much a tabooed node's OWN contention
 	// score must move (up or down) since it was tabooed for it to become
-	// eligible again immediately, tenure notwithstanding — the
-	// change-triggered clearing docs/SIMULATOR_PLAN_PHASE6.md work item
-	// A2 describes: "when it affects that repeater then move back to
-	// it." Contention-score units, same scale as MinImprovement. <= 0
+	// eligible again immediately, tenure notwithstanding — change-triggered
+	// clearing, so that when something affects a tabooed repeater the
+	// search can move back to it. Contention-score units, same scale as
+	// MinImprovement. <= 0
 	// falls back to a default well above normal trial-to-trial noise.
 	TabuAspirationDelta float64 `json:"tabuAspirationDelta"`
 
-	// --- Tier 2/3 (docs/SIMULATOR_PLAN_PHASE6.md) — every field below is
-	// opt-in and defaults to false/0, so a caller that doesn't set them
-	// gets EXACTLY Tier 1's already-shipped behaviour. The plan's own
-	// "Suggested order" says to land and measure Tier 1 before considering
-	// these; they're built and available, but off by default for the same
+	// --- Tier 2/3 — every field below is opt-in and defaults to false/0,
+	// so a caller that doesn't set them gets EXACTLY Tier 1's behaviour.
+	// Tier 1 is meant to be landed and measured before these are
+	// considered; they're built and available, but off by default for the same
 	// "don't stack untested changes" reason the plan itself gives.
 
 	// AdaptiveTrials switches candidate screening from a fixed Trials
@@ -214,8 +206,8 @@ type OptimizeRequest struct {
 	LearnedWeights bool `json:"learnedWeights"`
 
 	// HoldoutSeed/HoldoutTrials are for OptimizeValidate, called once
-	// after the loop stops — a seed range the search itself never touches
-	// (docs/SIMULATOR_PLAN_PHASE4.md work item 4's "hold-out validation"),
+	// after the loop stops — hold-out validation over a seed range the
+	// search itself never touches,
 	// so the reported figure isn't just how well the policy fits the exact
 	// random draws it was tuned against.
 	HoldoutSeed   uint64 `json:"holdoutSeed"`
@@ -237,8 +229,8 @@ type OptimizeMoveSet struct {
 	RxDelay bool `json:"rxDelay"`
 	// FloodMax allows REDUCING a high-redundant-relay node's own
 	// flood.max. Defaults to false and should stay that way for most
-	// users — see docs/SIMULATOR_PLAN_PHASE6.md work item H for why this
-	// is categorically riskier than the delay knobs: it changes WHETHER
+	// users — it's categorically riskier than the delay knobs because it
+	// changes WHETHER
 	// a packet is ever relayed past a point, not just WHEN, and the
 	// delivery-first acceptance gate can only protect against harm
 	// visible within the simulated scenario, which is routinely
@@ -276,9 +268,8 @@ const (
 const spsaWarmStartTargetNode = -2
 
 // OptimizeDeviation records one accepted targeted adjustment — the
-// per-repeater "why" the UI shows alongside the resulting action list
-// (docs/SIMULATOR_PLAN_PHASE4.md work item 4: "which repeaters deviate
-// from the base policy and WHY").
+// per-repeater "why" the UI shows alongside the resulting action list:
+// which repeaters deviate from the base policy, and why.
 type OptimizeDeviation struct {
 	Node     int     `json:"node"`
 	Kind     string  `json:"kind"` // one of the moveKind* constants
@@ -349,8 +340,7 @@ type OptimizeTabuEntry struct {
 	// it was tabooed — compared against its CURRENT score each round
 	// (see OptimizeRequest.TabuAspirationDelta) to decide whether the
 	// situation has moved enough to retry early, tenure notwithstanding.
-	// This is the change-triggered clearing docs/SIMULATOR_PLAN_PHASE6.md
-	// work item A2 describes, and is NOT standard tabu-search practice
+	// This change-triggered clearing is NOT standard tabu-search practice
 	// (textbook tabu tenure is a fixed iteration count) — it's possible
 	// here specifically because per-node contention is already measured
 	// every round.
@@ -500,11 +490,10 @@ func optimizeAttrs(req OptimizeRequest) []NodeAttrs {
 }
 
 // ContentionWeights are the per-component multipliers
-// weightedContentionScore combines — docs/SIMULATOR_PLAN_PHASE6.md Tier 3
-// work item G, "learn the contention-score weights." The plan itself
-// calls this low-priority ("phase 4 already made delivery the primary
-// objective with contention as a proxy/tiebreak, which limits how much
-// the weighting can mislead") — which is exactly why its blast radius is
+// weightedContentionScore combines — learned contention-score weights.
+// This is deliberately low-priority: delivery is already the primary
+// objective with contention only a proxy/tiebreak, which limits how much
+// the weighting can mislead — which is exactly why its blast radius is
 // deliberately kept narrow here: learned weights only ever change WHICH
 // nodes generateOptimizeCandidates ranks to the top for a back-off move
 // (a targeting decision). They never touch optimizeAccepts, MinImprovement,
@@ -551,8 +540,7 @@ func weightedContentionScore(s NodeStats, maxSimTimeMs uint32, w ContentionWeigh
 	return w.ContentionCaused*float64(s.ContentionCaused) + w.CollisionCount*float64(s.CollisionCount) + w.RedundantRelays*float64(s.RedundantRelays) + w.DutyPct*dutyPct
 }
 
-// nodeContentionScore combines the four measurements
-// docs/SIMULATOR_PLAN_PHASE4.md work item 4 names — ContentionCaused,
+// nodeContentionScore combines four measurements — ContentionCaused,
 // CollisionCount, RedundantRelays, duty cycle — into one comparable
 // number for one node. Deliberately simple (an equal-weighted sum, duty
 // cycle expressed as a percentage so its magnitude is comparable to the
@@ -584,8 +572,7 @@ func contentionComponents(s NodeStats, maxSimTimeMs uint32) [4]float64 {
 // work item C's own "speed up (not just back off)" — a starving,
 // otherwise-uninvolved node whose reachable audience isn't getting the
 // packet, weighted by how many things depend on it. Deliberately simple
-// and stated as a first cut, not a rigorously derived heuristic
-// (docs/SIMULATOR_PLAN_PHASE6.md's own note on this): a node with a real
+// and stated as a first cut, not a rigorously derived heuristic: a node with a real
 // delivery shortfall (DeliveredCount well below ReachableCount) that
 // matters more the more nodes are downstream of it. Zero for a node with
 // nothing reachable from it, or with no shortfall at all.
@@ -658,8 +645,8 @@ func dominantContentionReason(s NodeStats, maxSimTimeMs uint32) string {
 
 // evaluateOneTrial runs exactly one simulation trial of an already-
 // policy-applied scenario, at a given (seed, trial) pair — the shared
-// building block evaluateAverageOptimize sums over, and that phase 6 Tier
-// 2's racingCompare (docs/SIMULATOR_PLAN_PHASE6.md work item D) also uses
+// building block evaluateAverageOptimize sums over, and that racingCompare
+// also uses
 // directly, since racing needs each trial's own value, not just a running
 // sum. Takes the scenario with policy ALREADY applied so a multi-trial
 // caller doesn't re-run applyPolicyToScenario on every trial.
@@ -725,8 +712,7 @@ type racingResult struct {
 	trials                          int
 }
 
-// racingCompare implements adaptive trial budgeting / racing
-// (docs/SIMULATOR_PLAN_PHASE6.md Tier 2 work item D, "OCBA-lite"):
+// racingCompare implements adaptive trial budgeting / racing ("OCBA-lite"):
 // incumbent and candidate are evaluated together, trial by trial, using
 // COMMON RANDOM NUMBERS (the same (seed, trial) pair for both — the same
 // pairing discipline every other comparison in this file already uses),
@@ -895,7 +881,7 @@ func baselineNodeFor(req OptimizeRequest, node int) SimNode {
 //
 // optimizeRxDelayStep/optimizeMaxRxDelay bound the rxDelayBase back-off
 // move — real firmware's own default is 0 ("off"); researched community
-// conventions (docs/SIMULATOR_PLAN_PHASE4.md work item 5) suggest values
+// conventions (see methods.go) suggest values
 // around 3, so the step/ceiling here are sized to reach and exceed that
 // range within a handful of escalating rounds, not to hit it in one.
 //
@@ -954,7 +940,7 @@ const (
 )
 
 // spsaWarmStart runs Simultaneous Perturbation Stochastic Approximation
-// (docs/SIMULATOR_PLAN_PHASE6.md Tier 3 work item F) once: perturbs EVERY
+// once: perturbs EVERY
 // node's txDelayFactor simultaneously and estimates a full per-node
 // gradient from just 2 simulation evaluations per iteration, regardless
 // of node count — dramatically cheaper than evaluating each node
@@ -1151,7 +1137,7 @@ func optimizeAccepts(req OptimizeRequest, baselineDelivery, currentDelivery, cur
 }
 
 // optimizeAcceptsLAHC is Late Acceptance Hill Climbing's own acceptance
-// rule (docs/SIMULATOR_PLAN_PHASE6.md Tier 2 work item E) — used ONLY as
+// rule — used ONLY as
 // a fallback in a round where optimizeAccepts found nothing to accept
 // against the immediately-preceding round (see OptimizeStep's own LAHC
 // fallback block). The delivery floor (MaxDeliveryRegression) and the
@@ -1211,8 +1197,7 @@ const (
 // moves toward components that were large on good-outcome candidates and
 // away from components large on bad-outcome ones — grounded in delivery
 // (the real objective), not in the contention score itself, per this
-// file's own standing "don't optimize contention directly" rule
-// (docs/SIMULATOR_PLAN_PHASE6.md's own "Risks" section).
+// file's own standing "don't optimize contention directly" rule.
 func updateContentionWeights(weights ContentionWeights, results []optimizeScreenResult, currentStats []NodeStats, maxSimTimeMs uint32) ContentionWeights {
 	clamp := func(v float64) float64 {
 		if v < optimizeWeightMin {
@@ -1436,8 +1421,7 @@ func generateOptimizeCandidates(req OptimizeRequest, state OptimizeState, attrs 
 
 // pruneExpiredTabuEntries drops entries whose tenure has already elapsed
 // — keeps OptimizeState.TabuList from growing without bound over a long
-// (potentially unlimited-rounds, see docs/SIMULATOR_PLAN_PHASE6.md work
-// item G) run.
+// (potentially unlimited-rounds) run.
 func pruneExpiredTabuEntries(entries []OptimizeTabuEntry, round int) []OptimizeTabuEntry {
 	out := entries[:0]
 	for _, e := range entries {
@@ -1477,8 +1461,8 @@ func clearTabuFor(entries []OptimizeTabuEntry, node int, kind string) []Optimize
 // OptimizeStep does ONE bounded unit of work — either measuring the
 // starting baseline (the very first call, state.Initialized == false) or
 // running one full round of the top-K, tabu-aware search (every call
-// after). This is the resumable-chunk design docs/SIMULATOR_PLAN_PHASE4.md
-// work item 4 requires for real cancellation: `self.onmessage` can't fire
+// after). This resumable-chunk design is what makes real cancellation
+// possible: `self.onmessage` can't fire
 // while a synchronous WASM call runs, so a single call that searched to
 // completion could never be cancelled mid-search. A caller (public/
 // simulator.js) drives the whole optimization by calling this repeatedly,
@@ -1487,7 +1471,7 @@ func clearTabuFor(entries []OptimizeTabuEntry, node int, kind string) []Optimize
 // updating a progress UI with real per-round numbers, and terminating the
 // worker as a hard backstop if a call somehow still hangs.
 //
-// One round (docs/SIMULATOR_PLAN_PHASE6.md):
+// One round:
 //
 //  1. Re-measure the incumbent policy at a fresh, round-specific seed
 //     (paired comparisons throughout — see the roundSeed comment below).
@@ -1532,8 +1516,7 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 		history := []OptimizeRound{}
 
 		if req.SPSAWarmStart {
-			// docs/SIMULATOR_PLAN_PHASE6.md work item F — see
-			// spsaWarmStart's own doc comment for why its result is
+			// See spsaWarmStart's own doc comment for why its result is
 			// adopted-or-discarded here as a single all-or-nothing step,
 			// never reported as per-node deviations.
 			warmPolicy := spsaWarmStart(req, attrs, req.BasePolicy, req.Seed)
@@ -1597,8 +1580,7 @@ func OptimizeStep(req OptimizeRequest, state OptimizeState) OptimizeState {
 	// both sides see the identical set of random draws, so the difference
 	// between them is the effect of the policy change alone. Getting this
 	// wrong (comparing across different seeds) is why the optimizer
-	// originally accepted ZERO moves on any real-sized network — see
-	// docs/SIMULATOR_PLAN_PHASE4.md's own incident notes.
+	// originally accepted ZERO moves on any real-sized network.
 	roundSeed := req.Seed + uint64(state.Round)*1_000_003
 	currentDelivery, currentCollision, currentStats := evaluateAverageOptimize(req.Scenario, attrs, state.CurrentPolicy, req.Messages, req.MaxSimTimeMs, req.Trials, roundSeed)
 	currentContention := normalizedContentionScore(currentStats, req.MaxSimTimeMs, req.Trials)
@@ -1859,8 +1841,7 @@ func optimizeCheckStopping(req OptimizeRequest, state *OptimizeState) {
 }
 
 // OptimizeValidate re-evaluates policy against seeds the search itself
-// never drew from — docs/SIMULATOR_PLAN_PHASE4.md work item 4's own
-// "hold-out validation" requirement, guarding against a long greedy
+// never drew from — hold-out validation, guarding against a long greedy
 // search overfitting to its own specific random draws. Called once, after
 // OptimizeStep-driven iteration stops (naturally or by user cancel) — not
 // part of the chunked loop itself, since one confirmation pass is already

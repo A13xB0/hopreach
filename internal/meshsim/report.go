@@ -36,8 +36,8 @@ func isCanonicalDelivery(r Reception) bool {
 // DeliveryRatio is, per message, the fraction of the packet's own reachable
 // audience (see reachableFrom) that ended up with at least one cleanly
 // decoded copy of it — averaged across every message. Unlike CollisionRate,
-// this measures the thing docs/SIMULATOR_PLAN_PHASE2.md item 15 actually
-// asks the tuner to maximise: successful delivery, not merely the absence
+// this measures the thing the tuner is actually asked to maximise:
+// successful delivery, not merely the absence
 // of collisions (a policy where every node backs off enormously collides
 // less and delivers less — those are not the same goal).
 //
@@ -160,10 +160,10 @@ func reachableFrom(scenario Scenario, origin int, region string) map[int]bool {
 }
 
 // NodeStats is one node's own aggregated outcomes across every packet in a
-// Report — the per-node measurements docs/SIMULATOR_PLAN_PHASE4.md work
-// items 2/4 need to find "which specific repeaters" are the offenders a
-// targeted policy or the adaptive optimizer should single out. Ported
-// line-for-line from public/simulator.js's own computeRankings (item 16),
+// Report — the per-node measurements needed to find "which specific
+// repeaters" are the offenders a targeted policy or the adaptive optimizer
+// should single out. Ported line-for-line from public/simulator.js's own
+// computeRankings,
 // which is the ORIGINAL and, until phase 4's WASM-bridge work happens (see
 // phase 4 work item 7), still the ONLY thing the UI's per-repeater
 // scoreboard actually uses — this is a second, Go-side copy for search

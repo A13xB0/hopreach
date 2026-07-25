@@ -32,14 +32,13 @@ const (
 	ConditionAltitudeAtMost   RuleConditionKind = "altitude_at_most_m"
 	ConditionNeighborsAtLeast RuleConditionKind = "neighbors_at_least"
 	// ConditionNeighborsAtMost, ConditionIsArticulation and
-	// ConditionMarginalCoverageAtLeast were added for item 15c's
-	// topology-keyed models (sparse-slow/edge-first, articulation-first,
-	// mpr/coverage-gain respectively) — see docs/SIMULATOR_PLAN_PHASE2.md.
+	// ConditionMarginalCoverageAtLeast back the topology-keyed models
+	// (sparse-slow/edge-first, articulation-first, mpr/coverage-gain
+	// respectively).
 	ConditionNeighborsAtMost         RuleConditionKind = "neighbors_at_most"
 	ConditionIsArticulation          RuleConditionKind = "is_articulation"
 	ConditionMarginalCoverageAtLeast RuleConditionKind = "marginal_coverage_at_least"
-	// ConditionNodeIndexIn (phase 4 — docs/SIMULATOR_PLAN_PHASE4.md work
-	// item 2) matches an explicit set of node indices (RuleCondition.Nodes)
+	// ConditionNodeIndexIn matches an explicit set of node indices (RuleCondition.Nodes)
 	// rather than any measurable attribute — what the measurement-driven
 	// models (redundancy-suppress, airtime-aware) and the adaptive
 	// optimizer both need: targeting the SPECIFIC repeaters a prior run
@@ -126,10 +125,9 @@ const (
 )
 
 // RuleScale makes a ConfigRule's TxDelayFactor a continuous function of a
-// node attribute instead of a constant — phase 4's answer to
-// docs/SIMULATOR_PLAN_PHASE2.md's own `degree-proportional` gap
-// ("RuleCondition's Kind+Threshold shape has no way to express a
-// continuous function, only a step"). Reads as one sentence ("txdelay 0.25
+// node attribute instead of a constant — closing the `degree-proportional`
+// gap left by RuleCondition's own Kind+Threshold shape, which has no way to
+// express a continuous function, only a step. Reads as one sentence ("txdelay 0.25
 // at 1 neighbour rising to 1.0 at 12+"), unlike a per-node table.
 //
 // Linear interpolation between (AtMin, ValueAtMin) and (AtMax, ValueAtMax),
@@ -280,9 +278,8 @@ func applyRuleToScenario(scenario Scenario, attrs []NodeAttrs, rule ConfigRule) 
 // used. Later rules override earlier ones on a per-field basis (each
 // still only touches the fields it explicitly sets), so a policy can
 // express "set a global default, then override a subset" as two rules —
-// exactly the composite models (e.g. "score-priority + dense-slow")
-// docs/SIMULATOR_PLAN_PHASE2.md item 15c asks for, which a single
-// ConfigRule cannot express at all.
+// exactly the composite models (e.g. "score-priority + dense-slow"), which
+// a single ConfigRule cannot express at all.
 type ConfigPolicy []ConfigRule
 
 // applyPolicyToScenario is ConfigPolicy's counterpart to
@@ -318,8 +315,8 @@ func applyPolicyToScenario(scenario Scenario, attrs []NodeAttrs, policy ConfigPo
 
 // AssignPolicy reports, for every node in scenario, which of policy's
 // rules matched it (in application order) — the "which tier was this
-// repeater labelled" question docs/SIMULATOR_PLAN_PHASE4.md work item 6
-// exists to answer, which applyPolicyToScenario itself throws away (it
+// repeater labelled" question, which applyPolicyToScenario itself throws
+// away (it
 // only returns the FINAL Scenario, not which rules got there).
 //
 // Deliberately returns matched rule INDICES, not a single resolved label:

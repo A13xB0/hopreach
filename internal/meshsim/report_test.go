@@ -105,9 +105,9 @@ func TestDeliveryRatioPartialDelivery(t *testing.T) {
 }
 
 // TestDeliveryRatioExcludesUnreachableNodeFromDenominator is the direct
-// regression test for the "reachability denominator" requirement in
-// docs/SIMULATOR_PLAN_PHASE2.md item 15a: an isolated node must not count
-// against delivery just for existing in the scenario.
+// regression test for the "reachability denominator" requirement: an
+// isolated node must not count against delivery just for existing in the
+// scenario.
 func TestDeliveryRatioExcludesUnreachableNodeFromDenominator(t *testing.T) {
 	scenario := Scenario{
 		Nodes: []SimNode{testNode(false), testNode(false), testNode(false)},

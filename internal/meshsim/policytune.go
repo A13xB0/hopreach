@@ -57,9 +57,8 @@ type policyCandidate struct {
 
 // Coarse parameter values shared across the model catalogue below —
 // deliberately few, so the total candidate count stays in the same order
-// of magnitude as Suggest's own ~144-candidate grid (see
-// docs/SIMULATOR_PLAN_PHASE2.md item 15c's own "do not brute-force the
-// product" instruction).
+// of magnitude as Suggest's own ~144-candidate grid — the product of every
+// parameter is deliberately not brute-forced.
 var (
 	policyDelayLowTx                = 0.25
 	policyDelayHighTx               = 1.0
@@ -107,21 +106,18 @@ var (
 	policyScaleCoverageMax = 6.0
 )
 
-// stage2NamedModelPolicies is the model catalogue from
-// docs/SIMULATOR_PLAN_PHASE2.md item 15c, extended by phase 4 (see
-// docs/SIMULATOR_PLAN_PHASE4.md work item 1) with the proportional models
-// item 15c's own plan flagged as needing "a new proportional rule kind" —
-// RuleScale, added in phase 4, is that kind.
+// stage2NamedModelPolicies is the named-model catalogue, including the
+// proportional models that need a continuous rule kind rather than a
+// stepped condition — RuleScale is that kind.
 //
-// Two models from the phase-2 table remain NOT implemented here, both
-// measurement-driven — they target SPECIFIC nodes identified from a prior
-// run's own scoreboard (item 16: high redundant-relay count / high duty
-// cycle), not nodes matching a general topology/altitude/scale condition.
-// See docs/SIMULATOR_PLAN_PHASE4.md work item 2 (ConditionNodeIndexIn),
-// which is what unlocks these — `redundancy-suppress`, `airtime-aware`.
+// Two measurement-driven models remain NOT implemented here: they target
+// SPECIFIC nodes identified from a prior run's own scoreboard (high
+// redundant-relay count / high duty cycle), not nodes matching a general
+// topology/altitude/scale condition. ConditionNodeIndexIn is what unlocks
+// them — `redundancy-suppress`, `airtime-aware`.
 //
-// Every model is included alongside its own inverse where the plan calls
-// for one — do not assume which way round is right; that's a property of
+// Every model is included alongside its own inverse where one exists — do
+// not assume which way round is right; that's a property of
 // the specific topology being searched, which is why it's measured rather
 // than reasoned about. The proportional models are no exception: a
 // continuous scale still has a direction, and phase 4's own community-
