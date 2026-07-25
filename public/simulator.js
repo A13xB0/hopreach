@@ -17,6 +17,13 @@
   const SIM_ZOOM_CAP = 11;
   const CORESCOPE_REACH_DAYS = 7; // fixed window — simulator.js has no window-selector UI of its own (see planner.js's for the map's own hover tooltips)
   const SF_THRESHOLDS_DB = [-7.5, -10, -12.5, -15, -17.5, -20]; // SF7..SF12, mirrors internal/meshsim/score.go
+  // Mirrors internal/meshsim's own defaultMessageHashSize (engine.go) — a
+  // sender with no explicit hash size falls back to this. 3 bytes,
+  // deliberately diverging from real firmware (which has no built-in
+  // default; every real sendFlood caller passes one explicitly) to
+  // minimise hash collisions between unrelated repeaters by default — see
+  // docs/SIMULATOR_PLAN_PHASE3.md.
+  const DEFAULT_MESSAGE_HASH_SIZE = 3;
 
   // Each entry: {id, source: 'planned'|'real'|'companion', refId, label, lat, lon}.
   // Only 'companion' nodes are user-renameable/movable-by-nature — a
@@ -85,6 +92,32 @@
   function ensurePredictWorker() {
     if (!predictWorker) predictWorker = new Worker("meshsim-worker.js");
     return predictWorker;
+  }
+
+  // Sends one message to worker and resolves with its matching reply's
+  // own `result` field — a single request/response round-trip, not a
+  // progress-reporting search like suggest/stress/suggestPolicy each
+  // have their own bespoke onmessage handler for. Built for the adaptive
+  // optimizer (docs/SIMULATOR_PLAN_PHASE4.md work item 4): each ROUND is
+  // its own such round-trip, driven by runOptimizeAdaptive's own loop —
+  // see that function's own comment on why the loop lives here in JS and
+  // not inside the worker.
+  function workerRequest(worker, generation, message, resultType, errorType) {
+    return new Promise((resolve, reject) => {
+      function onMessage(e) {
+        const msg = e.data;
+        if (msg.generation !== generation) return;
+        if (msg.type === resultType) {
+          worker.removeEventListener("message", onMessage);
+          resolve(msg.result);
+        } else if (msg.type === errorType) {
+          worker.removeEventListener("message", onMessage);
+          reject(new Error(msg.message));
+        }
+      }
+      worker.addEventListener("message", onMessage);
+      worker.postMessage(message);
+    });
   }
 
   function setPredictProgress(done, total) {
@@ -403,6 +436,32 @@
       sel.appendChild(opt);
       return;
     }
+    // currentSetupId is an in-memory JS variable, not persisted — after a
+    // page reload (or on first load ever) it's null even though the
+    // dropdown's own saved-setup LIST survives in localStorage. Without an
+    // explicit placeholder, a plain <select> with no option marked
+    // `selected` defaults to visually highlighting the FIRST real entry —
+    // which looks exactly like that setup is loaded when in fact nothing
+    // is (the live workspace is still empty). That's actively misleading,
+    // and because most browsers don't fire a `change` event when a native
+    // dropdown click re-picks whatever's already showing, a user in that
+    // state clicking the visually-already-selected item does nothing —
+    // the setup never actually loads and there's no obvious way to make
+    // it load short of picking a different entry and picking back. Adding
+    // a real, disabled placeholder here means the browser's own default-
+    // select-first-option behaviour lands on that placeholder instead,
+    // which is honest ("nothing loaded yet") and is itself a distinct
+    // option value, so picking the setup you actually want always fires a
+    // real change event.
+    const matchesCurrent = ids.includes(currentSetupId);
+    if (!matchesCurrent) {
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Choose a saved setup to load…";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      sel.appendChild(placeholder);
+    }
     for (const id of ids) {
       const opt = document.createElement("option");
       opt.value = id;
@@ -472,7 +531,7 @@
     simLinks = s.links || [];
     simMessageGenerators = s.messageGenerators || [];
     simNodePrefsOverrides = s.nodePrefsOverrides || {};
-    document.getElementById("sim-connectivity-source").value = s.connectivitySource || "model";
+    document.getElementById("sim-connectivity-source").value = s.connectivitySource || "blend";
     document.getElementById("sim-seed").value = s.seed != null ? s.seed : 1;
     document.getElementById("sim-max-time").value = s.maxSimTimeMs != null ? s.maxSimTimeMs : 60000;
     document.getElementById("sim-trials").value = s.trials != null ? s.trials : 20;
@@ -609,10 +668,14 @@
       const node = simNodes[g.nodeIndex];
       const row = document.createElement("div");
       row.className = "plan-list-item";
-      // Item 17 — this sender's own origin repeater records its own path
-      // hop at ITS configured hash size (1-3 bytes); shown here so it's
-      // visible while a sender is being set up, not just after a run.
-      const hashSizeBadge = node ? ` <span class="sim-node-badge sim-badge-hashsize" title="This repeater's own configured path-hash size">${effectiveHashSize(node)}B</span>` : "";
+      // Phase 3 — path-hash size is a property of the MESSAGE (the
+      // originator stamps it onto the packet at send time; real firmware:
+      // Mesh::sendFlood(packet, delay, path_hash_size)), not of the
+      // repeater sending it — a relay appends its own hash at the
+      // packet's own size, never its own configured one, so a single
+      // path can never mix hash sizes hop to hop. See
+      // docs/SIMULATOR_PLAN_PHASE3.md.
+      const hashSizeBadge = ` <span class="sim-node-badge sim-badge-hashsize" title="Path-hash size this sender stamps onto its own packets — one size applies to the whole path">${g.hashSize || DEFAULT_MESSAGE_HASH_SIZE}B</span>`;
       row.innerHTML = `
         <span class="plan-item-label">${escapeHtml(node ? node.label : "?")}${hashSizeBadge}${g.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(g.region)}</span>` : ""}${g.direct ? ` <span class="sim-node-badge sim-badge-direct">direct</span>` : ""}</span>
         <span class="plan-item-sub">${g.count} message${g.count === 1 ? "" : "s"} · ${g.minPayload}-${g.maxPayload}B · ${g.minGapMs}-${g.maxGapMs}ms apart</span>
@@ -643,6 +706,7 @@
     document.getElementById("sim-message-count").value = String(g.count);
     document.getElementById("sim-message-region").value = g.region || "";
     document.getElementById("sim-message-route-type").value = g.direct ? "direct" : "flood";
+    document.getElementById("sim-message-hash-size").value = String(g.hashSize || DEFAULT_MESSAGE_HASH_SIZE);
     document.getElementById("sim-message-payload-min").value = String(g.minPayload);
     document.getElementById("sim-message-payload-max").value = String(g.maxPayload);
     document.getElementById("sim-message-gap-min").value = String(g.minGapMs);
@@ -670,6 +734,8 @@
     const nodeIndex = Number(sel.value);
     const region = document.getElementById("sim-message-region").value;
     const direct = document.getElementById("sim-message-route-type").value === "direct";
+    const hashSizeRaw = parseInt(document.getElementById("sim-message-hash-size").value, 10);
+    const hashSize = hashSizeRaw >= 1 && hashSizeRaw <= 3 ? hashSizeRaw : DEFAULT_MESSAGE_HASH_SIZE;
     const count = Math.min(500, Math.max(1, parseInt(document.getElementById("sim-message-count").value, 10) || 1));
     let minPayload = Math.min(255, Math.max(1, parseInt(document.getElementById("sim-message-payload-min").value, 10) || 1));
     let maxPayload = Math.min(255, Math.max(1, parseInt(document.getElementById("sim-message-payload-max").value, 10) || minPayload));
@@ -680,10 +746,10 @@
 
     if (editingGeneratorId) {
       const g = simMessageGenerators.find((x) => x.id === editingGeneratorId);
-      if (g) Object.assign(g, { nodeIndex, region, direct, count, minPayload, maxPayload, minGapMs, maxGapMs });
+      if (g) Object.assign(g, { nodeIndex, region, direct, hashSize, count, minPayload, maxPayload, minGapMs, maxGapMs });
       cancelEditSender();
     } else {
-      simMessageGenerators.push({ id: randomId(), nodeIndex, region, direct, count, minPayload, maxPayload, minGapMs, maxGapMs });
+      simMessageGenerators.push({ id: randomId(), nodeIndex, region, direct, hashSize, count, minPayload, maxPayload, minGapMs, maxGapMs });
     }
     renderMessageList();
   }
@@ -727,6 +793,17 @@
   // committed to simNodePrefsOverrides on "Apply" — closing without
   // applying discards them, same as any other settings dialog.
   const LOOP_DETECT_LEVELS = ["off", "minimal", "moderate", "strict"];
+  // Deliberate divergence from real firmware, which defaults loop.detect
+  // to off (docs.meshcore.io/cli_commands) — a simulator run with loop
+  // detect entirely disabled by default doesn't surface the
+  // loop-suppression behaviour most real deployments actually want to
+  // reason about. Explicitly selecting "off" in the settings table still
+  // means off; this only governs a node with no explicit choice made yet.
+  // See docs/SIMULATOR_PLAN_PHASE3.md. internal/meshsim's own
+  // loopDetectThreshold is NOT changed to match — an empty LoopDetect
+  // there must keep meaning "never triggers" so an explicit "off" set
+  // from here is honoured, not silently upgraded.
+  const DEFAULT_LOOP_DETECT = "minimal";
 
   function renderNodesModalTable() {
     const tbody = document.getElementById("sim-nodes-modal-tbody");
@@ -746,12 +823,12 @@
       if (lastTuneResult && lastTuneResult.suggestions.length && lastAttrsList && lastAttrsList[nodeIndex]) {
         const best = lastTuneResult.suggestions[0];
         if (ruleMatchesAttrs(best.rule, lastAttrsList[nodeIndex])) {
-          const predicted = applyRule(defaultPrefs(), best.rule);
+          const predicted = applyRule(defaultPrefs(), best.rule, lastAttrsList[nodeIndex]);
           predictedTitle = `Predicted (${best.rule.name}): txdelay ${predicted.txDelayFactor.toFixed(2)} · rxdelay ${predicted.rxDelayBase.toFixed(1)}`;
         }
       }
       const loopDetect = effectiveLoopDetect(n);
-      const loopDetectOptions = LOOP_DETECT_LEVELS.map((lvl) => `<option value="${lvl}" ${lvl === (loopDetect || "off") ? "selected" : ""}>${lvl}</option>`).join("");
+      const loopDetectOptions = LOOP_DETECT_LEVELS.map((lvl) => `<option value="${lvl}" ${lvl === loopDetect ? "selected" : ""}>${lvl}</option>`).join("");
       const regions = effectiveRegions(n);
       const denyUnscoped = effectiveDenyUnscoped(n);
       const floodMax = effectiveFloodMax(n);
@@ -784,8 +861,8 @@
         <td><input type="number" step="0.05" min="0" max="2" data-field="directTxDelayFactor" value="${prefs.directTxDelayFactor}"></td>
         <td><input type="number" step="0.5" min="0" max="20" data-field="rxDelayBase" value="${prefs.rxDelayBase}" title="${escapeHtml(predictedTitle)}"></td>
         <td><input type="number" step="1" min="1" max="22" data-field="txPowerDbm" value="${prefs.txPowerDbm}"></td>
-        <td><select data-field="loopDetect" title="Real firmware default is off — see docs.meshcore.io's loop.detect">${loopDetectOptions}</select></td>
-        <td><input type="number" step="1" min="1" max="3" data-field="hashSize" value="${effectiveHashSize(n)}" title="Bytes — smaller sizes make loop.detect more prone to false positives from hash collisions between unrelated repeaters"></td>
+        <td><select data-field="loopDetect" title="Real firmware defaults to off (docs.meshcore.io's loop.detect) — this simulator starts new repeaters at minimal instead; pick off explicitly to match firmware">${loopDetectOptions}</select></td>
+        <td><input type="number" step="1" min="1" max="3" data-field="hashSize" value="${effectiveHashSize(n)}" title="Bytes — this repeater's own path-hash size for packets IT originates (set hash_size). Seeds the Message senders form's default when this repeater is picked as a sender. Does not affect loop.detect on packets it merely relays; that's governed by each sender's own hash size instead."></td>
         ${dutyCell}
         ${receivedCell}
         <td>
@@ -879,6 +956,14 @@
       simNodePrefsOverrides[n.id] = override;
       applied++;
     });
+    // Re-render the Message senders picker/list — they can render
+    // node-derived state (e.g. the picker's own option text), which would
+    // otherwise stay stale until some unrelated action happened to
+    // re-render it. renderMessageNodeOptions preserves the current
+    // selection (see its own prevValue handling), so this is safe to call
+    // even while a sender is mid-edit.
+    renderMessageNodeOptions();
+    renderMessageList();
     setStatus("sim-status", `Applied settings for ${applied} node${applied === 1 ? "" : "s"}.`);
   }
 
@@ -1207,13 +1292,41 @@
   // the exact same "Repeaters & settings" modal row.
   function effectiveLoopDetect(n) {
     const override = simNodePrefsOverrides[n.id];
-    return (override && override.loopDetect) || "";
+    return (override && override.loopDetect) || DEFAULT_LOOP_DETECT;
   }
 
+  // This node's own configured path-hash size for packets IT originates
+  // (real firmware's `set hash_size`) — NOT what governs loop.detect on
+  // packets it merely relays, which is the sending MESSAGE's own hash
+  // size instead (see DEFAULT_MESSAGE_HASH_SIZE). Defaults to
+  // DEFAULT_MESSAGE_HASH_SIZE, same as a sender's own default, for
+  // consistency between the two — a real repeater's actual configured
+  // hash_size (from CoreScope) still wins when known. This is what a real
+  // device would actually use for every packet it originates, so
+  // syncMessageHashSizeToSelectedNode uses it to seed the sender form's
+  // own hash-size field when you pick this node as a sender — the one
+  // place this value has any effect on a run (see internal/meshsim's own
+  // SimNode.HashSize doc comment: it's otherwise inert on the engine
+  // side, since loop.detect is evaluated at the packet's own hash size,
+  // not any relaying node's).
   function effectiveHashSize(n) {
     const override = simNodePrefsOverrides[n.id];
     if (override && override.hashSize) return override.hashSize;
-    return n.hashSize || 1; // 1 = the smallest, most collision-prone size, a safe/conservative default when a real repeater's own hash_size isn't known
+    return n.hashSize || DEFAULT_MESSAGE_HASH_SIZE;
+  }
+
+  // Seeds the Message senders form's own hash-size field from whichever
+  // node is currently selected in the picker — a real device sends at its
+  // own configured hash_size by default, so picking a sender here should
+  // default to reflecting that, not an unrelated constant. Still freely
+  // overridable afterward (this only sets a starting value); editSender's
+  // own explicit restore of a saved generator's hashSize runs after this
+  // and is never affected, since setting .value programmatically doesn't
+  // fire the 'change' event this is wired to.
+  function syncMessageHashSizeToSelectedNode() {
+    const sel = document.getElementById("sim-message-node");
+    const node = simNodes[Number(sel.value)];
+    if (node) document.getElementById("sim-message-hash-size").value = String(effectiveHashSize(node));
   }
 
   // regions/denyUnscoped/floodMax/floodMaxUnscoped follow the same
@@ -1387,7 +1500,7 @@
       let atMs = 0;
       for (let i = 0; i < g.count; i++) {
         if (i > 0) atMs += randomInt(rng, g.minGapMs, g.maxGapMs);
-        messages.push({ origin: g.nodeIndex, sendAtMs: atMs, payloadLen: randomInt(rng, g.minPayload, g.maxPayload), region: g.region || "", direct: !!g.direct });
+        messages.push({ origin: g.nodeIndex, sendAtMs: atMs, payloadLen: randomInt(rng, g.minPayload, g.maxPayload), region: g.region || "", direct: !!g.direct, hashSize: g.hashSize || DEFAULT_MESSAGE_HASH_SIZE });
       }
     });
     return messages;
@@ -1537,12 +1650,14 @@
       const receptions = lastReport ? lastReport.receptions.filter((r) => r.packetId === packetId) : [];
       const reachedNodes = new Set(receptions.filter((r) => !r.collided).map((r) => r.node));
       const collidedNodes = new Set(receptions.filter((r) => r.collided).map((r) => r.node));
+      const flood = floodTimeMs(packetId);
+      const floodLabel = flood != null ? ` · flooding for ${flood}ms` : "";
       const row = document.createElement("div");
       row.className = `plan-list-item sim-message-row${selectedPacketId === packetId ? " sim-message-row-selected" : ""}`;
       row.dataset.packetId = String(packetId);
       row.innerHTML = `
         <span class="plan-item-label">${escapeHtml(origin ? origin.label : "?")}${m.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(m.region)}</span>` : ""}${m.direct ? ` <span class="sim-node-badge sim-badge-direct">direct</span>` : ""}</span>
-        <span class="plan-item-sub">${m.payloadLen}B at ${m.sendAtMs}ms · reached ${reachedNodes.size}, collided at ${collidedNodes.size}
+        <span class="plan-item-sub">${m.payloadLen}B at ${m.sendAtMs}ms · reached ${reachedNodes.size}, collided at ${collidedNodes.size}${floodLabel}
           <button type="button" class="sim-message-details-btn" data-packet-id="${packetId}">Details</button>
         </span>
       `;
@@ -1679,20 +1794,6 @@
   function nodeLabel(nodeIndex) {
     const n = simNodes[nodeIndex];
     return n ? n.label : `#${nodeIndex}`;
-  }
-
-  // Item 17 — each hop in a path recorded its own path-hash at THAT
-  // repeater's own configured HashSize (1-3 bytes, real firmware's
-  // `set hash_size`), and different repeaters in the same scenario can be
-  // set to different sizes — so a single packet's own path can genuinely
-  // mix hash sizes hop to hop. Real firmware's loop.detect thresholds are
-  // defined against this size (a smaller hash is more collision-prone —
-  // see effectiveHashSize's own doc comment), so surfacing it alongside
-  // each hop is directly diagnostic, not just decorative.
-  function nodeLabelWithHashSize(nodeIndex) {
-    const n = simNodes[nodeIndex];
-    if (!n) return `#${nodeIndex}`;
-    return `${n.label} (${effectiveHashSize(n)}B)`;
   }
 
   // "Flood time" — how long after the original send this packet was still
@@ -1916,14 +2017,17 @@
             ${tx.direct ? `<span class="sim-node-badge sim-badge-direct">direct</span>` : ""}
           </div>
           <div class="sim-packet-row-bottom">
-            <span class="sim-packet-context">${atLabel}${tx.payloadLen}B · reached ${reachedCount}, collided at ${collidedCount}${relayInfo}</span>
+            <span class="sim-packet-context">${atLabel}${tx.payloadLen}B · ${tx.hashSize || DEFAULT_MESSAGE_HASH_SIZE}B hops · reached ${reachedCount}, collided at ${collidedCount}${relayInfo}</span>
             <span class="sim-packet-time">${e.atMs}ms</span>
           </div>
         `;
       } else {
         const r = e.reception;
         const outcome = receptionOutcome(r);
-        const pathLabels = (r.path || []).map(nodeLabelWithHashSize).join(" → ");
+        // Phase 3 — a packet's path can never mix hash sizes hop to hop
+        // (see the badge in renderMessageList's own doc comment), so this
+        // is plain node labels, not per-hop annotated ones.
+        const pathLabels = (r.path || []).map(nodeLabel).join(" → ");
         row.className = `plan-list-item sim-list-item sim-packet-row ${r.collided ? "sim-collided" : r.dropReason && r.dropReason !== "cannot_relay" ? "sim-dropped" : "sim-clean"}`;
         row.innerHTML = `
           <div class="sim-packet-row-top">
@@ -2128,7 +2232,7 @@
     const summaryEl = document.getElementById("sim-packet-modal-summary");
     summaryEl.className = "plan-hint"; // this view uses a plain sentence, not the stat strip openPacketInspectorForNode leaves behind
     summaryEl.textContent =
-      `From ${origin ? origin.label : "?"}${m.region ? ` (region ${m.region})` : ""}${m.direct ? " (direct)" : ""} · ${m.payloadLen}B · sent at ${m.sendAtMs}ms` +
+      `From ${origin ? origin.label : "?"}${m.region ? ` (region ${m.region})` : ""}${m.direct ? " (direct)" : ""} · ${m.payloadLen}B · ${m.hashSize || DEFAULT_MESSAGE_HASH_SIZE}B hops · sent at ${m.sendAtMs}ms` +
       (flood != null ? ` · flood time ${flood}ms (last activity at ${m.sendAtMs + flood}ms)` : "");
 
     document.getElementById("sim-packet-modal-checklist-section").classList.remove("hidden");
@@ -2463,7 +2567,16 @@
     lastPolicyResult = null;
     lastPolicyAltitudeAttrs = null;
     lastPolicyActions = [];
+    lastPolicyProfiles = null;
+    lastOptimizeDeviations = [];
+    optimizeCancelled = true; // stop any in-flight optimize loop from rendering stale results
+    clearTimeout(optimizeCancelTimeout);
+    lastOptimizeSnapshot = [];
+    document.getElementById("sim-policy-profile-detail").classList.add("hidden");
     document.getElementById("sim-policy-section").classList.add("hidden");
+    document.getElementById("sim-optimize-section").classList.add("hidden");
+    document.getElementById("sim-optimize-node-detail").classList.add("hidden");
+    document.getElementById("sim-open-optimize-modal").classList.add("hidden");
     rebuildLinkIndexes(null);
     stopReplay();
     simResultsLayer.clearLayers(); // also removes every growth marker, since they live in this layer
@@ -2633,6 +2746,96 @@
     }
   }
 
+  // Re-renders whatever's currently on screen for the CURRENT
+  // simViewMode.keepAllPaths setting, so the toggle is a live analysis
+  // lens rather than something that only takes effect on the next run.
+  // playWave alone can't do this: it only ever acts on the next wave
+  // tick, which means toggling in a finished/static view (the common
+  // case — you've just watched a replay and want to look again) did
+  // nothing visible at all.
+  //
+  // "Which lines belong on screen" depends on how far through the replay
+  // we are, hence the two branches. Growth markers have to be rebuilt
+  // either way, since simResultsLayer.clearLayers() drops them alongside
+  // the lines (see skipToEnd's own note on this).
+  function redrawPathsForKeepAllPaths() {
+    if (!lastReport) return;
+    // No waves built yet (a report exists but Replay was never started —
+    // startReplay is what populates replayWaves) means there's no "most
+    // recent wave" to narrow down to, so the accumulated view is the only
+    // meaningful one regardless of the toggle. Without this, unticking
+    // Keep all paths in that state would blank the map entirely.
+    if (replayWaves.length === 0) {
+      redrawResultLines(lastReport);
+      currentWaveLines = [];
+      growthMarkers.clear();
+      applyFinalGrowth(lastReport);
+      return;
+    }
+    const finished = replayIndex >= replayWaves.length;
+
+    if (simViewMode.keepAllPaths) {
+      if (finished) {
+        redrawResultLines(lastReport);
+        currentWaveLines = [];
+        growthMarkers.clear();
+        applyFinalGrowth(lastReport);
+        return;
+      }
+      // Mid-replay: accumulate everything played SO FAR (waves
+      // 0..replayIndex-1), not the whole report — the run hasn't got to
+      // the rest yet, and showing it would be a different view than the
+      // one being watched.
+      renderWaveRange(0, replayIndex);
+      return;
+    }
+
+    // !keepAllPaths — only the most recently played wave stays on screen.
+    // Nothing has played yet (replayIndex 0, replay not started) means
+    // there's no "most recent wave"; a finished replay's most recent one
+    // is the last.
+    const lastPlayed = finished ? replayWaves.length - 1 : replayIndex - 1;
+    if (lastPlayed < 0) {
+      simResultsLayer.clearLayers();
+      currentWaveLines = [];
+      growthMarkers.clear();
+      nodeGrowthCounts = [];
+      return;
+    }
+    renderWaveRange(lastPlayed, lastPlayed + 1);
+  }
+
+  // Draws waves [startIndex, endIndex) fresh, replacing whatever's on the
+  // results layer, and rebuilds growth markers to match exactly those
+  // waves — so growth always reflects the same subset of the run the
+  // lines do, rather than drifting out of step with it.
+  function renderWaveRange(startIndex, endIndex) {
+    simResultsLayer.clearLayers();
+    currentWaveLines = [];
+    growthMarkers.clear();
+    nodeGrowthCounts = [];
+    for (let i = startIndex; i < endIndex; i++) {
+      const wave = replayWaves[i];
+      if (!wave) continue;
+      const from = simNodes[wave.fromNode];
+      if (!from) continue;
+      for (const r of wave.receptions) {
+        if (!matchesViewFilter(r)) continue;
+        const to = simNodes[r.node];
+        if (!to) continue;
+        const line = L.polyline(
+          [
+            [from.lat, from.lon],
+            [to.lat, to.lon],
+          ],
+          { color: r.collided ? "#f87171" : "#4ade80", weight: r.collided ? 3 : 2, opacity: 0.85 }
+        ).addTo(simResultsLayer);
+        currentWaveLines.push(line);
+        if (matchesGrowBy(r)) growNode(r.node);
+      }
+    }
+  }
+
   function stopReplay() {
     if (replayTimer) {
       clearTimeout(replayTimer);
@@ -2672,11 +2875,21 @@
 
   function skipToEnd() {
     stopReplay();
-    redrawResultLines(lastReport); // clears simResultsLayer, so any growth marker made so far is gone too
-    growthMarkers.clear();
-    currentWaveLines = []; // the lines redrawResultLines just cleared are gone too — nothing left to track
-    if (lastReport) applyFinalGrowth(lastReport);
+    // replayIndex first: redrawPathsForKeepAllPaths reads it to decide
+    // what "the current view" even is, and this IS the finished state.
     replayIndex = replayWaves.length;
+    if (lastReport) {
+      // Honours "Keep all paths" rather than unconditionally drawing
+      // every line — skipping to the end of a live-view replay should
+      // land on that replay's own final wave, not silently switch the
+      // user into the accumulated-trail view they didn't ask for.
+      redrawPathsForKeepAllPaths();
+    } else {
+      simResultsLayer.clearLayers();
+      growthMarkers.clear();
+      currentWaveLines = [];
+      nodeGrowthCounts = [];
+    }
     setReplayStatus(replayWaves.length ? "Showing final state." : "");
   }
 
@@ -2726,11 +2939,38 @@
   }
 
   // Mirrors internal/meshsim/rules.go's ConfigRule.Apply.
-  function applyRule(basePrefs, rule) {
+  // Mirrors internal/meshsim/rules.go's RuleScale.valueAt exactly — linear
+  // interpolation between (atMin, valueAtMin) and (atMax, valueAtMax),
+  // clamped outside that range, atMin==atMax returns valueAtMin rather
+  // than dividing by zero.
+  function ruleScaleValueAt(scale, x) {
+    if (scale.atMax === scale.atMin) return scale.valueAtMin;
+    let t = (x - scale.atMin) / (scale.atMax - scale.atMin);
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    return scale.valueAtMin + t * (scale.valueAtMax - scale.valueAtMin);
+  }
+
+  // Mirrors internal/meshsim/rules.go's ConfigRule.ApplyWithAttrs
+  // (attrs is required, not optional, unlike Go's plain Apply — every JS
+  // caller already has NodeAttrs on hand, see applyPolicyToNodeState).
+  // Phase 4 (docs/SIMULATOR_PLAN_PHASE4.md work item 1): a rule's own
+  // Scale, when set, computes txDelayFactor from a node attribute instead
+  // of the constant txDelayFactor field — same Scale-wins tie-break as
+  // the Go side if a rule somehow sets both.
+  function applyRule(basePrefs, rule, attrs) {
     const out = { ...basePrefs };
     if (rule.txDelayFactor != null) out.txDelayFactor = rule.txDelayFactor;
     if (rule.directTxDelayFactor != null) out.directTxDelayFactor = rule.directTxDelayFactor;
     if (rule.rxDelayBase != null) out.rxDelayBase = rule.rxDelayBase;
+    if (rule.scale) {
+      const attrValue =
+        rule.scale.attr === "neighbor_count" ? attrs.neighborCount :
+        rule.scale.attr === "altitude_m" ? attrs.altitudeM :
+        rule.scale.attr === "marginal_coverage" ? attrs.marginalCoverage :
+        null;
+      if (attrValue != null) out.txDelayFactor = ruleScaleValueAt(rule.scale, attrValue);
+    }
     return out;
   }
 
@@ -2824,7 +3064,7 @@
     let floodMax = baseFloodMax;
     for (const rule of policy) {
       if (!ruleMatchesAttrs(rule, attrs)) continue;
-      prefs = applyRule(prefs, rule);
+      prefs = applyRule(prefs, rule, attrs);
       if (rule.floodMax != null) floodMax = rule.floodMax;
     }
     return { prefs, floodMax };
@@ -3021,7 +3261,7 @@
     const best = result.suggestions[0];
     nodesSortedByLabel().forEach(({ n, i }) => {
       const matches = ruleMatchesAttrs(best.rule, attrsList[i]);
-      const prefs = matches ? applyRule(defaultPrefs(), best.rule) : defaultPrefs();
+      const prefs = matches ? applyRule(defaultPrefs(), best.rule, attrsList[i]) : defaultPrefs();
       const row = document.createElement("div");
       row.className = "plan-list-item";
       row.innerHTML = `
@@ -3037,6 +3277,7 @@
   let lastPolicyResult = null;
   let lastPolicyAltitudeAttrs = null; // AltitudeM per node, as sent to SuggestPolicy — merged with computeTopologyAttrsJs() when rendering the action list
   let lastPolicyActions = []; // for CSV export — see exportPolicyActionsCsv
+  let lastPolicyProfiles = null; // Map<label, [{nodeIndex, others}]> for the currently-displayed policy — see renderPolicyProfileSummary/openPolicyProfileDetail
 
   async function runSuggestPolicy() {
     if (simNodes.length === 0) {
@@ -3102,6 +3343,14 @@
 
   function renderPolicyResult(result) {
     const section = document.getElementById("sim-policy-section");
+    // A fresh policy search invalidates any prior optimizer result — it
+    // was built on top of the OLD best policy, which this search may just
+    // have replaced (see runOptimizeAdaptive's own use of
+    // lastPolicyResult.suggestions[0].policy as its starting point).
+    document.getElementById("sim-optimize-section").classList.add("hidden");
+    document.getElementById("sim-open-optimize-modal").classList.add("hidden");
+    lastOptimizeDeviations = [];
+    lastOptimizeSnapshot = [];
     if (!result.suggestions || result.suggestions.length === 0) {
       section.classList.add("hidden");
       return;
@@ -3128,6 +3377,174 @@
     });
 
     renderPolicyActionList(best);
+    renderPolicySourceNote(best);
+    renderPolicyProfileSummary(result, best); // async, fire-and-forget — see its own doc comment
+  }
+
+  // Cached across calls — the built-in method catalogue is static for the
+  // lifetime of the page (see internal/meshsim.BuiltinMeshMethods), so
+  // there's no reason to re-cross the WASM boundary for it every time a
+  // search result renders.
+  let meshMethodsCache = null;
+  async function meshMethodByName(name) {
+    if (!meshMethodsCache) {
+      await MeshSim.ready;
+      meshMethodsCache = MeshSim.meshMethods();
+    }
+    return meshMethodsCache.find((m) => m.name === name) || null;
+  }
+
+  // A community-method suggestion's name is prefixed "community: " by
+  // internal/meshsim's own communityMethodCandidates — the marker this
+  // function uses to decide whether to show a Source line at all. Every
+  // MeshMethod.Source is non-empty by construction (enforced by a Go
+  // test), so this is never left dangling once a match is found — see
+  // MeshMethod's own doc comment on why this must never render with the
+  // same authority as a firmware-verified fact.
+  async function renderPolicySourceNote(best) {
+    const el = document.getElementById("sim-policy-source-note");
+    const prefix = "community: ";
+    if (!best.name.startsWith(prefix)) {
+      el.classList.add("hidden");
+      return;
+    }
+    const method = await meshMethodByName(best.name.slice(prefix.length));
+    if (!method) {
+      el.classList.add("hidden");
+      return;
+    }
+    el.classList.remove("hidden");
+    el.innerHTML =
+      `📋 Community-reported convention, not a firmware-verified fact — ` +
+      `<a href="${escapeHtml(method.source)}" target="_blank" rel="noopener">${escapeHtml(method.source)}</a> ` +
+      `(as of ${escapeHtml(method.asOf)}).${method.note ? ` ${escapeHtml(method.note)}` : ""}`;
+  }
+
+  // Phase 4 work item 6 — shows which of the winning policy's own NAMED
+  // rules labelled each repeater, and how many repeaters landed in each.
+  // Word labels only — no colour coding for profile identity, since a
+  // colour needs a legend to decode and doesn't survive being read aloud
+  // or pasted into a message (the community guides this feature is built
+  // from DO assign a colour per profile; deliberately not carried over).
+  //
+  // Async because MeshSim.assignPolicy needs `await MeshSim.ready` first
+  // — called fire-and-forget from renderPolicyResult (itself synchronous,
+  // driven by a worker message), so the profile section fills in a moment
+  // after the rest of the results do rather than blocking them.
+  //
+  // Convention for a node matching MULTIPLE named rules: show the LAST
+  // one applied (ConfigPolicy's own later-overrides-earlier contract
+  // means it's the one that actually won any field it set), with earlier
+  // named matches listed in the detail view rather than hidden — see
+  // AssignPolicy's own doc comment on why this is a display convention,
+  // not something baked into the engine.
+  async function renderPolicyProfileSummary(result, best) {
+    const summaryEl = document.getElementById("sim-policy-profile-summary");
+    const detailEl = document.getElementById("sim-policy-profile-detail");
+    detailEl.classList.add("hidden");
+    summaryEl.innerHTML = "";
+    lastPolicyProfiles = null;
+    if (simNodes.length === 0) return;
+
+    await MeshSim.ready;
+    const scenario = scenarioFromState();
+    const attrsArray = attrsArrayForPolicy();
+    const assignments = MeshSim.assignPolicy(scenario, attrsArray, best.policy);
+
+    const groups = new Map();
+    assignments.forEach((a) => {
+      let label = null;
+      const others = [];
+      for (const idx of a.matchedRules) {
+        const rule = best.policy[idx];
+        if (rule && rule.name) {
+          if (label != null) others.push(label);
+          label = rule.name;
+        }
+      }
+      const key = label || "No profile";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ nodeIndex: a.node, others });
+    });
+    lastPolicyProfiles = groups;
+
+    // "Nothing silently dropped" check (docs/SIMULATOR_PLAN_PHASE4.md work
+    // item 6) — every loaded repeater must land in exactly one group,
+    // including "No profile."
+    const totalGrouped = Array.from(groups.values()).reduce((sum, arr) => sum + arr.length, 0);
+    if (totalGrouped !== simNodes.length) {
+      console.error(`Policy profile breakdown: grouped ${totalGrouped} of ${simNodes.length} loaded repeaters — some were dropped. This is a bug.`);
+    }
+
+    // "No profile" last; everything else in the order it first appears
+    // among the assignments, which follows the policy's own rule order —
+    // reads the way the policy itself was written, not alphabetically.
+    const orderedLabels = Array.from(groups.keys()).sort((a, b) => (a === "No profile" ? 1 : b === "No profile" ? -1 : 0));
+
+    orderedLabels.forEach((label) => {
+      const nodes = groups.get(label);
+      const sampleAttrs = attrsArray[nodes[0].nodeIndex];
+      const { prefs } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, sampleAttrs);
+      const row = document.createElement("div");
+      row.className = "plan-list-item sim-policy-profile-row";
+      const settingsLabel = label === "No profile" ? "kept at baseline settings" : `txdelay ${prefs.txDelayFactor}`;
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(label)}</span>
+        <span class="plan-item-sub">${settingsLabel} · ${nodes.length} repeater${nodes.length === 1 ? "" : "s"}</span>
+        <span class="sim-policy-profile-chevron">›</span>
+      `;
+      row.addEventListener("click", () => openPolicyProfileDetail(label));
+      summaryEl.appendChild(row);
+    });
+  }
+
+  // Drills into one profile's own repeater list — each row shows the
+  // specific measured criteria (altitude/neighbour count/articulation)
+  // that actually caused the match, so a mis-tiered repeater is
+  // immediately explainable, not just visible.
+  function openPolicyProfileDetail(label) {
+    if (!lastPolicyProfiles || !lastPolicyProfiles.has(label)) return;
+    const nodes = lastPolicyProfiles.get(label);
+    const attrsArray = attrsArrayForPolicy();
+
+    document.getElementById("sim-policy-profile-detail").classList.remove("hidden");
+    document.getElementById("sim-policy-profile-detail-title").textContent = `${label} — ${nodes.length} repeater${nodes.length === 1 ? "" : "s"}`;
+
+    const list = document.getElementById("sim-policy-profile-detail-list");
+    list.innerHTML = "";
+    nodes.forEach(({ nodeIndex, others }) => {
+      const n = simNodes[nodeIndex];
+      const attrs = attrsArray[nodeIndex] || {};
+      const criteria = [`${attrs.neighborCount || 0} neighbour${attrs.neighborCount === 1 ? "" : "s"}`];
+      if (attrs.altitudeM) criteria.push(`altitude ${Math.round(attrs.altitudeM)}m`);
+      if (attrs.isArticulation) criteria.push("articulation point");
+      const otherNote = others.length ? ` <span class="sim-policy-profile-detail-approx">(also matched: ${others.map(escapeHtml).join(", ")})</span>` : "";
+      const row = document.createElement("div");
+      row.className = "plan-list-item";
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(n ? n.label : `#${nodeIndex}`)}</span>
+        <span class="plan-item-sub">${criteria.join(" · ")}${otherNote}</span>
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  // Builds the full NodeAttrs array, parallel to simNodes, that a policy
+  // needs to be matched/applied against — altitudeM from the last search's
+  // own supplied attrs (SuggestPolicy never recomputes this; it's real
+  // terrain data, not derivable from the graph) merged with topology
+  // attrs recomputed fresh from the CURRENT simLinks (neighborCount/
+  // isArticulation/marginalCoverage — always safe to recompute, see
+  // computeTopologyAttrsJs's own doc comment). Shared by
+  // renderPolicyActionList and the profile breakdown
+  // (renderPolicyProfileSummary) so the two can't disagree about which
+  // attrs a node has.
+  function attrsArrayForPolicy() {
+    const topologyAttrs = computeTopologyAttrsJs();
+    return simNodes.map((n, i) => ({
+      altitudeM: (lastPolicyAltitudeAttrs && lastPolicyAltitudeAttrs[i] && lastPolicyAltitudeAttrs[i].altitudeM) || 0,
+      ...(topologyAttrs[i] || { neighborCount: 0, isArticulation: false, marginalCoverage: 0 }),
+    }));
   }
 
   // The per-repeater "what actually needs to change" list (item 15d) — only
@@ -3139,13 +3556,10 @@
   // this is "what should this repeater's setting BE," not a diff of
   // arbitrary prior manual tweaks.
   function renderPolicyActionList(best) {
-    const topologyAttrs = computeTopologyAttrsJs();
+    const attrsArray = attrsArrayForPolicy();
     const actions = [];
     simNodes.forEach((n, i) => {
-      const attrs = {
-        altitudeM: (lastPolicyAltitudeAttrs && lastPolicyAltitudeAttrs[i] && lastPolicyAltitudeAttrs[i].altitudeM) || 0,
-        ...(topologyAttrs[i] || { neighborCount: 0, isArticulation: false, marginalCoverage: 0 }),
-      };
+      const attrs = attrsArray[i];
       const { prefs: recPrefs, floodMax: recFloodMax } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, attrs);
       const curPrefs = effectivePrefsFor(n);
       const curFloodMax = effectiveFloodMax(n);
@@ -3204,6 +3618,454 @@
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "policy-actions.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // --- phase 4 work item 4: adaptive optimizer ----------------------------
+  //
+  // "slowly adjusts from seeing collisions etc and contention on specific
+  // repeaters etc until it disappears" (docs/SIMULATOR_PLAN_PHASE4.md) —
+  // a closed loop: measure -> find the worst offender -> back it off ->
+  // re-measure -> keep or revert -> repeat, starting from Search policies'
+  // own winning result rather than from nothing (see internal/meshsim.
+  // OptimizeRequest.BasePolicy's own doc comment on why the search itself
+  // isn't re-run inside the optimizer).
+  //
+  // The round-by-round loop lives HERE, in the main thread, not inside the
+  // worker — deliberately. internal/meshsim.OptimizeStep does exactly ONE
+  // bounded round per call; if this loop instead lived inside the
+  // worker's own onmessage handler (calling OptimizeStep repeatedly
+  // before ever posting a message back), the worker's event loop would
+  // stay blocked for the ENTIRE optimization, unable to notice a cancel
+  // message for the same reason "suggest"/"suggest-policy" can't be
+  // cancelled mid-search today (see meshsim-worker.js's own comment on
+  // this). Driving it from here means every single round is its own
+  // postMessage round-trip, so control genuinely returns to this loop
+  // (and Cancel can actually take effect) between every round.
+  let optimizeCancelled = false;
+  let optimizeCancelTimeout = null;
+  let lastOptimizeDeviations = []; // for CSV export — see exportOptimizeDeviationsCsv
+  let lastOptimizeSnapshot = []; // per-repeater table rows — see renderOptimizeNodesTable/openOptimizeNodeDetail
+
+  // MIN_IMPROVEMENT is in contention-SCORE units (see
+  // internal/meshsim.nodeContentionScore), not a percentage.
+  //
+  // DELIVERY_TOLERANCE is how much delivery a single move may give up
+  // while still counting as "delivery held" — deliberately NOT zero.
+  // Zero was the original default and made the optimizer completely
+  // inert on any real-sized network: backing a node off essentially
+  // always costs a hair of delivery while reducing contention, so a
+  // zero-tolerance gate rejected literally every move (measured on a
+  // 30-node mesh: 0 accepted moves in 8 rounds, including one costing
+  // 0.0004 delivery for a 25-point contention win). The hard floor
+  // against cumulative drift is maxDeliveryRegression, enforced Go-side
+  // against the run's own baseline — see OptimizeRequest's own docs.
+  //
+  // Max rounds / stale-rounds-limit are now user-settable
+  // (docs/SIMULATOR_PLAN_PHASE6.md work item G, #sim-optimize-max-rounds/
+  // #sim-optimize-stale-limit) rather than hardcoded here — see
+  // roundBudgetField and runOptimizeAdaptive.
+  const OPTIMIZE_MIN_IMPROVEMENT = 0.5;
+  const OPTIMIZE_DELIVERY_TOLERANCE = 0.005;
+  // How long Cancel waits for the in-flight round to finish gracefully
+  // before force-terminating the worker outright (docs/SIMULATOR_PLAN_
+  // PHASE4.md work item 4's own "terminate() as the hard stop" —
+  // graceful-then-forced, not either/or). This is exactly what makes
+  // "unlimited rounds" (work item G) safe to offer at all — see that
+  // field's own doc comment on internal/meshsim.OptimizeRequest.
+  const OPTIMIZE_CANCEL_FORCE_TIMEOUT_MS = 8000;
+
+  // Reads a "0/blank means unlimited" round-budget field
+  // (docs/SIMULATOR_PLAN_PHASE6.md work item G) — deliberately a distinct
+  // {value, unlimited} pair rather than overloading 0, mirroring
+  // internal/meshsim.OptimizeRequest's own Unlimited* bools: a blank or
+  // non-positive field is a real, explicit "run without this limit"
+  // request, not silently coerced into some default the user didn't ask
+  // for.
+  function roundBudgetField(id) {
+    const raw = document.getElementById(id).value.trim();
+    const n = parseInt(raw, 10);
+    if (raw === "" || !Number.isFinite(n) || n <= 0) return { value: 0, unlimited: true };
+    return { value: n, unlimited: false };
+  }
+
+  async function runOptimizeAdaptive() {
+    if (simNodes.length === 0) {
+      setStatus("sim-status", "Load some nodes first.");
+      return;
+    }
+    if (simLinks.length === 0) {
+      setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
+      return;
+    }
+    if (simMessageGenerators.length === 0) {
+      setStatus("sim-status", "Add at least one message sender first.");
+      return;
+    }
+    if (!lastPolicyResult || !lastPolicyResult.suggestions || lastPolicyResult.suggestions.length === 0) {
+      setStatus("sim-status", 'Run "Search policies" first — the optimizer starts from its own best result rather than searching from nothing.');
+      return;
+    }
+
+    const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
+    const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
+    const trials = Math.min(100, Math.max(1, parseInt(document.getElementById("sim-trials").value, 10) || 20));
+    const maxRoundsField = roundBudgetField("sim-optimize-max-rounds");
+    const staleLimitField = roundBudgetField("sim-optimize-stale-limit");
+    const allowFloodMax = document.getElementById("sim-optimize-allow-floodmax").checked;
+
+    const optimizeRequest = {
+      scenario: scenarioFromState(),
+      messages: messagesFromState(seed),
+      attrs: lastPolicyAltitudeAttrs || [],
+      basePolicy: lastPolicyResult.suggestions[0].policy,
+      maxSimTimeMs,
+      trials,
+      // ConfirmTrials deliberately larger than the screening pass's own
+      // Trials — see internal/meshsim.OptimizeRequest's own doc comment
+      // on why a cheap screen + a more-trials confirmation guards against
+      // accepting a move whose apparent benefit was just noise.
+      confirmTrials: trials * 2,
+      seed,
+      deliveryTolerance: OPTIMIZE_DELIVERY_TOLERANCE,
+      minImprovement: OPTIMIZE_MIN_IMPROVEMENT,
+      maxRounds: maxRoundsField.value,
+      unlimitedRounds: maxRoundsField.unlimited,
+      staleRoundsLimit: staleLimitField.value,
+      unlimitedStaleRounds: staleLimitField.unlimited,
+      // docs/SIMULATOR_PLAN_PHASE6.md work item C/H: txdelay/rxdelay are
+      // always on (the Go side's own default), floodMax is the one knob
+      // with its own explicit, default-off UI checkbox — see that field's
+      // own tooltip on why it's categorically riskier than the delay
+      // knobs.
+      moveSet: { txDelay: true, rxDelay: true, floodMax: allowFloodMax },
+      // A seed range the search itself never draws from (search rounds
+      // use `seed` and `seed + round*1_000_003`, see internal/meshsim.
+      // OptimizeStep) — hold-out validation only means something if it's
+      // genuinely independent of every seed the search already saw.
+      holdoutSeed: seed + 0x5eed0000,
+      holdoutTrials: trials * 2,
+    };
+
+    optimizeCancelled = false;
+    const generation = ++predictGeneration;
+    const worker = ensurePredictWorker();
+
+    document.getElementById("sim-optimize-adaptive").disabled = true;
+    document.getElementById("sim-optimize-cancel").classList.remove("hidden");
+    document.getElementById("sim-optimize-section").classList.add("hidden");
+    setStatus("sim-status", "Optimizing…");
+    // Deliberately NOT opening the results modal here — this run can take
+    // a long time, and popping a modal open over the map at the start
+    // would just be in the way while it works. Progress shows in the
+    // panel (#sim-optimize-progress); the modal opens once there's
+    // actually something to look at (see renderOptimizeResult).
+
+    let state = {};
+    try {
+      while (true) {
+        state = await workerRequest(
+          worker,
+          generation,
+          { kind: "optimize-step", generation, optimizeRequest, state },
+          "optimize-step-result",
+          "optimize-step-error"
+        );
+        if (generation !== predictGeneration) return; // superseded by a newer search/optimize run
+        setOptimizeProgress(state);
+        if (state.done || optimizeCancelled) break;
+      }
+
+      setStatus("sim-status", optimizeCancelled ? "Cancelled — validating the best result found so far…" : "Validating…");
+      const holdout = await workerRequest(
+        worker,
+        generation,
+        { kind: "optimize-validate", generation, optimizeRequest, policy: state.currentPolicy },
+        "optimize-validate-result",
+        "optimize-validate-error"
+      );
+      if (generation !== predictGeneration) return;
+      renderOptimizeResult(state, holdout, optimizeCancelled, optimizeRequest);
+      openModal("sim-optimize-modal");
+      setStatus("sim-status", "Done.");
+    } catch (err) {
+      if (generation === predictGeneration) {
+        setStatus("sim-status", `Optimization failed: ${err.message || err}`);
+      }
+    } finally {
+      if (generation === predictGeneration) {
+        clearTimeout(optimizeCancelTimeout);
+        document.getElementById("sim-optimize-adaptive").disabled = false;
+        document.getElementById("sim-optimize-cancel").classList.add("hidden");
+        hideOptimizeProgress();
+      }
+    }
+  }
+
+  // Graceful-then-forced cancellation (docs/SIMULATOR_PLAN_PHASE4.md work
+  // item 4's own "do both" instruction). Setting optimizeCancelled lets
+  // the CURRENT in-flight round finish normally and the loop above exit
+  // cleanly next time it checks — the common case, since each round is a
+  // small, bounded amount of work. If that doesn't happen within
+  // OPTIMIZE_CANCEL_FORCE_TIMEOUT_MS (a round genuinely stuck — an
+  // enormous scenario, a runaway trial count), the worker is terminated
+  // outright rather than leaving the UI waiting for a reply that may
+  // never come; ensurePredictWorker() transparently creates a fresh
+  // instance the next time anything needs it.
+  function cancelOptimizeAdaptive() {
+    if (optimizeCancelled) return; // already cancelling — let the force-timeout run its course
+    optimizeCancelled = true;
+    setStatus("sim-status", "Cancelling — finishing the in-flight round…");
+    optimizeCancelTimeout = setTimeout(() => {
+      if (predictWorker) {
+        predictWorker.terminate();
+        predictWorker = null;
+      }
+      document.getElementById("sim-optimize-adaptive").disabled = false;
+      document.getElementById("sim-optimize-cancel").classList.add("hidden");
+      hideOptimizeProgress();
+      setStatus("sim-status", "Cancelled (the search worker didn't respond in time and was reset).");
+    }, OPTIMIZE_CANCEL_FORCE_TIMEOUT_MS);
+  }
+
+  function setOptimizeProgress(state) {
+    const el = document.getElementById("sim-optimize-progress");
+    el.classList.remove("hidden");
+    el.textContent =
+      `Round ${state.round} · delivery ${(state.currentDelivery * 100).toFixed(1)}% · ` +
+      `contention score ${state.currentContention.toFixed(1)} · ${state.deviations.length} change${state.deviations.length === 1 ? "" : "s"} so far` +
+      (state.done ? ` — stopped: ${state.doneReason}` : "");
+  }
+
+  function hideOptimizeProgress() {
+    document.getElementById("sim-optimize-progress").classList.add("hidden");
+  }
+
+  // Renders the final optimizer result: search-vs-hold-out delivery side
+  // by side (docs/SIMULATOR_PLAN_PHASE4.md work item 4's own "guarding
+  // against overfitting" requirement — a long greedy search WILL overfit
+  // to its own specific random draws, and the output here is CLI commands
+  // someone pastes into real radios), plus the per-repeater "what changed
+  // and why" list.
+  function renderOptimizeResult(state, holdout, wasCancelled, optimizeRequest) {
+    const section = document.getElementById("sim-optimize-section");
+    section.classList.remove("hidden");
+    document.getElementById("sim-open-optimize-modal").classList.remove("hidden");
+    // Show movement against the run's OWN starting point, not just the
+    // final figures — "31.4% delivery" alone can't tell you whether the
+    // optimizer helped, which is exactly the complaint that motivated
+    // this. Baselines come from the Go side (OptimizeState.Baseline*),
+    // measured before any adjustment.
+    const deliveryDelta = state.currentDelivery - state.baselineDelivery;
+    const contentionDelta = state.currentContention - state.baselineContention;
+    const sign = (v) => (v >= 0 ? "+" : "");
+
+    // docs/SIMULATOR_PLAN_PHASE6.md work item G's own "the interaction
+    // that will otherwise confuse people": a generous max-rounds budget
+    // does nothing if the stale-rounds limit trips first, and that looks
+    // exactly like "the setting was ignored" unless the summary says so
+    // explicitly.
+    let doneReasonText = state.doneReason || "";
+    if (!wasCancelled && state.done && optimizeRequest && /no accepted improvement/.test(state.doneReason || "")) {
+      const roundsBudgetHigher = optimizeRequest.unlimitedRounds || optimizeRequest.maxRounds > state.round;
+      if (roundsBudgetHigher) {
+        const budgetText = optimizeRequest.unlimitedRounds ? "an unlimited round budget" : `a round budget of ${optimizeRequest.maxRounds}`;
+        doneReasonText = `${state.doneReason} — stopped early on staleness, not the round budget (you set ${budgetText}). Raise "give up after N stale rounds" to keep searching.`;
+      }
+    }
+    document.getElementById("sim-optimize-summary").textContent =
+      `${wasCancelled ? "Cancelled after" : "Finished after"} ${state.round} round${state.round === 1 ? "" : "s"}` +
+      `${doneReasonText ? ` (${doneReasonText})` : ""} · ${state.deviations.length} repeater${state.deviations.length === 1 ? "" : "s"} adjusted. ` +
+      `Delivery ${(state.baselineDelivery * 100).toFixed(1)}% → ${(state.currentDelivery * 100).toFixed(1)}% ` +
+      `(${sign(deliveryDelta)}${(deliveryDelta * 100).toFixed(1)} points) · ` +
+      `contention ${state.baselineContention.toFixed(1)} → ${state.currentContention.toFixed(1)} ` +
+      `(${sign(contentionDelta)}${contentionDelta.toFixed(1)}).`;
+
+    const holdoutEl = document.getElementById("sim-optimize-holdout-note");
+    const deliveryGap = state.currentDelivery - holdout.delivery;
+    const overfitWarning = deliveryGap > 0.05; // 5 points — a documented, deliberate threshold, not a precise statistical test
+    holdoutEl.classList.remove("hidden");
+    holdoutEl.classList.toggle("sim-holdout-warning", overfitWarning);
+    holdoutEl.textContent =
+      `Hold-out validation (seeds the search never used): ${(holdout.delivery * 100).toFixed(1)}% delivery, ${(holdout.collision * 100).toFixed(1)}% collisions.` +
+      (overfitWarning
+        ? ` That's meaningfully lower than the search's own ${(state.currentDelivery * 100).toFixed(1)}% — this policy may have overfit to its own random draws. Treat it as a starting point to field-test, not a final answer.`
+        : "");
+
+    renderOptimizeNodesTable(state);
+    renderOptimizeHistory(state);
+
+    lastOptimizeDeviations = state.deviations;
+    const list = document.getElementById("sim-optimize-deviations-list");
+    list.innerHTML = "";
+    if (state.deviations.length === 0) {
+      list.innerHTML = '<div class="plan-hint">No repeater needed a targeted adjustment beyond the policy search result above.</div>';
+      return;
+    }
+    state.deviations.forEach((d) => {
+      const n = simNodes[d.node];
+      const row = document.createElement("div");
+      row.className = "plan-list-item";
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(n ? n.label : `#${d.node}`)}</span>
+        <span class="plan-item-sub">round ${d.round} · ${escapeHtml(d.reason)} · <code>${escapeHtml(deviationCliCommand(d))}</code> (was ${formatDeviationValue(d, d.oldValue)})</span>
+        ${d.warning ? `<span class="plan-item-sub sim-optimize-deviation-warning">⚠ ${escapeHtml(d.warning)}</span>` : ""}
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  // docs/SIMULATOR_PLAN_PHASE6.md work item C widened the optimizer past
+  // a single "back off txdelay" move — these two helpers are the one
+  // place that knows how each move Kind maps to a real firmware CLI
+  // command and a display value, so the deviations list and the CSV
+  // export (exportOptimizeDeviationsCsv) can't drift apart on it.
+  function deviationCliCommand(d) {
+    switch (d.kind) {
+      case "tx_delay_backoff":
+      case "tx_delay_speedup":
+        return `set txdelay ${formatDeviationValue(d, d.newValue)}`;
+      case "rx_delay_backoff":
+        return `set rxdelay ${formatDeviationValue(d, d.newValue)}`;
+      case "flood_max_reduce":
+        return `set flood.max ${formatDeviationValue(d, d.newValue)}`;
+      default:
+        return `# unrecognized move kind "${d.kind}"`;
+    }
+  }
+
+  function formatDeviationValue(d, v) {
+    // flood.max is an integer hop count; the delay knobs are fractional
+    // factors — matching real firmware's own `set` command conventions
+    // rather than always showing decimals on an integer setting.
+    return d.kind === "flood_max_reduce" ? String(Math.round(v)) : Number(v).toFixed(2);
+  }
+
+  // The full per-repeater table — EVERY loaded repeater, worst-contention
+  // first, so "which ones are causing the most contention" is answerable
+  // at a glance rather than only visible for the handful the optimizer
+  // happened to adjust. Sourced from the Go side's own NodeSnapshot (see
+  // internal/meshsim.buildNodeSnapshot), never recomputed here, so the
+  // numbers shown are exactly the ones the optimizer ranked on.
+  function renderOptimizeNodesTable(state) {
+    const tbody = document.getElementById("sim-optimize-nodes-tbody");
+    tbody.innerHTML = "";
+    document.getElementById("sim-optimize-node-detail").classList.add("hidden");
+    const snapshot = (state.nodeSnapshot || []).slice().sort((a, b) => b.contentionScore - a.contentionScore);
+    lastOptimizeSnapshot = snapshot;
+    if (snapshot.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="plan-empty">No per-repeater data.</td></tr>';
+      return;
+    }
+    snapshot.forEach((s) => {
+      const n = simNodes[s.node];
+      const st = s.stats || {};
+      const tr = document.createElement("tr");
+      tr.className = "sim-optimize-node-row";
+      tr.innerHTML = `
+        <td class="sim-col-sticky">${escapeHtml(n ? n.label : `#${s.node}`)}${s.adjusted ? " ✎ adjusted" : ""}${s.tabooed ? " 🚫 tabu" : ""}</td>
+        <td>${s.contentionScore.toFixed(1)}</td>
+        <td>${s.txDelay.toFixed(2)}</td>
+        <td>${st.contentionCaused || 0}</td>
+        <td>${st.collisionCount || 0}</td>
+        <td>${st.redundantRelays || 0}</td>
+        <td>${st.relayedCount || 0}</td>
+        <td>${escapeHtml((s.diagnosis && s.diagnosis.headline) || "")}</td>
+      `;
+      tr.addEventListener("click", () => openOptimizeNodeDetail(s.node));
+      tbody.appendChild(tr);
+    });
+  }
+
+  function openOptimizeNodeDetail(nodeIndex) {
+    const s = lastOptimizeSnapshot.find((x) => x.node === nodeIndex);
+    if (!s) return;
+    const n = simNodes[nodeIndex];
+    document.getElementById("sim-optimize-node-detail").classList.remove("hidden");
+    document.getElementById("sim-optimize-node-detail-title").textContent = `${n ? n.label : `#${nodeIndex}`} — ${(s.diagnosis && s.diagnosis.headline) || ""}`;
+    const list = document.getElementById("sim-optimize-node-detail-list");
+    list.innerHTML = "";
+    const findings = (s.diagnosis && s.diagnosis.findings) || [];
+    if (findings.length === 0) {
+      list.innerHTML = '<div class="plan-hint">Nothing notable — this repeater is behaving normally.</div>';
+      return;
+    }
+    findings.forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "plan-list-item";
+      // Some findings deliberately carry no suggestion (see
+      // internal/meshsim.DiagnoseNode's own doc comment on why inventing
+      // one would be worse than staying quiet) — render the observation
+      // alone rather than an empty arrow.
+      row.innerHTML = `
+        <span class="plan-item-label">${escapeHtml(f.detail)}</span>
+        ${f.suggestion ? `<span class="plan-item-sub">→ ${escapeHtml(f.suggestion)}</span>` : ""}
+      `;
+      list.appendChild(row);
+    });
+  }
+
+  // Human-readable labels for the move-kind slugs Go sends — used in the
+  // history table's own "Move" column (docs/SIMULATOR_PLAN_PHASE6.md work
+  // item B: seeing what kind of move was tried each round, not just
+  // which node, is part of "showing improvement over time" honestly).
+  const MOVE_KIND_LABELS = {
+    tx_delay_backoff: "back off txdelay",
+    tx_delay_speedup: "speed up txdelay",
+    rx_delay_backoff: "raise rxdelay",
+    flood_max_reduce: "trim flood.max",
+  };
+
+  function renderOptimizeHistory(state) {
+    const tbody = document.getElementById("sim-optimize-history-tbody");
+    tbody.innerHTML = "";
+    const history = state.history || [];
+    if (history.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="plan-empty">No rounds completed.</td></tr>';
+      return;
+    }
+    history.forEach((h) => {
+      const target = simNodes[h.targetNode];
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${h.round}</td>
+        <td class="${h.accepted ? "sim-optimize-round-kept" : ""}">${h.accepted ? "✓ kept" : "—"}</td>
+        <td>${escapeHtml(target ? target.label : h.targetNode >= 0 ? `#${h.targetNode}` : "—")}</td>
+        <td>${escapeHtml(MOVE_KIND_LABELS[h.moveKind] || h.moveKind || "—")}</td>
+        <td>${h.candidatesTried || 0}</td>
+        <td>${(h.delivery * 100).toFixed(1)}%</td>
+        <td>${(h.collision * 100).toFixed(1)}%</td>
+        <td>${h.contention.toFixed(1)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function exportOptimizeDeviationsCsv() {
+    if (lastOptimizeDeviations.length === 0) {
+      setStatus("sim-status", "Nothing to export — no repeater was adjusted.");
+      return;
+    }
+    const rows = [["Repeater", "Round", "Move kind", "Reason", "Old value", "New value", "CLI command", "Warning"]];
+    for (const d of lastOptimizeDeviations) {
+      const n = simNodes[d.node];
+      rows.push([
+        n ? n.label : `#${d.node}`,
+        d.round,
+        d.kind,
+        d.reason,
+        formatDeviationValue(d, d.oldValue),
+        formatDeviationValue(d, d.newValue),
+        deviationCliCommand(d),
+        d.warning || "",
+      ]);
+    }
+    const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "optimize-deviations.csv";
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -3565,7 +4427,12 @@
       const originIndex = pubkeyToIndex.get(originPubkey);
       const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
       const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
-      const predictedReport = MeshSim.run(scenarioFromState(), [{ origin: originIndex, sendAtMs: 0, payloadLen }], seed, maxSimTimeMs);
+      // hashSize: DEFAULT_MESSAGE_HASH_SIZE — the real packet's own path
+      // hash size IS recoverable from raw_hex's path_len byte (see
+      // Packet.h's getPathHashSize), but this replay is a prediction run
+      // for BOTTLENECK comparison against CoreScope's own proven hops, not
+      // a byte-for-byte re-transmission — see renderBottleneckAnalysis.
+      const predictedReport = MeshSim.run(scenarioFromState(), [{ origin: originIndex, sendAtMs: 0, payloadLen, hashSize: DEFAULT_MESSAGE_HASH_SIZE }], seed, maxSimTimeMs);
 
       const routeType = packetData.packet ? packetData.packet.route_type : null;
       renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport });
@@ -3808,6 +4675,13 @@
 
       div.querySelector("#sim-view-keep-paths").addEventListener("change", (e) => {
         simViewMode.keepAllPaths = e.target.checked;
+        // Apply immediately to what's already on screen — same idea as
+        // the filter control below, and the reason this is a live lens
+        // rather than a pre-run setting. A replay still in flight keeps
+        // playing; its next wave picks the new mode up naturally.
+        // (A selected message's own path lives on its own layer and is
+        // filter-driven, not keepAllPaths-driven, so it's untouched here.)
+        redrawPathsForKeepAllPaths();
       });
       div.querySelector("#sim-view-filter").addEventListener("change", (e) => {
         simViewMode.filter = e.target.value;
@@ -3815,10 +4689,12 @@
         // filter — a live replay in progress just keeps going (its next
         // wave picks the new filter up naturally), but a static
         // skip-to-end view or a selected message's own path needs an
-        // explicit refresh to actually reflect the change.
+        // explicit refresh to actually reflect the change. Routed through
+        // redrawPathsForKeepAllPaths rather than redrawResultLines so a
+        // filter change can't silently resurrect every path while
+        // "Keep all paths" is unticked.
         if (lastReport && replayIndex >= replayWaves.length) {
-          redrawResultLines(lastReport);
-          applyFinalGrowth(lastReport);
+          redrawPathsForKeepAllPaths();
         }
         drawSelectedMessagePath();
       });
@@ -3951,8 +4827,18 @@
   document.getElementById("sim-run").addEventListener("click", runSimulation);
   document.getElementById("sim-predict").addEventListener("click", predictSettings);
   document.getElementById("sim-suggest-policy").addEventListener("click", runSuggestPolicy);
+  document.getElementById("sim-optimize-adaptive").addEventListener("click", runOptimizeAdaptive);
+  document.getElementById("sim-optimize-cancel").addEventListener("click", cancelOptimizeAdaptive);
+  document.getElementById("sim-optimize-export-csv").addEventListener("click", exportOptimizeDeviationsCsv);
+  document.getElementById("sim-open-optimize-modal").addEventListener("click", () => openModal("sim-optimize-modal"));
+  document.getElementById("sim-optimize-node-detail-close").addEventListener("click", () => {
+    document.getElementById("sim-optimize-node-detail").classList.add("hidden");
+  });
   document.getElementById("sim-stress-run").addEventListener("click", runStressTest);
   document.getElementById("sim-policy-export-csv").addEventListener("click", exportPolicyActionsCsv);
+  document.getElementById("sim-policy-profile-back").addEventListener("click", () => {
+    document.getElementById("sim-policy-profile-detail").classList.add("hidden");
+  });
   document.getElementById("sim-replay").addEventListener("click", startReplay);
   document.getElementById("sim-skip-to-end").addEventListener("click", skipToEnd);
   document.getElementById("sim-replay-hash-go").addEventListener("click", replayFromHash);
@@ -3967,8 +4853,10 @@
   document.getElementById("sim-bulk-apply-fill").addEventListener("click", fillAllRowsFromBulkApply);
   document.getElementById("sim-open-messages-modal").addEventListener("click", () => {
     cancelEditSender(); // always open with a clean "add" form, not mid-edit from a previous visit
+    syncMessageHashSizeToSelectedNode(); // seed hash size from whichever node the picker already has selected
     openModal("sim-messages-modal");
   });
+  document.getElementById("sim-message-node").addEventListener("change", syncMessageHashSizeToSelectedNode);
   document.getElementById("sim-open-results-modal").addEventListener("click", () => openModal("sim-results-modal"));
   document.getElementById("sim-open-predictions-modal").addEventListener("click", () => openModal("sim-predictions-modal"));
   document.getElementById("sim-open-stress-modal").addEventListener("click", () => openModal("sim-stress-modal"));
@@ -4002,6 +4890,17 @@
     getMessageGeneratorCount: () => simMessageGenerators.length,
     getLastReport: () => lastReport,
     getWaveCount: () => replayWaves.length,
+    // Polylines currently drawn on the results layer — how many paths are
+    // actually visible on the map right now, as opposed to how many the
+    // report contains. Lets a test tell the "Keep all paths" accumulated
+    // view apart from the single-wave live view.
+    getResultLineCount: () => {
+      let n = 0;
+      simResultsLayer.eachLayer((l) => {
+        if (l instanceof L.Polyline) n++;
+      });
+      return n;
+    },
     getNodes: () => simNodes,
     getLinks: () => simLinks,
     panBy: (dx, dy) => map.panBy([dx, dy], { animate: false }),

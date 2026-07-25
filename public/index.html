@@ -177,7 +177,7 @@
           <select id="sim-connectivity-source">
             <option value="model">Propagation model</option>
             <option value="corescope">CoreScope observed (real repeaters only)</option>
-            <option value="blend">Blend (observed where available, else model)</option>
+            <option value="blend" selected>Blend (observed where available, else model)</option>
           </select>
           <button id="sim-build-links">Build links</button>
         </div>
@@ -205,16 +205,35 @@
         <div class="plan-row">
           <button id="sim-suggest-policy" title="Item 15: searches composite multi-rule policies (dense/sparse, hilltop, articulation-point, MPR-style and more) ranked by actual delivery, not just collision rate">🧬 Search policies</button>
         </div>
+        <div class="plan-field-row">
+          <label for="sim-optimize-max-rounds" title="How many rounds the adaptive optimizer may run before stopping. Blank or 0 means unlimited — it'll run until it stops improving, or you cancel it.">Max rounds (0 = unlimited)</label>
+          <input type="number" id="sim-optimize-max-rounds" min="0" step="1" value="100">
+        </div>
+        <div class="plan-field-row">
+          <label for="sim-optimize-stale-limit" title="Give up if this many consecutive rounds make no improvement. Blank or 0 means never give up on staleness alone — only the round budget above can stop it. Whichever limit is hit first stops the run.">Give up after N stale rounds (0 = never)</label>
+          <input type="number" id="sim-optimize-stale-limit" min="0" step="1" value="25">
+        </div>
+        <div class="plan-hint">The optimizer stops at whichever of the two limits above it reaches first.</div>
+        <label class="plan-checkbox-row" title="Also lets the optimizer reduce a repeater's own flood.max when it's producing redundant relays. Riskier than the delay settings: it can permanently sever real nodes the simulator's own topology doesn't know about, and the delivery safety gate can't catch that. Off by default — see the phase 6 plan's own reasoning.">
+          <input type="checkbox" id="sim-optimize-allow-floodmax">
+          Allow changing flood.max (off by default — riskier)
+        </label>
+        <div class="plan-row">
+          <button id="sim-optimize-adaptive" title="Starts from the best policy search result and slowly backs off whichever repeater is causing the most contention, round by round, until delivery stops improving. Run 'Search policies' first.">🎯🔁 Optimize adaptively</button>
+          <button id="sim-optimize-cancel" class="hidden">✕ Cancel</button>
+        </div>
         <div id="sim-status" class="plan-hint hidden"></div>
         <div id="sim-predict-progress" class="hidden">
           <div id="sim-predict-progress-text">Searching…</div>
           <div class="progress-track"><div id="sim-predict-progress-fill"></div></div>
         </div>
+        <div id="sim-optimize-progress" class="plan-hint hidden"></div>
 
         <div class="plan-row">
           <button id="sim-open-results-modal" class="hidden">📊 Results</button>
           <button id="sim-open-predictions-modal" class="hidden">🎯 Predicted settings</button>
           <button id="sim-rankings-expand" class="hidden">🏆 Rankings</button>
+          <button id="sim-open-optimize-modal" class="hidden">🎯🔁 Optimization</button>
         </div>
 
         <div class="plan-section-title">Stress test</div>
@@ -333,6 +352,11 @@
             <option value="flood">Route: Flood</option>
             <option value="direct">Route: Direct</option>
           </select>
+          <select id="sim-message-hash-size" title="Path-hash size (bytes) this sender stamps onto its own packets (real firmware: the originator's own 'set hash_size'). Pre-filled from the selected repeater's own configured hash size — freely overridable here. One size applies to the whole path — a relay appends its own hash at the packet's size, never its own. Smaller sizes collide more often between unrelated repeaters, which is what makes loop.detect trip on legitimate, non-looping traffic.">
+            <option value="1">Hop hash: 1 byte</option>
+            <option value="2">Hop hash: 2 bytes</option>
+            <option value="3" selected>Hop hash: 3 bytes</option>
+          </select>
         </div>
         <div class="plan-field-row">
           <label>Payload length (bytes)</label>
@@ -416,6 +440,16 @@
           <div class="sim-subsection-title">🧬 Policy search results</div>
           <div id="sim-policy-summary" class="plan-hint"></div>
           <div id="sim-policy-suggestions-list" class="plan-list"></div>
+          <div id="sim-policy-source-note" class="plan-hint hidden"></div>
+
+          <div class="sim-subsection-title">Profile breakdown — what the winning policy labelled each repeater</div>
+          <div class="plan-hint">Click a profile to see which repeaters it labelled, and why.</div>
+          <div id="sim-policy-profile-summary" class="plan-list"></div>
+          <div id="sim-policy-profile-detail" class="hidden">
+            <button id="sim-policy-profile-back" type="button" class="plan-full-width-btn">‹ Back to profiles</button>
+            <div id="sim-policy-profile-detail-title" class="sim-subsection-title"></div>
+            <div id="sim-policy-profile-detail-list" class="plan-list"></div>
+          </div>
 
           <div class="sim-subsection-title">Action list — repeaters that need a change</div>
           <div class="plan-hint">Only repeaters where the winning policy's own recommendation differs from what's currently set. Copy-paste the CLI line straight into that repeater's own console.</div>
@@ -423,6 +457,54 @@
             <button id="sim-policy-export-csv">⬇ Export .csv</button>
           </div>
           <div id="sim-policy-actions-list" class="plan-list"></div>
+        </div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <!-- The adaptive optimizer gets its own modal rather than another
+         section inside #sim-predictions-modal: it renders two full-width
+         tables (every repeater, and every round) plus a drill-down, which
+         is far too much to stack underneath the policy-search results. -->
+    <div id="sim-optimize-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-optimize-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-optimize-modal-title">Adaptive optimization</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div id="sim-optimize-section" class="hidden">
+          <div id="sim-optimize-summary" class="plan-hint"></div>
+          <div id="sim-optimize-holdout-note" class="plan-hint hidden"></div>
+
+          <div class="sim-subsection-title">Every repeater, ranked by contention</div>
+          <div class="plan-hint">All repeaters, worst first. "Score" is what the optimizer ranks on (collisions caused + own collisions + wasted relays + duty cycle). Click a row for the full diagnosis and what to do about it.</div>
+          <div class="sim-config-table-scroll">
+            <table class="sim-config-table">
+              <thead><tr>
+                <th class="sim-col-sticky">Repeater</th><th>Score</th><th>txdelay</th>
+                <th>Caused</th><th>Collided</th><th>Wasted relays</th><th>Relayed</th><th>Diagnosis</th>
+              </tr></thead>
+              <tbody id="sim-optimize-nodes-tbody"></tbody>
+            </table>
+          </div>
+          <div id="sim-optimize-node-detail" class="hidden">
+            <button id="sim-optimize-node-detail-close" type="button" class="plan-full-width-btn">‹ Close diagnosis</button>
+            <div id="sim-optimize-node-detail-title" class="sim-subsection-title"></div>
+            <div id="sim-optimize-node-detail-list" class="plan-list"></div>
+          </div>
+
+          <div class="sim-subsection-title">Improvement over time</div>
+          <div class="plan-hint">One row per round. ✓ marks a round whose change was kept; the rest were measured, rejected, and reverted.</div>
+          <div class="sim-config-table-scroll">
+            <table class="sim-config-table">
+              <thead><tr><th>Round</th><th>Kept</th><th>Targeted</th><th>Move</th><th>Candidates tried</th><th>Delivery</th><th>Collisions</th><th>Contention</th></tr></thead>
+              <tbody id="sim-optimize-history-tbody"></tbody>
+            </table>
+          </div>
+
+          <div class="sim-subsection-title">What changed, and why</div>
+          <div class="plan-hint">Each row is one repeater the optimizer specifically backed off, in the order it found them — not a class-based rule, a targeted exception on top of the policy search result above.</div>
+          <div class="plan-row">
+            <button id="sim-optimize-export-csv">⬇ Export .csv</button>
+          </div>
+          <div id="sim-optimize-deviations-list" class="plan-list"></div>
         </div>
       </div>
       <div class="sim-modal-footer"><button data-close>Close</button></div>

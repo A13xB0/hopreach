@@ -69,11 +69,66 @@
     return call("simSuggestPolicy", policyTuneRequest, onProgress);
   }
 
+  // assignPolicy(scenario, attrs, policy) -> PolicyAssignment[]
+  // attrs (optional, parallel to scenario.nodes): [{altitudeM, neighborCount, ...}]
+  // Phase 4 work item 6's "which tier was this repeater labelled" query —
+  // see wasm/meshsim.go's jsSimAssignPolicy/internal/meshsim.AssignPolicy.
+  // Each result is {node, matchedRules: [ruleIndex, ...]} in the policy's
+  // own application order — deliberately indices, not a single resolved
+  // label, since a node can match more than one rule; the UI decides its
+  // own display convention (see renderPolicyProfileSummary).
+  function assignPolicy(scenario, attrs, policy) {
+    return call("simAssignPolicy", { scenario, attrs, policy });
+  }
+
+  // meshMethods() -> MeshMethod[]
+  // {name, policy, source, asOf, direction, note} for every built-in
+  // community method (phase 4 work item 5) — see wasm/meshsim.go's
+  // jsSimMeshMethods/internal/meshsim.BuiltinMeshMethods. Every entry's
+  // source is non-empty by construction (enforced by a Go test) — always
+  // show it next to a community-method result, since it's a real-world
+  // convention, not a firmware-verified fact.
+  function meshMethods() {
+    return call("simMeshMethods", {});
+  }
+
+  // optimizeStep(optimizeRequest, state) -> OptimizeState
+  // optimizeRequest: {scenario, messages, attrs, basePolicy, maxSimTimeMs,
+  //   trials, confirmTrials, seed, deliveryTolerance, minImprovement,
+  //   maxRounds, staleRoundsLimit, holdoutSeed, holdoutTrials}
+  // state: {} (or omitted) for a fresh start, otherwise the previous
+  // call's own returned OptimizeState fed back in.
+  // Phase 4 work item 4's adaptive optimizer — see wasm/meshsim.go's
+  // jsSimOptimizeStep/internal/meshsim.OptimizeStep for the full
+  // "why one call is exactly one bounded round" rationale. Deliberately
+  // NOT looped in here or in the worker — public/simulator.js drives the
+  // whole optimization by calling this once per round via
+  // public/meshsim-worker.js's own "optimize-step" message, so the
+  // worker's event loop gets a real chance to notice a cancel between
+  // rounds (see meshsim-worker.js's own comment on this).
+  function optimizeStep(optimizeRequest, state) {
+    return call("simOptimizeStep", { request: optimizeRequest, state: state || {} });
+  }
+
+  // optimizeValidate(optimizeRequest, policy) -> {delivery, collision}
+  // Hold-out validation (docs/SIMULATOR_PLAN_PHASE4.md work item 4) —
+  // re-evaluates policy against optimizeRequest's own holdoutSeed/
+  // holdoutTrials, seeds the search itself never drew from. Called once,
+  // after optimizeStep-driven iteration stops — see wasm/meshsim.go's
+  // jsSimOptimizeValidate/internal/meshsim.OptimizeValidate.
+  function optimizeValidate(optimizeRequest, policy) {
+    return call("simOptimizeValidate", { request: optimizeRequest, policy });
+  }
+
   self.MeshSim = {
     ready: self.__hopreachWasmReadyPromise,
     run,
     suggest,
     stress,
     suggestPolicy,
+    assignPolicy,
+    meshMethods,
+    optimizeStep,
+    optimizeValidate,
   };
 })();

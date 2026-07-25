@@ -121,3 +121,17 @@ func AirtimeMs(p LoRaParams, payloadLen int) uint32 {
 	totalMs := preambleDurationMs(p) + nPayloadSymbols*symDurMs
 	return uint32(totalMs) // truncating int conversion, matching getEstAirtimeFor's own microseconds/1000 integer division
 }
+
+// onAirLen returns the byte count actually transmitted for a packet whose
+// application payload is payloadLen bytes and whose accumulated path
+// carries hashCount hops at hashSize bytes each — matching real firmware's
+// own wire layout exactly: Packet::writeTo (src/Packet.cpp) writes the
+// path_len byte, then hash_count*hash_size path bytes (Packet::writePath),
+// then the payload. Dispatcher::checkRecv's own packetScore/getEstAirtimeFor
+// calls (src/Dispatcher.cpp) both use this same raw-received length, not
+// just the payload — a longer accumulated path genuinely costs more airtime
+// and is genuinely harder to receive cleanly, not a detail this simulator
+// can skip once path-hash size is modeled at all.
+func onAirLen(payloadLen, hashCount, hashSize int) int {
+	return payloadLen + 1 + hashCount*hashSize
+}

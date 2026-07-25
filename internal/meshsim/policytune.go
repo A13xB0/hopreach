@@ -92,28 +92,95 @@ func stage1GlobalPolicies() []policyCandidate {
 	return out
 }
 
+// policyScaleNeighborMin/Max bound the neighbour-count axis for
+// `degree-proportional`'s continuous scale — deliberately the same span as
+// policyNeighborThresholds' own min/max, so the proportional model and the
+// threshold models are searched over a comparable range.
+var (
+	policyScaleNeighborMin = policyNeighborThresholds[0]
+	policyScaleNeighborMax = policyNeighborThresholds[len(policyNeighborThresholds)-1]
+	// policyScaleCoverageMin/Max bound `coverage-proportional`'s scale —
+	// wider than policyMarginalCoverageThreshold's own [1,2] step values,
+	// since a continuous scale benefits from a real span to interpolate
+	// across rather than two adjacent thresholds.
+	policyScaleCoverageMin = 1.0
+	policyScaleCoverageMax = 6.0
+)
+
 // stage2NamedModelPolicies is the model catalogue from
-// docs/SIMULATOR_PLAN_PHASE2.md item 15c. Each model is included alongside
-// its own inverse where the plan calls for one — do not assume which way
-// round is right; that's a property of the specific topology being
-// searched, which is why it's measured rather than reasoned about.
+// docs/SIMULATOR_PLAN_PHASE2.md item 15c, extended by phase 4 (see
+// docs/SIMULATOR_PLAN_PHASE4.md work item 1) with the proportional models
+// item 15c's own plan flagged as needing "a new proportional rule kind" —
+// RuleScale, added in phase 4, is that kind.
 //
-// Three models from the plan's own table are deliberately NOT implemented
-// here, each for a documented infrastructure reason rather than being
-// forgotten:
-//   - degree-proportional: needs continuous (non-threshold) scaling of
-//     txdelay by neighbour count — RuleCondition's Kind+Threshold shape
-//     has no way to express a continuous function, only a step. The plan
-//     itself flags this as needing "a new proportional rule kind."
-//   - redundancy-suppress / airtime-aware: these are measurement-driven —
-//     they target SPECIFIC nodes identified from a prior run's own
-//     scoreboard (item 16: high redundant-relay count / high duty cycle),
-//     not nodes matching a general topology/altitude condition. Nothing
-//     in RuleCondition can match "this specific set of node indices";
-//     that needs a different mechanism than every other model here uses,
-//     which is a larger change than this pass has room for.
+// Two models from the phase-2 table remain NOT implemented here, both
+// measurement-driven — they target SPECIFIC nodes identified from a prior
+// run's own scoreboard (item 16: high redundant-relay count / high duty
+// cycle), not nodes matching a general topology/altitude/scale condition.
+// See docs/SIMULATOR_PLAN_PHASE4.md work item 2 (ConditionNodeIndexIn),
+// which is what unlocks these — `redundancy-suppress`, `airtime-aware`.
+//
+// Every model is included alongside its own inverse where the plan calls
+// for one — do not assume which way round is right; that's a property of
+// the specific topology being searched, which is why it's measured rather
+// than reasoned about. The proportional models are no exception: a
+// continuous scale still has a direction, and phase 4's own community-
+// method research (work item 5) found two real MeshCore communities
+// (MeshSydney vs WNY/W6HS/TennMesh) publishing OPPOSITE directions for
+// this exact choice — hilltop-first vs hilltop-last — which is the
+// clearest real-world evidence yet that this genuinely isn't obvious in
+// advance.
 func stage2NamedModelPolicies(hasAltitude bool) []policyCandidate {
 	var out []policyCandidate
+
+	// degree-proportional (+ inverse): txdelay scaled continuously by
+	// neighbour count, rather than the threshold step dense-slow/dense-fast
+	// use — "busier nodes wait proportionally longer" as a smooth
+	// function instead of a cliff at one chosen threshold.
+	out = append(out,
+		policyCandidate{
+			name: "degree-proportional (txdelay rises with neighbour count)",
+			policy: ConfigPolicy{{
+				Scale: &RuleScale{
+					Attr: ScaleByNeighborCount, AtMin: policyScaleNeighborMin, AtMax: policyScaleNeighborMax,
+					ValueAtMin: policyDelayLowTx, ValueAtMax: policyDelayHighTx,
+				},
+			}},
+		},
+		policyCandidate{
+			name: "degree-proportional inverse (txdelay falls with neighbour count)",
+			policy: ConfigPolicy{{
+				Scale: &RuleScale{
+					Attr: ScaleByNeighborCount, AtMin: policyScaleNeighborMin, AtMax: policyScaleNeighborMax,
+					ValueAtMin: policyDelayHighTx, ValueAtMax: policyDelayLowTx,
+				},
+			}},
+		},
+	)
+
+	// coverage-proportional (+ inverse): the continuous form of the
+	// existing threshold-based `mpr` model below — delay scaled smoothly
+	// by marginal coverage instead of stepping at one chosen threshold.
+	out = append(out,
+		policyCandidate{
+			name: "coverage-proportional (txdelay falls as marginal coverage rises)",
+			policy: ConfigPolicy{{
+				Scale: &RuleScale{
+					Attr: ScaleByMarginalCoverage, AtMin: policyScaleCoverageMin, AtMax: policyScaleCoverageMax,
+					ValueAtMin: policyDelayHighTx, ValueAtMax: policyDelayLowTx,
+				},
+			}},
+		},
+		policyCandidate{
+			name: "coverage-proportional inverse (txdelay rises as marginal coverage rises)",
+			policy: ConfigPolicy{{
+				Scale: &RuleScale{
+					Attr: ScaleByMarginalCoverage, AtMin: policyScaleCoverageMin, AtMax: policyScaleCoverageMax,
+					ValueAtMin: policyDelayLowTx, ValueAtMax: policyDelayHighTx,
+				},
+			}},
+		},
+	)
 
 	for _, nc := range policyNeighborThresholds {
 		out = append(out,
@@ -181,6 +248,36 @@ func stage2NamedModelPolicies(hasAltitude bool) []policyCandidate {
 				},
 			)
 		}
+
+		// altitude-proportional (+ inverse): the continuous form of
+		// hilltop-first/-last above. Directly comparable, in the search
+		// results, to the real community methods work item 5 encodes —
+		// MeshSydney's profile table (CRITICAL 0.3 -> LOCAL 1.4) and
+		// WNY/W6HS's (HILLTOP 2.0 -> LOCAL 0.3) are themselves elevation-
+		// proportional step functions, opposite directions, and this is
+		// the same shape as a smooth curve rather than named tiers.
+		altMin := policyAltitudeThresholds[0]
+		altMax := policyAltitudeThresholds[len(policyAltitudeThresholds)-1]
+		out = append(out,
+			policyCandidate{
+				name: "altitude-proportional (txdelay falls with altitude — hilltop-first)",
+				policy: ConfigPolicy{{
+					Scale: &RuleScale{
+						Attr: ScaleByAltitude, AtMin: altMin, AtMax: altMax,
+						ValueAtMin: policyDelayHighTx, ValueAtMax: policyDelayLowTx,
+					},
+				}},
+			},
+			policyCandidate{
+				name: "altitude-proportional inverse (txdelay rises with altitude — hilltop-last)",
+				policy: ConfigPolicy{{
+					Scale: &RuleScale{
+						Attr: ScaleByAltitude, AtMin: altMin, AtMax: altMax,
+						ValueAtMin: policyDelayLowTx, ValueAtMax: policyDelayHighTx,
+					},
+				}},
+			},
+		)
 		// hub-and-spoke / two-tier-backbone both call for an altitude-AND-
 		// neighbour-count condition, which RuleCondition's single-Kind
 		// shape can't express (no AND combinator exists) — approximated
@@ -243,6 +340,29 @@ func refinePolicy(start PolicySuggestion, evaluate func(ConfigPolicy) (float64, 
 						improved = true
 					}
 				}
+				// Scale (phase 4's proportional rules — see RuleScale)
+				// nudges both ends of its output range together, keeping
+				// the rule's own shape (still rising, or still falling)
+				// rather than letting the two ends drift independently
+				// and potentially invert the model's whole direction as
+				// a side effect of refinement. clonePolicy only
+				// shallow-copies each ConfigRule, so *candidate[ruleIdx].
+				// Scale still points at the SAME RuleScale as best.Policy
+				// — a new RuleScale value must be built and a new
+				// pointer assigned, never written through the old one,
+				// same discipline clonePolicy's own doc comment requires
+				// for TxDelayFactor/RxDelayBase above.
+				if best.Policy[ruleIdx].Scale != nil {
+					candidate := clonePolicy(best.Policy)
+					s := *candidate[ruleIdx].Scale
+					s.ValueAtMin *= mult
+					s.ValueAtMax *= mult
+					candidate[ruleIdx].Scale = &s
+					if d, c := evaluate(candidate); d > best.DeliveryRatio {
+						best = PolicySuggestion{Name: best.Name + " (refined)", Policy: candidate, DeliveryRatio: d, CollisionRate: c}
+						improved = true
+					}
+				}
 			}
 		}
 		if !improved {
@@ -290,6 +410,7 @@ func SuggestPolicy(req PolicyTuneRequest, progress func(done, total int)) Policy
 
 	candidates := stage1GlobalPolicies()
 	candidates = append(candidates, stage2NamedModelPolicies(hasAltitude)...)
+	candidates = append(candidates, communityMethodCandidates(hasAltitude)...)
 
 	total := len(candidates) + 2 // +1 baseline, +1 stage-3 refinement (reported as one step, not per-iteration)
 	done := 0

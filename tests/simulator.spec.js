@@ -90,6 +90,11 @@ test("simulate panel opens and is mutually exclusive with the plan panel", async
   await page.click("#sim-toggle");
   await expect(page.locator("#sim-panel")).toBeVisible();
   await expect(page.locator("#plan-panel")).toBeHidden();
+
+  // Connectivity source defaults to "blend" (observed where CoreScope has
+  // it, model everywhere else) rather than the propagation model alone —
+  // a deliberate product default, not a CoreScope-availability fallback.
+  await expect(page.locator("#sim-connectivity-source")).toHaveValue("blend");
 });
 
 // Regression test: the four toolbar buttons that open a results modal
@@ -274,6 +279,169 @@ test("search policies finds a composite policy and shows an action list", async 
   // outcome, but the section must never be left blank.
   await expect(page.locator("#sim-policy-actions-list")).not.toBeEmpty();
   await expect(page.locator("#sim-suggest-policy")).toBeEnabled();
+
+  // Profile breakdown (docs/SIMULATOR_PLAN_PHASE4.md work item 6) — fills
+  // in asynchronously after the rest of the results (see
+  // renderPolicyProfileSummary's own doc comment), so poll for it rather
+  // than asserting immediately. Whichever policy actually won this run,
+  // every loaded repeater lands in at least one profile row (even an
+  // untiered winner still produces a single "No profile" row covering
+  // both repeaters) — word labels only, never a colour swatch.
+  const profileRows = page.locator("#sim-policy-profile-summary .sim-policy-profile-row");
+  await expect(profileRows.first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#sim-policy-profile-summary [style*=\"background-color\"]")).toHaveCount(0);
+
+  await profileRows.first().click();
+  await expect(page.locator("#sim-policy-profile-detail")).toBeVisible();
+  await expect(page.locator("#sim-policy-profile-detail-list .plan-list-item").first()).toBeVisible();
+
+  await page.click("#sim-policy-profile-back");
+  await expect(page.locator("#sim-policy-profile-detail")).toBeHidden();
+});
+
+// Phase 4 work item 4 — the adaptive optimizer requires Search policies to
+// have already run (it starts from that search's own winning policy
+// rather than searching from nothing — see runOptimizeAdaptive's own
+// doc comment) and must say so plainly rather than silently doing
+// nothing or erroring.
+test("adaptive optimizer refuses to run before a policy search", async ({ page }) => {
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+  await addMessageSenderViaModal(page);
+
+  await page.click("#sim-optimize-adaptive");
+  await expect(page.locator("#sim-status")).toContainText("Search policies");
+  await expect(page.locator("#sim-optimize-section")).toBeHidden();
+});
+
+// The end-to-end verification this feature specifically needs: phase 3's
+// own stall bug shipped because items 15b/15c had only ever been unit
+// tested at the Go level, never exercised through the real worker/WASM/UI
+// pipeline in a browser — the exact gap that let a silently-dropped
+// message kind read as an indefinite hang. This test drives the real
+// chunked worker round-trip loop (docs/SIMULATOR_PLAN_PHASE4.md work item
+// 4), not just internal/meshsim's own Go tests for OptimizeStep.
+test("adaptive optimizer runs after a policy search and shows a result with hold-out validation", async ({ page }) => {
+  test.slow();
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+  await addMessageSenderViaModal(page);
+
+  await page.fill("#sim-trials", "3"); // keep both the search and the optimizer fast for a CI run
+  await page.click("#sim-suggest-policy");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
+  await page.locator("#sim-predictions-modal [data-close]").first().click();
+  await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+
+  await page.click("#sim-optimize-adaptive");
+  // Deliberately not asserting the progress indicator is visible at some
+  // intermediate point — on this tiny 2-node fixture the whole
+  // round-by-round loop can complete faster than a polled visibility
+  // check reliably observes any single round's own transient state (seen
+  // directly while writing this test). The real check is the stable end
+  // state below, reached either way.
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
+  await expect(page.locator("#sim-optimize-progress")).toBeHidden();
+  await expect(page.locator("#sim-optimize-adaptive")).toBeEnabled();
+  await expect(page.locator("#sim-optimize-cancel")).toBeHidden();
+
+  await expect(page.locator("#sim-optimize-section")).toBeVisible();
+  // Baseline → final, so the summary always shows whether the run
+  // actually helped — "31.4% delivery" on its own can't answer that.
+  await expect(page.locator("#sim-optimize-summary")).toContainText(/Delivery .+% → .+%/);
+  await expect(page.locator("#sim-optimize-summary")).toContainText("contention");
+  // Hold-out validation (work item 4's own "guarding against overfitting"
+  // requirement) must always be shown once a run finishes, independent of
+  // whether this specific tiny 2-node fixture found anything to adjust.
+  await expect(page.locator("#sim-optimize-holdout-note")).toContainText("Hold-out validation");
+  await expect(page.locator("#sim-optimize-holdout-note")).toContainText("delivery");
+  // Either real deviations (a CLI-command row) or the section explicitly
+  // says nothing needed adjusting — either is valid, but never blank.
+  await expect(page.locator("#sim-optimize-deviations-list")).not.toBeEmpty();
+
+  // The per-repeater table covers EVERY loaded repeater, not just the
+  // adjusted ones — "which ones are causing the most contention" is only
+  // answerable by seeing them all. Two planned repeaters are loaded here.
+  const nodeRows = page.locator("#sim-optimize-nodes-tbody .sim-optimize-node-row");
+  await expect(nodeRows).toHaveCount(2);
+  // Clicking a repeater opens its own diagnosis, and the close button
+  // returns — the same drill-down contract the profile breakdown uses.
+  await nodeRows.first().click();
+  await expect(page.locator("#sim-optimize-node-detail")).toBeVisible();
+  await expect(page.locator("#sim-optimize-node-detail-title")).not.toBeEmpty();
+  await page.click("#sim-optimize-node-detail-close");
+  await expect(page.locator("#sim-optimize-node-detail")).toBeHidden();
+
+  // One history row per completed round — this is the "improvement over
+  // time" view, and an empty one would mean rounds ran but weren't
+  // recorded.
+  await expect(page.locator("#sim-optimize-history-tbody tr").first()).toBeVisible();
+
+  // Reopening from the toolbar button must work after the modal's closed
+  // — the results have to survive being dismissed.
+  await page.locator("#sim-optimize-modal [data-close]").first().click();
+  await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+  await page.click("#sim-open-optimize-modal");
+  await expect(page.locator("#sim-optimize-modal")).toBeVisible();
+});
+
+// Clicking Cancel mid-run must always return the UI to a stable,
+// interactive state — not leave "Optimize adaptively" disabled forever
+// waiting for a reply that may never come (see cancelOptimizeAdaptive's
+// own graceful-then-forced design).
+test("adaptive optimizer can be cancelled mid-run", async ({ page }) => {
+  test.slow();
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+  await addMessageSenderViaModal(page);
+
+  // Trials at the UI's own max so each round takes long enough to give a
+  // real window to click Cancel before the run finishes on its own — this
+  // fixture is otherwise so small/fast that a normal run can complete
+  // before a click even lands (confirmed while writing this test).
+  await page.fill("#sim-trials", "100");
+  await page.click("#sim-suggest-policy");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
+  await page.locator("#sim-predictions-modal [data-close]").first().click();
+  await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+
+  await page.click("#sim-optimize-adaptive");
+  // Best-effort: attempt the cancel click, but don't fail the test if the
+  // run already finished and hid the button first — completing normally
+  // is itself correct behaviour, not a test failure. Either way, the
+  // assertion below is the real check: the UI must always settle back to
+  // a normal, interactive state, never hang regardless of which path won
+  // the race.
+  await page
+    .locator("#sim-optimize-cancel")
+    .click({ timeout: 5_000 })
+    .catch(() => {});
+
+  await expect(page.locator("#sim-optimize-adaptive")).toBeEnabled({ timeout: 30_000 });
+  await expect(page.locator("#sim-optimize-cancel")).toBeHidden();
 });
 
 // Item 15b's own offered-load sweep — see the comment on the policy-search
@@ -319,6 +487,12 @@ test("clicking a repeater marker opens the repeaters modal, and applied settings
   await expect(firstRow.locator("input[data-field]")).toHaveCount(13);
   await expect(firstRow.locator("select[data-field=\"loopDetect\"]")).toHaveCount(1);
   await expect(firstRow.locator("select[data-field=\"radioPreset\"]")).toHaveCount(1);
+
+  // A fresh node with no explicit override defaults to "minimal", a
+  // deliberate divergence from real firmware's own "off" default — see
+  // DEFAULT_LOOP_DETECT's own comment in simulator.js and
+  // docs/SIMULATOR_PLAN_PHASE3.md.
+  await expect(firstRow.locator('select[data-field="loopDetect"]')).toHaveValue("minimal");
 
   // Planned repeaters have no real pubkey yet, so a synthetic 6-byte
   // address (12 hex chars) is generated and stored at creation time —
@@ -453,6 +627,65 @@ test("editing an existing message sender updates it in place instead of adding a
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getMessageCount())).toBe(8);
 });
 
+// Regression test for phase 3 (docs/SIMULATOR_PLAN_PHASE3.md): path-hash
+// size is a property of the MESSAGE (what its sender stamps on the packet
+// at send time — real firmware's Mesh::sendFlood), not of the repeater
+// sending it. The sender form's own hash-size select must default to 3
+// bytes, and editing it must actually round-trip through the sender list's
+// badge.
+test("message sender hash size defaults to 3 bytes and round-trips through edit", async ({ page }) => {
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+
+  await page.click("#sim-open-messages-modal");
+  await expect(page.locator("#sim-message-hash-size")).toHaveValue("3");
+  await page.selectOption("#sim-message-node", { index: 0 });
+  await page.click("#sim-message-add");
+  await expect(page.locator("#sim-message-list .plan-list-item")).toHaveCount(1);
+  await expect(page.locator("#sim-message-list .sim-badge-hashsize")).toHaveText("3B");
+
+  await page.click('#sim-message-list [data-act="edit"]');
+  await expect(page.locator("#sim-message-hash-size")).toHaveValue("3");
+  await page.selectOption("#sim-message-hash-size", "1");
+  await page.click("#sim-message-add");
+  await expect(page.locator("#sim-message-list .plan-list-item")).toHaveCount(1);
+  await expect(page.locator("#sim-message-list .sim-badge-hashsize")).toHaveText("1B");
+});
+
+// A repeater's own configured hash size (⚙ Repeaters & settings) is what a
+// real device would actually use for every packet it originates — the
+// sender form's own hash-size field should default to reflect that when
+// you pick the repeater as a sender, not an unrelated constant. Still
+// overridable afterward; this only checks the seeded starting value.
+test("selecting a sender seeds the hash-size field from that repeater's own configured hash size", async ({ page }) => {
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+
+  await page.click("#sim-open-nodes-modal");
+  const firstRow = page.locator("#sim-nodes-modal-tbody tr").first();
+  await firstRow.locator('input[data-field="hashSize"]').fill("2");
+  await page.click("#sim-nodes-modal-apply");
+  await page.locator("#sim-nodes-modal [data-close]").first().click();
+  await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+
+  await page.click("#sim-open-messages-modal");
+  await page.selectOption("#sim-message-node", { index: 0 });
+  await expect(page.locator("#sim-message-hash-size")).toHaveValue("2");
+
+  // Still freely overridable — picking a different value sticks until the
+  // node selection changes again.
+  await page.selectOption("#sim-message-hash-size", "1");
+  await expect(page.locator("#sim-message-hash-size")).toHaveValue("1");
+});
+
 test("sent messages list shows one row per message, selecting one highlights its path on the map", async ({ page }) => {
   await page.click("#plan-toggle");
   await page.selectOption("#plan-select", TEST_PLAN.id);
@@ -472,6 +705,9 @@ test("sent messages list shows one row per message, selecting one highlights its
   await page.click("#sim-open-results-modal"); // the modal no longer opens automatically — see runSimulation's own comment
   await expect(page.locator("#sim-results-modal")).toBeVisible();
   await expect(page.locator("#sim-messages-sent-list .plan-list-item")).toHaveCount(expectedMessages);
+  // How long each packet was still producing activity anywhere in the
+  // network, right in the list — not just after drilling into Details.
+  await expect(page.locator("#sim-messages-sent-list .plan-item-sub").first()).toContainText(/flooding for \d+ms/);
 
   const firstRow = page.locator("#sim-messages-sent-list .plan-list-item").first();
   await firstRow.click();
@@ -508,6 +744,16 @@ test("packet inspector: message details and clicking a repeater after a run both
   await expect(page.locator("#sim-packet-modal")).toBeVisible();
   await expect(page.locator("#sim-packet-modal-title")).toContainText("Packet #");
   await expect(page.locator("#sim-packet-modal-summary")).toContainText("flood time");
+  // The packet's own hash size (defaults to 3 bytes — see
+  // DEFAULT_MESSAGE_HASH_SIZE) is shown once for the whole packet, not
+  // per hop — real MeshCore packets can never mix hash sizes hop to hop
+  // (see docs/SIMULATOR_PLAN_PHASE3.md), so a path breadcrumb must never
+  // show a per-hop "(NB)" suffix.
+  await expect(page.locator("#sim-packet-modal-summary")).toContainText("3B hops");
+  const pathTexts = await page.locator(".sim-packet-path").allTextContents();
+  for (const text of pathTexts) {
+    expect(text).not.toMatch(/\(\d+B\)/);
+  }
   await expect(page.locator("#sim-packet-modal-list .plan-list-item").first()).toBeVisible();
   await page.locator("#sim-packet-modal [data-close]").first().click();
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
@@ -813,6 +1059,49 @@ test("runs a replay after a simulation and can skip to the final state", async (
   await expect(page.locator("#sim-replay-status")).toContainText("final state");
   await page.click("#sim-replay");
   await expect(page.locator("#sim-replay-status")).not.toContainText("final state");
+});
+
+// "Keep all paths" is a live analysis lens, not a pre-run setting: it used
+// to only take effect on the NEXT wave tick, so toggling it in a finished
+// (skipped-to-end) view — the common case, having just watched a replay —
+// did nothing visible at all. Both directions must re-render immediately.
+test("keep-all-paths toggles the map view live, after a run has already finished", async ({ page }) => {
+  test.slow(); // link-building fetches real DEM tiles
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+
+  await addMessageSenderViaModal(page);
+  await page.click("#sim-run");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 30_000 });
+
+  // Settle into the finished/static state, where the old code did nothing
+  // on toggle.
+  await page.click("#sim-map-skip-to-end");
+  await expect(page.locator("#sim-map-replay-status")).toContainText("final state");
+
+  const allPathsCount = await page.evaluate(() => window.__hopreachSimulatorDebug.getResultLineCount());
+  expect(allPathsCount).toBeGreaterThan(0);
+
+  // Untick: only the most recent wave's lines should remain, which must be
+  // strictly fewer than the full accumulated set.
+  await page.uncheck("#sim-view-keep-paths");
+  await expect
+    .poll(() => page.evaluate(() => window.__hopreachSimulatorDebug.getResultLineCount()))
+    .toBeLessThan(allPathsCount);
+
+  // Re-tick: back to the full accumulated set, same as before.
+  await page.check("#sim-view-keep-paths");
+  await expect
+    .poll(() => page.evaluate(() => window.__hopreachSimulatorDebug.getResultLineCount()))
+    .toBe(allPathsCount);
 });
 
 // The one test in this file that genuinely depends on the container's

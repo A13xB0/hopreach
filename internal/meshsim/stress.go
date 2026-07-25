@@ -141,7 +141,11 @@ func computeKnee(levels []StressLevel) float64 {
 // stressing collision/contention behaviour; unlike messagesFromState's own
 // deliberately-authored message generators (public/simulator.js), nothing
 // here is meant to be hand-tuned by a user, so the simpler model is an
-// intentional choice, not a shortcut.
+// intentional choice, not a shortcut. HashSize is left unset (falls back to
+// defaultMessageHashSize — see Message.HashSize) rather than plumbed
+// through StressRequest: a stress sweep measures capacity under a chosen
+// topology/config, not a specific hash-size choice, and every synthetic
+// message sharing one size keeps that variable out of the sweep.
 func generateStressMessages(scenario Scenario, rng RNG, messagesPerMinute float64, minPayload, maxPayload int, maxSimTimeMs uint32) []Message {
 	if len(scenario.Nodes) == 0 || messagesPerMinute <= 0 || maxSimTimeMs == 0 {
 		return nil

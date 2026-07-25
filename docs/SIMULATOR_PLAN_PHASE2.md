@@ -100,6 +100,13 @@ contends with every other node on every send — so its lower delivery
 despite a similar collision rate is exactly the signal item 15c's search
 needs to be driven by delivery, not collisions, to find real improvements.
 
+**Note (phase 3): all tables on this page are pre-phase-3.** See
+`docs/SIMULATOR_PLAN_PHASE3.md` — airtime now includes each hop's own
+accumulated path bytes (previously payload-length-only), which nudges
+every collision window slightly wider than what's measured above. Not
+re-measured here; treat these as historical illustrations of the
+methodology, not current numbers.
+
 ---
 
 ## 12. Relay transmissions as first-class events

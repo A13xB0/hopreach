@@ -53,5 +53,39 @@ self.onmessage = async (e) => {
     } catch (err) {
       self.postMessage({ generation, type: "suggest-policy-error", message: err.message || String(err) });
     }
+    return;
+  }
+  if (kind === "optimize-step") {
+    // Phase 4 work item 4's adaptive optimizer — deliberately ONE bounded
+    // round per message, not a loop in here. Looping to completion inside
+    // this one onmessage handler would block this same event loop for the
+    // whole optimization, exactly the problem that makes "suggest"/
+    // "suggest-policy" uncancellable mid-search — see
+    // docs/SIMULATOR_PLAN_PHASE4.md work item 4's own writeup and
+    // MeshSim.optimizeStep's doc comment. The caller (simulator.js) is
+    // what actually drives the round-by-round loop: it sends one
+    // "optimize-step" message, waits for this reply, decides whether to
+    // cancel, and only then sends the next one — so a cancel is checked
+    // between every single round, which a single long-running call could
+    // never allow.
+    const { optimizeRequest, state } = e.data;
+    try {
+      await MeshSim.ready;
+      const result = MeshSim.optimizeStep(optimizeRequest, state);
+      self.postMessage({ generation, type: "optimize-step-result", result });
+    } catch (err) {
+      self.postMessage({ generation, type: "optimize-step-error", message: err.message || String(err) });
+    }
+    return;
+  }
+  if (kind === "optimize-validate") {
+    const { optimizeRequest, policy } = e.data;
+    try {
+      await MeshSim.ready;
+      const result = MeshSim.optimizeValidate(optimizeRequest, policy);
+      self.postMessage({ generation, type: "optimize-validate-result", result });
+    } catch (err) {
+      self.postMessage({ generation, type: "optimize-validate-error", message: err.message || String(err) });
+    }
   }
 };
