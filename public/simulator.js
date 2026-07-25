@@ -4238,6 +4238,33 @@
     return m ? m[0].toLowerCase() : null;
   }
 
+  // Parses a MeshCore on-air frame (CoreScope's raw_hex) into its
+  // components — a direct port of Packet::readFrom (src/Packet.cpp),
+  // validated against 400 real frames: header, then 4 transport-code bytes
+  // when the route type is TRANSPORT_FLOOD (0) or TRANSPORT_DIRECT (3),
+  // then the path_len byte (hashCount = low 6 bits, hashSize = (high 2 bits)
+  // + 1), then hashCount*hashSize path bytes, then the application payload.
+  // Returns null for anything too short to be a valid frame.
+  function parseMeshFrame(rawHex) {
+    if (!rawHex || typeof rawHex !== "string") return null;
+    const bytes = [];
+    for (let i = 0; i + 1 < rawHex.length; i += 2) bytes.push(parseInt(rawHex.substr(i, 2), 16));
+    if (bytes.length < 2) return null;
+    const routeType = bytes[0] & 0x03;
+    let i = 1;
+    const hasTransport = routeType === 0 || routeType === 3;
+    if (hasTransport) i += 4;
+    if (i >= bytes.length) return null;
+    const pathLen = bytes[i];
+    i += 1;
+    const hashCount = pathLen & 0x3f;
+    const hashSize = (pathLen >> 6) + 1;
+    const pathBytes = hashCount * hashSize;
+    const payloadLen = bytes.length - i - pathBytes;
+    if (payloadLen < 0) return null;
+    return { routeType, hasTransport, hashCount, hashSize, pathBytes, payloadLen: Math.max(1, payloadLen) };
+  }
+
   function addProvenEdge(edges, from, to, tMs) {
     if (from === to) return;
     const key = `${from}:${to}`;
@@ -4544,30 +4571,35 @@
       );
 
       await MeshSim.ready;
-      // raw_hex is the whole on-air frame (header included, not stripped
-      // to just the application payload) — close enough for an airtime
-      // estimate; the header is a handful of bytes against a typical
-      // 20-200 byte packet, not worth the extra complexity of parsing it
-      // out precisely for this analytical purpose.
-      const payloadLen = packetData.packet && packetData.packet.raw_hex ? Math.max(1, Math.floor(packetData.packet.raw_hex.length / 2)) : 20;
+      // Parse the real frame precisely (validated against 400 real frames):
+      // header, [4 transport bytes if route 0/3], path_len, path, payload.
+      // The APPLICATION payload length is what the engine's own airtime model
+      // (onAirLen) then re-derives the full on-air size from — so passing the
+      // whole frame length here (as this once did) would double-count the
+      // framing/path bytes. Use the packet's own hash size too, recovered
+      // from the path_len byte, so the replay reproduces the real packet's
+      // airtime rather than an approximation.
+      const frame = parseMeshFrame(packetData.packet ? packetData.packet.raw_hex : null);
+      const payloadLen = frame ? frame.payloadLen : 20;
       const originIndex = pubkeyToIndex.get(originPubkey);
       const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
       const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
-      // hashSize: DEFAULT_MESSAGE_HASH_SIZE — the real packet's own path
-      // hash size IS recoverable from raw_hex's path_len byte (see
-      // Packet.h's getPathHashSize), but this replay is a prediction run
-      // for BOTTLENECK comparison against CoreScope's own proven hops, not
-      // a byte-for-byte re-transmission — see renderBottleneckAnalysis.
-      const predictedReport = MeshSim.run(scenarioFromState(), [{ origin: originIndex, sendAtMs: 0, payloadLen, hashSize: DEFAULT_MESSAGE_HASH_SIZE }], seed, maxSimTimeMs);
+      const predictedReport = MeshSim.run(scenarioFromState(), [{ origin: originIndex, sendAtMs: 0, payloadLen, hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE }], seed, maxSimTimeMs);
 
       const routeType = packetData.packet ? packetData.packet.route_type : null;
       renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport });
       ensureBottleneckLegendControl();
       openModal("sim-bottleneck-modal");
+      // Flood route types are TRANSPORT_FLOOD (0) and FLOOD (1); direct are
+      // DIRECT (2) and TRANSPORT_DIRECT (3). Our model only predicts flood
+      // relaying, so warn only for the DIRECT types — the previous check
+      // (routeType !== 0) wrongly warned on plain floods and stayed silent
+      // on transport-floods.
+      const isDirect = routeType === 2 || routeType === 3;
       setStatus(
         "sim-replay-hash-status",
         `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}.` +
-          (routeType !== 0 ? " Note: our model only predicts flood relaying — if this packet used direct routing, the prediction side won't be meaningful." : "")
+          (isDirect ? " Note: our model only predicts flood relaying, but this packet used direct (addressed) routing — the prediction side won't be meaningful." : "")
       );
     } catch (err) {
       setStatus("sim-replay-hash-status", `Replay failed: ${err.message || err}`);

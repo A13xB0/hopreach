@@ -206,6 +206,51 @@ things did not:
   length, everything else on the full frame (identical for unscoped, the
   common case).
 
+## Sixth review pass — validated against real CoreScope packet data
+
+Pulled real observed traffic from the production CoreScope API and checked
+the engine against it directly (not just against firmware source).
+
+**Frame / airtime model — validated against 400 real frames.** Parsed every
+`raw_hex` per `Packet::readFrom`'s exact byte order (header, then 4 transport
+bytes for route types 0/3, then `path_len`, path, payload) and confirmed
+`getRawLength == raw frame length` for all 400, across every route type,
+zero exceptions. The round-5 airtime fix (2 framing bytes + 4 transport
+bytes on scoped packets) is exactly right. Also confirmed transport-coded
+floods are the majority (206/400) and the real hash-size mix (3-byte 253,
+1-byte 133, 2-byte 14).
+
+**Flood propagation — validated against real relay paths.** Each observation
+carries the full resolved relay chain from origin to observer. Reconstructed
+the real proven topology (union of every observed hop) and ran OUR engine's
+flood from the real origin of 16 advert packets:
+- **100% recall** across the union of trials (63/63 real deliveries
+  reproduced) — the engine never structurally drops a delivery reality made.
+- **96.6% single-trial recall** — even one stochastic run reaches almost
+  every real observer, so the collision model isn't over-aggressive.
+- **100% of predicted paths are valid proven-edge chains** (`Reception.Path`
+  is well-formed).
+- Predicted paths run ~1.2 hops shorter than reality on average — fully
+  explained by the validation method (the union topology hands the sim
+  shortcut edges no single real flood had, and one packet is simulated in
+  isolation without the concurrent cross-traffic that makes real floods
+  meander), not an engine defect.
+
+No engine bug surfaced from the real-data test — a strong positive result on
+top of the source-level fixes.
+
+**Two real-packet-replay bugs found and fixed** while checking the code that
+consumes this data:
+- The replay passed the WHOLE frame length as the message payload, which the
+  engine's own airtime model then added framing/path/transport bytes on top
+  of — double-counting. Now it parses the real application payload (and the
+  packet's real hash size) via `parseMeshFrame`, the same validated wire-
+  format decode.
+- The "this packet used direct routing" warning fired on `routeType !== 0`,
+  which wrongly warned on plain floods (route 1) and stayed silent on
+  transport-floods (route 0). Now it warns only for the actual direct route
+  types (2 and 3).
+
 ## What is deliberately still approximate (and why it's the right call)
 
 - **The margin→SNR and observation-count→SNR mappings are proxies**, not
