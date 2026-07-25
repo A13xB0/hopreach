@@ -4599,6 +4599,7 @@
       // failure. Second-resolution timing is all we have, so "same second".
       const deafSet = new Set();
       for (const p of packets) {
+        if (p.hash === hash) continue; // the target's own relays carry the target — not "busy with other traffic"
         const pSec = Math.floor((Date.parse(p.timestamp) || 0) / 1000);
         if (Math.abs(pSec - targetMsRounded) > 1) continue;
         for (const relay of p.resolved_path || []) {
@@ -4607,11 +4608,24 @@
         }
       }
 
+      // If the target itself couldn't be placed as a flood sender, say why —
+      // the surrounding traffic is still reconstructed and tunable, but there's
+      // no actual-vs-predicted to show for the target.
+      let targetNote = "";
+      if (!targetGen) {
+        const trt = detail.packet && detail.packet.route_type;
+        targetNote =
+          trt === 2 || trt === 3
+            ? "The target packet used direct (addressed) routing, which this tool reproduces as background traffic rather than a flood — so there's no flood delivery to compare. The surrounding traffic is still reconstructed; pick a flood packet to compare actual vs predicted."
+            : "The target packet couldn't be placed as a flood sender (its origin isn't a positioned repeater, or it fell just outside the fetched window). The surrounding traffic is still reconstructed and tunable.";
+      }
+
       lastEpisode = {
         hash,
         windowSecs,
         fetchedAt: new Date().toISOString(),
         target: targetGen ? { nodeIndex: targetGen.nodeIndex, atMs: targetGen.atMs } : null,
+        targetNote,
         targetObservers,
         allObservers,
         deafObservers: [...deafSet],
@@ -4678,8 +4692,18 @@
     for (const r of report.receptions || []) {
       if (r.packetId === targetPid && isCanonicalDelivery(r)) delivered.add(r.node);
     }
-    const realHeard = new Set(lastEpisode.targetObservers.map((o) => o.index));
-    const observerRows = lastEpisode.targetObservers.map((o) => ({ name: o.name, simDelivered: delivered.has(o.index) }));
+    // Re-resolve each observer's node index from its pubkey against the
+    // CURRENT node set rather than trusting the index captured at
+    // reconstruction — nodes may have been reordered or removed since (or the
+    // episode restored from a saved setup), which would otherwise silently
+    // compare against the wrong node. An observer whose node no longer exists
+    // is dropped from the comparison.
+    const indexByRefId = new Map(simNodes.map((n, i) => [n.refId, i]));
+    const curIdx = (o) => (indexByRefId.has(o.pubkey) ? indexByRefId.get(o.pubkey) : -1);
+
+    const realObservers = (lastEpisode.targetObservers || []).filter((o) => curIdx(o) >= 0);
+    const realHeard = new Set(realObservers.map((o) => curIdx(o)));
+    const observerRows = realObservers.map((o) => ({ name: o.name, simDelivered: delivered.has(curIdx(o)) }));
     const reached = observerRows.filter((o) => o.simDelivered).length;
     const recall = observerRows.length ? reached / observerRows.length : 1;
 
@@ -4690,7 +4714,8 @@
     const deafSet = new Set(lastEpisode.deafObservers || []);
     const overPredicted = [];
     for (const info of lastEpisode.allObservers || []) {
-      if (realHeard.has(info.index) || !delivered.has(info.index)) continue;
+      const idx = curIdx(info);
+      if (idx < 0 || realHeard.has(idx) || !delivered.has(idx)) continue;
       overPredicted.push({ name: info.name, deaf: deafSet.has(info.pubkey) });
     }
 
@@ -4723,7 +4748,9 @@
     probBody.innerHTML = "";
 
     if (!stats) {
-      recallEl.textContent = "Run the simulation to compare it against what really happened.";
+      recallEl.textContent = lastEpisode.target
+        ? "Run the simulation to compare it against what really happened."
+        : lastEpisode.targetNote || "No target packet to compare — the surrounding traffic is still reconstructed and tunable.";
       return;
     }
 
