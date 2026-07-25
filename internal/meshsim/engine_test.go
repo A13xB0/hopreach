@@ -173,10 +173,21 @@ func TestLoraCapturedRequiresLockThenMargin(t *testing.T) {
 		wantCaptured  bool
 	}{
 		{
-			name:          "interferer during preamble, huge SNR margin — still not captured",
+			// New (strength-aware) acquisition behaviour: a much weaker
+			// interferer arriving during the preamble no longer prevents
+			// lock — the strong wanted signal's preamble correlation wins
+			// acquisition. Previously this returned "not captured".
+			name:          "interferer during preamble, huge SNR margin — wanted wins acquisition",
 			otherStartMs:  tx.startMs + preambleMs/2,
 			wantedSNR:     20,
 			interfererSNR: -20,
+			wantCaptured:  true,
+		},
+		{
+			name:          "interferer during preamble, comparable strength — blocks lock",
+			otherStartMs:  tx.startMs + preambleMs/2,
+			wantedSNR:     4, // only 4 dB above the interferer, below the preamble capture margin — lock never acquired
+			interfererSNR: 0,
 			wantCaptured:  false,
 		},
 		{
@@ -1574,7 +1585,8 @@ func TestLoraCaptureOutcomeDistinguishesNoLockFromCorrupted(t *testing.T) {
 		interfererSNR float64
 		want          captureOutcome
 	}{
-		{"interferer during preamble — no_lock regardless of SNR margin", tx.startMs + preambleMs/2, 20, -20, outcomeNoLock},
+		{"interferer during preamble, comparable strength — no_lock", tx.startMs + preambleMs/2, 4, 0, outcomeNoLock},
+		{"interferer during preamble, much weaker — wanted wins acquisition", tx.startMs + preambleMs/2, 20, -20, outcomeCaptured},
 		{"interferer after lock, margin met — captured", tx.startMs + preambleMs + 50, 10, 0, outcomeCaptured},
 		{"interferer after lock, margin short — corrupted", tx.startMs + preambleMs + 50, 5, 0, outcomeCorrupted},
 	}
@@ -1599,13 +1611,14 @@ func TestRunCollisionKindNoLockDominatesCorrupted(t *testing.T) {
 
 	scenario := Scenario{
 		// 0: wanted signal's origin. 1: causes no_lock (starts alongside
-		// 0, inside its preamble window). 2: causes corrupted (starts
-		// after 0's lock deadline, with insufficient SNR margin). 3: the
-		// listener under test.
+		// 0, inside its preamble window, and is strong enough that 0 can't
+		// win acquisition over it — see the SNR note below). 2: causes
+		// corrupted (starts after 0's lock deadline, with insufficient SNR
+		// margin). 3: the listener under test.
 		Nodes: []SimNode{testNode(false), testNode(false), testNode(false), testNode(false)},
 		Links: []Link{
 			{From: 0, To: 3, SNRdB: 10},
-			{From: 1, To: 3, SNRdB: 0},
+			{From: 1, To: 3, SNRdB: 8}, // 10 - 8 = 2 < preambleCaptureMarginDB (6) — 0 can't capture over it during preamble, so lock never acquires (no_lock)
 			{From: 2, To: 3, SNRdB: 6}, // 10 - 6 = 4 < captureMarginDB (6) — insufficient margin, i.e. "corrupted" on its own
 		},
 	}

@@ -837,12 +837,27 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 				if channel.FadingSigmaDB > 0 {
 					effWantedSNR += channel.FadingSigmaDB * gaussian(rng)
 				}
-				// Partition every overlapping, audible interferer into those
-				// that arrive during the wanted packet's own preamble/sync
-				// window (which prevent lock entirely — no_lock) and those
-				// arriving after lock (whose COMBINED power decides
-				// corruption — see aggregateInterfererSNRdB).
-				var preambleInterferers []int
+				// Classify every overlapping, audible interferer. An
+				// interferer arriving during the wanted packet's own
+				// preamble/sync acquisition window contends for LOCK; one
+				// arriving after lock contends only at the PAYLOAD level.
+				//
+				// A preamble-window interferer no longer blocks lock
+				// unconditionally — that ignored signal strength, treating a
+				// 30 dB-weaker stray transmission as fatal to a strong
+				// wanted packet, which real LoRa preamble correlation does
+				// not (the receiver locks onto whichever preamble dominates).
+				// It blocks lock only when the wanted does NOT beat it by the
+				// capture margin; a preamble interferer the wanted dominates
+				// is demoted to a payload interferer (it's still on the air
+				// during the payload, so it still counts toward the aggregate
+				// corruption check below). This, combined with the fact that
+				// each reception is evaluated independently, also models the
+				// first-arrival/strength interplay correctly: a much-stronger
+				// packet arriving late still captures via ITS OWN reception's
+				// preamble check, while the earlier weaker packet it
+				// overpowers is corrupted via the aggregate.
+				var lockBlockers []int
 				var payloadInterferers []int
 				var payloadInterfererSNRs []float64
 				for i, other := range transmissions {
@@ -855,33 +870,38 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 					if !audibleTo(adj, other.sender, e.listener) {
 						continue
 					}
-					if startsBeforeLock(tx, other) {
-						// A preamble-window interferer prevents lock outright
-						// (see aggregation note below); its exact level never
-						// enters a margin comparison, so it isn't faded.
-						preambleInterferers = append(preambleInterferers, other.sender)
-					} else {
-						// Each post-lock interferer's own instantaneous level
-						// fades independently of the wanted signal — so the
-						// capture margin sees genuine both-sided channel
-						// variance, not just the wanted side (this was
-						// wanted-only in phase 7; both-sided is the faithful
-						// model). Only drawn when fading is enabled.
-						isnr := linkSNR(adj, other.sender, e.listener)
-						if channel.FadingSigmaDB > 0 {
-							isnr += channel.FadingSigmaDB * gaussian(rng)
-						}
-						payloadInterferers = append(payloadInterferers, other.sender)
-						payloadInterfererSNRs = append(payloadInterfererSNRs, isnr)
+					// Each interferer's own instantaneous level fades
+					// independently of the wanted signal — so both the
+					// acquisition (preamble) and payload capture margins see
+					// genuine both-sided channel variance. Only drawn when
+					// fading is enabled.
+					isnr := linkSNR(adj, other.sender, e.listener)
+					if channel.FadingSigmaDB > 0 {
+						isnr += channel.FadingSigmaDB * gaussian(rng)
 					}
+					if startsBeforeLock(tx, other) {
+						// Acquisition-stage capture: the wanted wins lock over
+						// this interferer only if it dominates it by the
+						// preamble capture margin. DisableCapture forces every
+						// preamble interferer to block lock (the pre-phase-1
+						// "any overlap is fatal" model).
+						if ab.DisableCapture || effWantedSNR-isnr < preambleCaptureMarginDB {
+							lockBlockers = append(lockBlockers, other.sender)
+							continue
+						}
+						// Wanted captured the preamble; the interferer persists
+						// into the payload and still contends there.
+					}
+					payloadInterferers = append(payloadInterferers, other.sender)
+					payloadInterfererSNRs = append(payloadInterfererSNRs, isnr)
 				}
-				anyInterferer := len(preambleInterferers) > 0 || len(payloadInterferers) > 0
+				anyInterferer := len(lockBlockers) > 0 || len(payloadInterferers) > 0
 				switch {
-				case len(preambleInterferers) > 0:
+				case len(lockBlockers) > 0:
 					// Lock never acquired — nothing was decoded at all.
 					// no_lock dominates: whatever a later, post-lock
 					// interferer would have done is moot without lock.
-					collidedWith = preambleInterferers
+					collidedWith = lockBlockers
 					collisionKind = "no_lock"
 				case len(payloadInterferers) > 0:
 					// Lock acquired; corruption is decided by the interferers'
@@ -1015,6 +1035,21 @@ func overlaps(aStart, aEnd, bStart, bEnd uint32) bool {
 // our own measured hardware behavior) and may need adjusting.
 const captureMarginDB = 6.0
 
+// preambleCaptureMarginDB is the acquisition-stage counterpart of
+// captureMarginDB: how much stronger the wanted signal must be than a
+// co-channel interferer arriving during its own preamble/sync window for
+// the receiver to still lock onto the wanted (rather than the interferer
+// preventing acquisition). Real LoRa preamble detection is a correlation
+// against a known chirp sequence, so a much weaker concurrent signal does
+// not stop a strong wanted packet from being acquired — the receiver locks
+// onto whichever preamble dominates. Kept EQUAL to captureMarginDB absent
+// evidence to differentiate the two stages; a separate named constant so it
+// can diverge if measured behavior ever warrants it (correlation processing
+// gain could make acquisition somewhat more forgiving than payload
+// rejection). Previously this stage had no strength test at all — any
+// preamble-window overlap was treated as fatal regardless of level.
+const preambleCaptureMarginDB = captureMarginDB
+
 // captureOutcome is the result of one wanted-transmission-vs-one-interferer
 // comparison — see loraCaptureOutcome. Three-valued rather than a bool
 // because a caller (the interferer loop in eventRxComplete) needs to know
@@ -1024,33 +1059,45 @@ type captureOutcome int
 
 const (
 	outcomeCaptured  captureOutcome = iota // the wanted signal survived this specific interferer
-	outcomeNoLock                          // this interferer arrived during preamble/sync acquisition — lock never established at all
+	outcomeNoLock                          // this interferer arrived during preamble/sync acquisition AND was strong enough to block lock
 	outcomeCorrupted                       // lock was achieved, but this interferer wasn't beaten by captureMarginDB
 )
 
 // loraCaptureOutcome reports whether tx (the wanted transmission, arriving
 // with wantedSNR at the listener) survives other's overlapping, audible
 // transmission (arriving with interfererSNR) via the capture effect, and if
-// not, which of the two physically distinct ways it failed.
+// not, which of the two physically distinct ways it failed. This is the
+// single-interferer reference primitive; the Run loop applies the same two
+// stages but aggregates the payload stage across all interferers at once
+// (which a single-pair function can't express).
 //
-// Two conditions, both real LoRa demodulator behavior, not just a strength
-// comparison:
+// Two stages, both real LoRa demodulator behavior, and BOTH now
+// strength-aware:
 //
-//  1. Timing: if other starts before tx's own preamble+sync window has
-//     elapsed (preambleDurationMs), the receiver's demodulator never
-//     locks onto tx at all — no signal is strong enough to "capture" a
-//     lock that was never acquired in the first place. This mirrors real
-//     firmware's own isReceivingPacket()/isChannelActive() distinction
+//  1. Acquisition (timing + strength): if other starts before tx's own
+//     preamble+sync window has elapsed (preambleDurationMs), it contends
+//     for lock. The receiver still locks onto tx if tx dominates other by
+//     preambleCaptureMarginDB (LoRa preamble correlation rejects a
+//     sufficiently weaker concurrent signal); otherwise lock never
+//     establishes (outcomeNoLock). This mirrors real firmware's own
+//     isReceivingPacket()/isChannelActive() distinction
 //     (src/helpers/radiolib/RadioLibWrappers.cpp) between merely detecting
 //     channel activity and having actually locked onto a specific packet's
-//     preamble.
-//  2. Strength: once locked (interference arrives during payload symbols,
-//     after tx's own preamble window), the receiver can reject a weaker
-//     co-channel interferer — captured if wantedSNR beats interfererSNR by
-//     at least captureMarginDB; otherwise the payload is corrupted.
+//     preamble. When tx wins acquisition over a weaker preamble interferer,
+//     that interferer then contends at the payload stage instead (in the
+//     Run loop; this single-pair function reports outcomeCaptured for it,
+//     since with only that one interferer present tx also wins the payload
+//     stage by the same margin).
+//  2. Payload (strength): once locked (interference arrives during payload
+//     symbols, after tx's own preamble window), the receiver can reject a
+//     weaker co-channel interferer — captured if wantedSNR beats
+//     interfererSNR by at least captureMarginDB; otherwise the payload is
+//     corrupted.
 func loraCaptureOutcome(wantedSNR, interfererSNR float64, tx, other transmission) captureOutcome {
-	lockDeadline := tx.startMs + uint32(preambleDurationMs(tx.radio))
-	if other.startMs < lockDeadline {
+	if startsBeforeLock(tx, other) {
+		if wantedSNR-interfererSNR >= preambleCaptureMarginDB {
+			return outcomeCaptured
+		}
 		return outcomeNoLock
 	}
 	if wantedSNR-interfererSNR >= captureMarginDB {

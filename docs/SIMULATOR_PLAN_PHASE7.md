@@ -120,6 +120,32 @@ flood graph:
   sees genuine both-sided channel variance. Still gated on the same
   `FadingSigmaDB` knob, so legacy (zero) behaviour is unchanged.
 
+## Third review pass — strength-aware preamble acquisition
+
+The first pass left preamble-window interference as "any overlap prevents
+lock, regardless of strength" — a conservative approximation. That treated
+a 30 dB-weaker stray transmission as fatal to a strong wanted packet, which
+real LoRa preamble correlation does not: the receiver locks onto whichever
+preamble dominates.
+
+Now the acquisition stage is strength-aware, symmetric with the payload
+stage. A preamble-window interferer blocks lock only when the wanted signal
+does NOT beat it by `preambleCaptureMarginDB` (kept equal to the payload
+`captureMarginDB` absent evidence to differentiate the stages; a separate
+named constant so it can diverge later). A preamble interferer the wanted
+dominates is demoted to a payload interferer — it's still on the air during
+the payload, so it still counts toward the aggregate corruption check.
+
+Because each reception is evaluated independently, this single symmetric
+rule also models the **first-arrival/strength interplay** correctly with no
+extra machinery: a much-stronger packet arriving late still captures via its
+OWN reception's preamble check, while the earlier weaker packet it
+overpowers is corrupted via that packet's own aggregate check. Comparable-
+strength overlaps still collide as `no_lock` on both sides. Covered by
+`TestRunStrongSignalWinsLockOverWeakPreambleInterferer` and
+`TestRunComparablePreambleInterferersStillCollide`, plus updated
+single-interferer unit tests.
+
 ## What is deliberately still approximate (and why it's the right call)
 
 - **The margin→SNR and observation-count→SNR mappings are proxies**, not
@@ -132,11 +158,6 @@ flood graph:
   two on different scales — worse, not better. Absolute-power calibration
   would also need hardware/foliage data the terrain model structurally
   lacks.
-- **Preamble-window interference prevents lock regardless of strength** (a
-  conservative choice — real LoRa preamble correlation can tolerate a much
-  weaker concurrent signal). Left as-is deliberately: strength-aware lock is
-  genuinely murkier physically than payload capture, and the conservative
-  model matches how the existing no_lock tests were written.
 - **The upstream terrain propagation model** (`internal/propagation`,
   FSPL + single knife-edge, no foliage/buildings) is a separate accuracy
   axis feeding `margin`. The planner's own LOS check shares the same

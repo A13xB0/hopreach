@@ -189,6 +189,83 @@ func TestCaptureAggregationCorruptsWherePairwiseWouldSurvive(t *testing.T) {
 	}
 }
 
+// --- strength-aware preamble acquisition ---------------------------------
+
+// TestRunStrongSignalWinsLockOverWeakPreambleInterferer is the end-to-end
+// proof of the strength-aware acquisition model: a much weaker transmission
+// overlapping a strong wanted packet's preamble window no longer prevents
+// lock (the old model treated ANY preamble overlap as fatal regardless of
+// level). The strong wanted packet is decoded; the weak interferer is
+// demoted to a payload interferer it also dominates, so the reception
+// survives via capture rather than colliding.
+func TestRunStrongSignalWinsLockOverWeakPreambleInterferer(t *testing.T) {
+	const strong, weak, listener = 0, 1, 2
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false), testNode(false)},
+		Links: []Link{
+			{From: strong, To: listener, SNRdB: 15},
+			{From: weak, To: listener, SNRdB: 0}, // 15 dB down — well beyond the preamble capture margin
+		},
+	}
+	// The weak interferer starts DURING the strong packet's preamble window
+	// (both at t=0) — the exact case the old model called an unconditional
+	// no_lock.
+	messages := []Message{
+		{Origin: strong, SendAtMs: 0, PayloadLen: 20},
+		{Origin: weak, SendAtMs: 0, PayloadLen: 20},
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	var atListenerFromStrong *Reception
+	for i := range report.Receptions {
+		r := &report.Receptions[i]
+		if r.Node == listener && r.FromNode == strong {
+			atListenerFromStrong = r
+		}
+	}
+	if atListenerFromStrong == nil {
+		t.Fatal("expected a reception at the listener from the strong sender")
+	}
+	if atListenerFromStrong.Collided {
+		t.Errorf("expected the strong signal to win lock over a 15 dB-weaker preamble interferer, got Collided=true (%s): %+v", atListenerFromStrong.CollisionKind, atListenerFromStrong)
+	}
+	if !atListenerFromStrong.SurvivedCapture {
+		t.Errorf("expected SurvivedCapture=true (a weaker interferer was present but lost), got: %+v", atListenerFromStrong)
+	}
+}
+
+// TestRunComparablePreambleInterferersStillCollide is the complementary
+// guard: two comparable-strength transmissions whose preambles overlap must
+// STILL collide (neither dominates acquisition) — strength-awareness must
+// not turn a genuine collision into a spurious capture.
+func TestRunComparablePreambleInterferersStillCollide(t *testing.T) {
+	const a, b, listener = 0, 1, 2
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false), testNode(false)},
+		Links: []Link{
+			{From: a, To: listener, SNRdB: 3},
+			{From: b, To: listener, SNRdB: 0}, // only 3 dB apart — below the capture margin either way
+		},
+	}
+	messages := []Message{
+		{Origin: a, SendAtMs: 0, PayloadLen: 20},
+		{Origin: b, SendAtMs: 0, PayloadLen: 20},
+	}
+
+	report := Run(scenario, messages, zeroRNG{}, 60_000)
+
+	for i := range report.Receptions {
+		r := &report.Receptions[i]
+		if r.Node != listener {
+			continue
+		}
+		if !r.Collided || r.CollisionKind != "no_lock" {
+			t.Errorf("expected both comparable-strength preamble-overlapping receptions to collide as no_lock, got: %+v", r)
+		}
+	}
+}
+
 // rngFunc adapts a plain func to the RNG interface for tests.
 type rngFunc func(int) int
 
