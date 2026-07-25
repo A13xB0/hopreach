@@ -586,6 +586,9 @@ header .subtitle {
    row colour — same word-labels-not-colour reasoning as the policy
    profile breakdown above. */
 .sim-optimize-round-kept { color: #4ade80; }
+/* Phase 8 — a before/after problem count that got WORSE after a change. */
+.sim-episode-worse { color: #f87171; }
+#sim-episode-modal { width: min(920px, 100%); }
 /* Phase 6 work item H — an accepted flood.max reduction always carries a
    reachability warning (see internal/meshsim.OptimizeDeviation.Warning's
    own doc comment on why: the delivery gate can't see topology the

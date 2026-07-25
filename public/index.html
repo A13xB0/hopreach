@@ -256,6 +256,7 @@
           <button id="sim-open-predictions-modal" class="hidden">🎯 Predicted settings</button>
           <button id="sim-rankings-expand" class="hidden">🏆 Rankings</button>
           <button id="sim-open-optimize-modal" class="hidden">🎯🔁 Optimization</button>
+          <button id="sim-open-episode-modal" class="hidden" title="Compare the reconstructed real episode's simulation against what actually happened, and track problems before/after your changes">🛰️ Episode analysis</button>
         </div>
 
         <div class="plan-section-title">Stress test</div>
@@ -445,6 +446,36 @@
         <div class="sim-subsection-title">Real links our model doesn't predict</div>
         <div class="plan-hint">CoreScope proved this hop actually happened, but our model never even considers it possible — likely means the real link is longer/better than this tool's default planning assumptions (range cap, antenna heights, terrain), not that anything is wrong with the real network.</div>
         <div id="sim-unmodeled-list" class="plan-list"></div>
+      </div>
+      <div class="sim-modal-footer"><button data-close>Close</button></div>
+    </div>
+
+    <div id="sim-episode-modal" class="sim-modal hidden" role="dialog" aria-modal="true" aria-labelledby="sim-episode-modal-title" tabindex="-1">
+      <div class="sim-modal-header"><span id="sim-episode-modal-title">Episode analysis — actual vs predicted</span><button data-close aria-label="Close">✕</button></div>
+      <div class="sim-modal-body">
+        <div id="sim-episode-provenance" class="plan-hint"></div>
+        <div class="plan-hint">Reconstructed from real CoreScope observations. Second-resolution timestamps mean this reproduces the traffic <em>load</em> with plausible sub-second timing, not the exact instant every packet collided — a settings win is worth confirming across a few seeds (change the seed above and re-run).</div>
+
+        <div class="sim-subsection-title">This packet: did our simulation deliver where reality did?</div>
+        <div id="sim-episode-recall" class="plan-hint"></div>
+        <div class="sim-config-table-scroll">
+          <table class="sim-config-table">
+            <thead><tr><th class="sim-col-sticky">Observer</th><th>Heard it (real)</th><th>Our sim delivered</th><th>Verdict</th></tr></thead>
+            <tbody id="sim-episode-observers-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="sim-subsection-title">Problems — before vs after your changes</div>
+        <div class="plan-hint">Run once to see the baseline, then change settings (or run the optimizer) and run again. "Set current as baseline" pins a reference so the delta always compares against the state you chose.</div>
+        <div class="plan-row">
+          <button id="sim-episode-set-baseline" title="Pin the current run as the reference the before/after delta compares against">📌 Set current as baseline</button>
+        </div>
+        <div class="sim-config-table-scroll">
+          <table class="sim-config-table">
+            <thead><tr><th class="sim-col-sticky">Problem</th><th>Baseline</th><th>Now</th><th>Change</th></tr></thead>
+            <tbody id="sim-episode-problems-tbody"></tbody>
+          </table>
+        </div>
       </div>
       <div class="sim-modal-footer"><button data-close>Close</button></div>
     </div>

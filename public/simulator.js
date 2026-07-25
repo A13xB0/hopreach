@@ -49,6 +49,13 @@
   // generators (which don't map 1:1 to packetIds once expanded).
   let lastMessages = null;
   let selectedPacketId = null;
+  // A reconstructed CoreScope episode (see reconstructEpisodeFromWindow):
+  // provenance plus the real observations needed to compare our simulation
+  // against what actually happened. null unless an episode is loaded.
+  let lastEpisode = null;
+  // A pinned baseline run's problem counts, for the before/after delta (see
+  // renderEpisodeAnalysis / setEpisodeBaseline). null until pinned.
+  let episodeBaseline = null;
   let linksGeneration = 0;
   // Terrain grid from the last "model"/"blend" link build, reused so
   // predictSettings() can look up each node's altitude without a second
@@ -392,6 +399,9 @@
     simNodes = [];
     simMessageGenerators = [];
     simNodePrefsOverrides = {};
+    lastEpisode = null;
+    episodeBaseline = null;
+    document.getElementById("sim-open-episode-modal").classList.add("hidden");
     invalidateLinks();
     renderNodeList();
     renderMessageNodeOptions();
@@ -499,6 +509,11 @@
       seed: document.getElementById("sim-seed").value,
       maxSimTimeMs: document.getElementById("sim-max-time").value,
       trials: document.getElementById("sim-trials").value,
+      // A reconstructed CoreScope episode's provenance + real observations,
+      // so reloading the setup restores the actual-vs-predicted comparison
+      // (docs/SIMULATOR_PLAN_PHASE8.md work item 5). Already plain
+      // arrays/objects, so it serialises directly.
+      episode: lastEpisode || undefined,
     };
     saveAllSetups(all);
     currentSetupId = id;
@@ -544,6 +559,11 @@
     document.getElementById("sim-trials").value = s.trials != null ? s.trials : 20;
     document.getElementById("sim-setup-name").value = s.name || "";
     cachedGrid = null; // stale for this node set even if links came along
+
+    // Restore (or clear) the reconstructed-episode analysis for this setup.
+    lastEpisode = s.episode || null;
+    episodeBaseline = null;
+    document.getElementById("sim-open-episode-modal").classList.toggle("hidden", !lastEpisode);
 
     // Keep the monotonic companion counter ahead of anything just loaded,
     // so a newly-placed companion never collides with a restored one's
@@ -933,7 +953,9 @@
       const n = simNodes.find((x) => x.id === tr.dataset.nodeId);
       if (!n) return;
       const override = {};
-      const radio = { ...effectivePrefsFor(n).radio };
+      const beforePrefs = effectivePrefsFor(n);
+      const beforeRadio = beforePrefs.radio;
+      const radio = { ...beforeRadio };
       let radioTouched = false;
       tr.querySelectorAll("[data-field]").forEach((el) => {
         const field = el.dataset.field;
@@ -983,16 +1005,21 @@
       });
       if (radioTouched) override.radio = radio;
       simNodePrefsOverrides[n.id] = override;
-      if (radioTouched) radioChanged = true;
+      // A modelled link's baked-in SNR depends on the receiver's SF (see
+      // receiverSf) and each node's own tx power (buildLinksFromModel's
+      // txPowerDelta) — so those must invalidate the built links. But EVERY
+      // row carries radio inputs, so "a radio field was present" is not a
+      // change: compare the applied values to what the node already had, and
+      // only invalidate on a REAL radio/power difference. Otherwise a
+      // flood.max / loop.detect / hash-size edit would wrongly wipe the
+      // connectivity (which for a reconstructed episode is precious real
+      // proven topology that "Build links" can't recreate).
+      const radioReallyChanged =
+        radio.freqMhz !== beforeRadio.freqMhz || radio.bwKhz !== beforeRadio.bwKhz || radio.sf !== beforeRadio.sf || radio.cr !== beforeRadio.cr;
+      const powerReallyChanged = override.txPowerDbm != null && override.txPowerDbm !== beforePrefs.txPowerDbm;
+      if (radioReallyChanged || powerReallyChanged) radioChanged = true;
       applied++;
     });
-    // A modelled link's baked-in SNR depends on the receiver's SF (see
-    // receiverSf) AND, now, each node's own tx power (see
-    // buildLinksFromModel's txPowerDelta) — both edited in this modal — so
-    // any radio/power change must invalidate the built links for the
-    // reception model to stay consistent. radioChanged is set whenever a
-    // radio field was applied (every row carries them), which also covers
-    // the tx-power case, so this rebuilds conservatively on Apply.
     if (radioChanged) invalidateLinks();
     // Re-render the Message senders picker/list — they can render
     // node-derived state (e.g. the picker's own option text), which would
@@ -1679,6 +1706,7 @@
       renderResults(report);
       renderSentMessagesList();
       renderRankings(report);
+      if (lastEpisode) renderEpisodeAnalysis(); // refresh actual-vs-predicted / before-after against this run
       startReplay();
       setStatus("sim-status", "Done.");
       // Deliberately doesn't open the Results modal automatically — its
@@ -4397,14 +4425,26 @@
 
       const dir = await ensureNodeDirectory();
 
+      // "Path records" the topology is built from: every window packet (the
+      // list gives one representative observation each), PLUS the target
+      // packet's OWN full set of observations (from its detail) — the latter
+      // is essential, because the window list carries only one path per
+      // packet, so the target's other real paths to the very observers we
+      // compare against would otherwise be missing from the graph (and our
+      // sim would spuriously "fail" to deliver to them).
+      const targetOrigin = originPubkeyOfPacket(detail.packet || {});
+      const pathRecords = packets.map((p) => ({ path: (p.resolved_path || []).map((x) => (x || "").toLowerCase()), observer: (p.observer_id || "").toLowerCase(), origin: originPubkeyOfPacket(p) }));
+      for (const o of detail.observations || []) {
+        pathRecords.push({ path: (o.resolved_path || []).map((x) => (x || "").toLowerCase()), observer: (o.observer_id || "").toLowerCase(), origin: targetOrigin });
+      }
+
       // Collect every node that appears in the window (relay, observer, or
       // advert origin) and has a known position — those become the sim nodes.
       const involved = new Set();
-      for (const p of packets) {
-        for (const k of p.resolved_path || []) if (k) involved.add(k.toLowerCase());
-        if (p.observer_id) involved.add(p.observer_id.toLowerCase());
-        const o = originPubkeyOfPacket(p);
-        if (o) involved.add(o);
+      for (const r of pathRecords) {
+        for (const k of r.path) if (k) involved.add(k);
+        if (r.observer) involved.add(r.observer);
+        if (r.origin) involved.add(r.origin);
       }
       const pubkeys = [...involved].filter((k) => dir.has(k));
       if (pubkeys.length < 2) throw new Error("fewer than 2 positioned nodes in the window — nothing to reconstruct");
@@ -4427,13 +4467,10 @@
         if (fi == null || ti == null || fi === ti) return;
         edgeMap.set(`${fi}:${ti}`, { from: fi, to: ti, snrDb: 20 });
       };
-      for (const p of packets) {
-        const path = (p.resolved_path || []).map((x) => (x || "").toLowerCase());
-        const o = originPubkeyOfPacket(p);
-        if (o && path[0]) addEdge(o, path[0]);
-        for (let i = 0; i + 1 < path.length; i++) addEdge(path[i], path[i + 1]);
-        const obs = (p.observer_id || "").toLowerCase();
-        if (path.length && obs) addEdge(path[path.length - 1], obs);
+      for (const r of pathRecords) {
+        if (r.origin && r.path[0]) addEdge(r.origin, r.path[0]);
+        for (let i = 0; i + 1 < r.path.length; i++) addEdge(r.path[i], r.path[i + 1]);
+        if (r.path.length && r.observer) addEdge(r.path[r.path.length - 1], r.observer);
       }
 
       // Blend in the propagation model to fill the gaps a single sparse
@@ -4447,7 +4484,14 @@
       let modelAdded = 0;
       try {
         setStatus("sim-replay-hash-status", "Filling connectivity gaps with the terrain model…");
-        const modelLinks = await buildLinksFromModel(nodes);
+        // Race the terrain fetch against a timeout — real repeaters can be
+        // spread across the whole region, and a large or slow DEM fetch must
+        // never hang the reconstruction. Proven edges alone are a complete,
+        // validated fallback.
+        const modelLinks = await Promise.race([
+          buildLinksFromModel(nodes),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("terrain fetch timed out")), 15000)),
+        ]);
         for (const l of modelLinks) {
           const key = `${l.from}:${l.to}`;
           if (!edgeMap.has(key)) {
@@ -4456,7 +4500,7 @@
           }
         }
       } catch {
-        /* terrain unavailable / area too large — proven edges alone still work */
+        /* terrain unavailable / too large / too slow — proven edges alone still work */
       }
       const links = [...edgeMap.values()];
 
@@ -4467,6 +4511,7 @@
       // background transmission at its first observed hop, loading the channel
       // without being routed.
       const generators = [];
+      let targetGen = null;
       let floodCount = 0;
       let bgCount = 0;
       let skipped = 0;
@@ -4487,7 +4532,7 @@
             skipped++;
             continue;
           }
-          generators.push({
+          const gen = {
             id: randomId(),
             fixed: true,
             nodeIndex: oi,
@@ -4501,7 +4546,9 @@
             background: false,
             sourceHash: p.hash,
             isTarget: p.hash === hash,
-          });
+          };
+          generators.push(gen);
+          if (gen.isTarget) targetGen = gen;
           floodCount++;
         } else {
           const firstHop = path[0];
@@ -4525,6 +4572,51 @@
           bgCount++;
         }
       }
+
+      // The target packet's real observers (those our reconstructed node set
+      // actually contains), and every observer seen anywhere in the window
+      // (for the observer-deafness check) — the ground truth the episode
+      // analysis compares our simulation against.
+      // Deduped by node — the SAME observer often appears in several
+      // observations (different relay paths / times); it's still one repeater
+      // that heard the packet once, so it counts once toward recall.
+      const targetObsMap = new Map();
+      for (const o of detail.observations || []) {
+        const k = (o.observer_id || "").toLowerCase();
+        if (indexByPubkey.has(k) && !targetObsMap.has(k)) targetObsMap.set(k, { pubkey: k, name: o.observer_name || k.slice(0, 8), index: indexByPubkey.get(k) });
+      }
+      const targetObservers = [...targetObsMap.values()];
+      const allObserversMap = new Map(); // pubkey -> {pubkey, name, index}
+      for (const p of packets) {
+        const k = (p.observer_id || "").toLowerCase();
+        if (indexByPubkey.has(k) && !allObserversMap.has(k)) allObserversMap.set(k, { pubkey: k, name: p.observer_name || k.slice(0, 8), index: indexByPubkey.get(k) });
+      }
+      const allObservers = [...allObserversMap.values()]; // plain array so lastEpisode serialises into a saved setup
+      const targetMsRounded = Math.floor(targetMs / 1000);
+      // Which observers were themselves transmitting (a relay of ANY window
+      // packet) in the same second as the target — those were plausibly deaf
+      // (half-duplex) and their NOT hearing the target isn't a prediction
+      // failure. Second-resolution timing is all we have, so "same second".
+      const deafSet = new Set();
+      for (const p of packets) {
+        const pSec = Math.floor((Date.parse(p.timestamp) || 0) / 1000);
+        if (Math.abs(pSec - targetMsRounded) > 1) continue;
+        for (const relay of p.resolved_path || []) {
+          const rk = (relay || "").toLowerCase();
+          if (allObserversMap.has(rk)) deafSet.add(rk);
+        }
+      }
+
+      lastEpisode = {
+        hash,
+        windowSecs,
+        fetchedAt: new Date().toISOString(),
+        target: targetGen ? { nodeIndex: targetGen.nodeIndex, atMs: targetGen.atMs } : null,
+        targetObservers,
+        allObservers,
+        deafObservers: [...deafSet],
+      };
+      episodeBaseline = null;
 
       // Commit to the workspace (same shape applySetupData leaves it in).
       simNodes = nodes;
@@ -4556,11 +4648,149 @@
         const lons = nodes.map((n) => n.lon);
         map.fitBounds([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]], { padding: [40, 40], maxZoom: 12 });
       }
+      // Surface the episode-analysis entry point now that an episode is
+      // loaded; a normal run below fills it in.
+      document.getElementById("sim-open-episode-modal").classList.remove("hidden");
     } catch (err) {
       setStatus("sim-replay-hash-status", `Reconstruction failed: ${err.message || err}`);
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // Computes the episode's own actual-vs-predicted figures for the target
+  // packet plus the run's problem counts — the raw material both the observer
+  // table and the before/after delta render from. Returns null unless an
+  // episode is loaded and its target flood is present in this run.
+  function computeEpisodeStats(report, messages) {
+    if (!lastEpisode || !lastEpisode.target) return null;
+    const t = lastEpisode.target;
+    let targetPid = -1;
+    for (let i = 0; i < messages.length; i++) {
+      if (!messages[i].background && messages[i].origin === t.nodeIndex && messages[i].sendAtMs === t.atMs) {
+        targetPid = i;
+        break;
+      }
+    }
+    if (targetPid < 0) return null;
+
+    const delivered = new Set();
+    for (const r of report.receptions || []) {
+      if (r.packetId === targetPid && isCanonicalDelivery(r)) delivered.add(r.node);
+    }
+    const realHeard = new Set(lastEpisode.targetObservers.map((o) => o.index));
+    const observerRows = lastEpisode.targetObservers.map((o) => ({ name: o.name, simDelivered: delivered.has(o.index) }));
+    const reached = observerRows.filter((o) => o.simDelivered).length;
+    const recall = observerRows.length ? reached / observerRows.length : 1;
+
+    // Observers our sim delivered the target to, that reality's observation
+    // list does NOT include — either an over-prediction, or the observer was
+    // itself transmitting (deaf) at the time, which our differently-timed sim
+    // didn't reproduce (phase 5's observer-deafness point).
+    const deafSet = new Set(lastEpisode.deafObservers || []);
+    const overPredicted = [];
+    for (const info of lastEpisode.allObservers || []) {
+      if (realHeard.has(info.index) || !delivered.has(info.index)) continue;
+      overPredicted.push({ name: info.name, deaf: deafSet.has(info.pubkey) });
+    }
+
+    const collisions = (report.receptions || []).filter((r) => r.collided).length;
+    return {
+      observerRows,
+      overPredicted,
+      recall,
+      reached,
+      realCount: observerRows.length,
+      problems: {
+        "Real deliveries our sim missed": observerRows.length - reached,
+        "Collisions across the run": collisions,
+        "Reception delivery recall": Math.round(recall * 100),
+      },
+      recallIsPercent: true,
+    };
+  }
+
+  function renderEpisodeAnalysis() {
+    if (!lastEpisode) return;
+    document.getElementById("sim-episode-provenance").innerHTML =
+      `Reconstructed from packet <code>${escapeHtml(lastEpisode.hash)}</code> · ±${lastEpisode.windowSecs}s window · fetched ${escapeHtml(new Date(lastEpisode.fetchedAt).toLocaleString())}.`;
+
+    const stats = lastReport ? computeEpisodeStats(lastReport, lastMessages || []) : null;
+    const recallEl = document.getElementById("sim-episode-recall");
+    const obsBody = document.getElementById("sim-episode-observers-tbody");
+    const probBody = document.getElementById("sim-episode-problems-tbody");
+    obsBody.innerHTML = "";
+    probBody.innerHTML = "";
+
+    if (!stats) {
+      recallEl.textContent = "Run the simulation to compare it against what really happened.";
+      return;
+    }
+
+    recallEl.innerHTML =
+      `Our simulation delivered this packet to <strong>${stats.reached} of ${stats.realCount}</strong> repeaters that really heard it (${Math.round(stats.recall * 100)}% recall).` +
+      (stats.overPredicted.length
+        ? ` It also delivered to ${stats.overPredicted.length} observer(s) reality didn't record — ${stats.overPredicted.filter((o) => o.deaf).length} of them were transmitting (deaf) at the time, so that's expected, not a miss.`
+        : "");
+
+    if (stats.observerRows.length === 0) {
+      obsBody.innerHTML = '<tr><td colspan="4" class="plan-empty">None of this packet\'s real observers are in the reconstructed node set.</td></tr>';
+    } else {
+      for (const o of stats.observerRows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="sim-col-sticky">${escapeHtml(o.name)}</td>
+          <td>✓ yes</td>
+          <td class="${o.simDelivered ? "sim-optimize-round-kept" : ""}">${o.simDelivered ? "✓ yes" : "✕ no"}</td>
+          <td>${o.simDelivered ? "match" : "our sim missed a real delivery"}</td>
+        `;
+        obsBody.appendChild(tr);
+      }
+      for (const o of stats.overPredicted) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="sim-col-sticky">${escapeHtml(o.name)}</td>
+          <td>${o.deaf ? "— (was transmitting)" : "✕ no"}</td>
+          <td>✓ yes</td>
+          <td>${o.deaf ? "observer was deaf (half-duplex) — expected" : "our sim over-predicted, or a real miss we can't explain"}</td>
+        `;
+        obsBody.appendChild(tr);
+      }
+    }
+
+    // Before/after problem delta.
+    const now = stats.problems;
+    const base = episodeBaseline;
+    const keys = Object.keys(now);
+    for (const k of keys) {
+      const nowVal = now[k];
+      const baseVal = base ? base[k] : null;
+      const isRecall = k.includes("recall");
+      let deltaText = "—";
+      if (base != null && baseVal != null) {
+        const d = nowVal - baseVal;
+        const good = isRecall ? d > 0 : d < 0;
+        const bad = isRecall ? d < 0 : d > 0;
+        deltaText = d === 0 ? "no change" : `<span class="${good ? "sim-optimize-round-kept" : bad ? "sim-episode-worse" : ""}">${d > 0 ? "+" : ""}${d}${isRecall ? " pts" : ""}</span>`;
+      }
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="sim-col-sticky">${escapeHtml(k)}${isRecall ? " %" : ""}</td>
+        <td>${base ? baseVal : "—"}</td>
+        <td>${nowVal}</td>
+        <td>${deltaText}</td>
+      `;
+      probBody.appendChild(tr);
+    }
+  }
+
+  function setEpisodeBaseline() {
+    if (!lastEpisode || !lastReport) return;
+    const stats = computeEpisodeStats(lastReport, lastMessages || []);
+    if (!stats) return;
+    episodeBaseline = { ...stats.problems };
+    renderEpisodeAnalysis();
+    setStatus("sim-status", "Pinned the current run as the before/after baseline.");
   }
 
   // Every hop of every packet observed in the window, in chronological
@@ -5274,6 +5504,11 @@
   document.getElementById("sim-open-predictions-modal").addEventListener("click", () => openModal("sim-predictions-modal"));
   document.getElementById("sim-open-stress-modal").addEventListener("click", () => openModal("sim-stress-modal"));
   document.getElementById("sim-open-bottleneck-modal").addEventListener("click", () => openModal("sim-bottleneck-modal"));
+  document.getElementById("sim-open-episode-modal").addEventListener("click", () => {
+    renderEpisodeAnalysis();
+    openModal("sim-episode-modal");
+  });
+  document.getElementById("sim-episode-set-baseline").addEventListener("click", setEpisodeBaseline);
   document.getElementById("sim-modal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "sim-modal-backdrop") closeModals();
   });
@@ -5303,6 +5538,7 @@
     // test confirm a built link's SNR actually responds to per-node
     // antenna height / tx power (see buildLinksFromModel).
     getLink: (from, to) => simLinks.find((l) => l.from === from && l.to === to),
+    getEpisode: () => lastEpisode,
     getMessageCount: () => messagesFromState(parseInt(document.getElementById("sim-seed").value, 10) || 0).length,
     getMessageGeneratorCount: () => simMessageGenerators.length,
     getLastReport: () => lastReport,

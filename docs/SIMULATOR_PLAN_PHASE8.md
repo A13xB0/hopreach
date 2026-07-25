@@ -1,14 +1,33 @@
 # Simulator plan, phase 8 — reproduce and repair real network episodes
 
-Status: **work items 1, 2, and the engine + metric parts of 4 built.** You
-can now reconstruct a real CoreScope time window as a fully editable
-simulator setup (real repeaters, blended real-proven + terrain-model
-connectivity, and every real packet as a flood sender with its real payload
-or a fixed background transmission), then run / tweak settings / run the
-optimizer and re-run. Still to build: the whole-window actual-vs-predicted
-comparison with observer-deafness classification (work item 3), the polished
-before/after problem-count delta (rest of work item 4), and the provenance/
-re-roll reproducibility affordances (work item 5).
+Status: **complete — all work items built and verified.** Reconstruct a real
+CoreScope time window as a fully editable simulator setup (real repeaters,
+blended real-proven + terrain-model connectivity, every real packet as a
+flood sender with its real payload or a fixed background transmission), then
+an **Episode analysis** panel compares the simulation against what actually
+happened (per-observer actual-vs-predicted with observer-deafness
+classification) and tracks problem counts **before/after** your changes.
+Tweak settings or run the optimizer, re-run, and watch the deltas. The
+episode (provenance + real observations) saves and restores with the setup;
+a fixed seed makes re-runs deterministic, and changing the seed re-rolls the
+plausible sub-second timing to confirm a win isn't luck.
+
+Three real bugs were found and fixed while building it:
+- **Over-aggressive link invalidation (a phase-7 regression affecting ALL
+  users):** the repeaters modal's Apply invalidated the built links on every
+  commit — because every row carries radio inputs, "a radio field was
+  present" was mistaken for "radio changed." So editing flood.max / loop.
+  detect / hash size silently wiped connectivity (and, for a reconstructed
+  episode, its irreplaceable real proven topology). Now only a genuine
+  radio/tx-power value change invalidates.
+- **Incomplete target topology:** the window list gives one observation per
+  packet, so the target's other real paths (to the very observers we compare
+  against) were missing. Now the target's full detail observations are folded
+  into the reconstruction — recall went from a meaningless 0% to a real 80%.
+- **Terrain-blend hang / observer duplicates:** the model-fill fetch could
+  hang on widely-spread nodes (now raced against a timeout), and the same
+  observer appearing in several observations was counted multiple times
+  toward recall (now deduped by node).
 
 ### Real finding from building it: the live traffic rate is low
 

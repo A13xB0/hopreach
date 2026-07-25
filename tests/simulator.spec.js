@@ -1227,3 +1227,58 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
     await expect(page.locator("#sim-bottleneck-replay-status")).not.toHaveText("");
   }
 });
+
+test("reconstructs a real CoreScope window as an editable episode with actual-vs-predicted analysis", async ({ page, request }) => {
+  test.slow();
+
+  // Find a flood packet (route 0/1) with a resolvable path — the same
+  // liveness guard the bottleneck-replay test uses, since CoreScope's own
+  // path resolution can legitimately be empty for a given packet.
+  const packetsResp = await request.get("/corescope-api/api/packets?limit=60");
+  expect(packetsResp.ok()).toBeTruthy();
+  const packetsData = await packetsResp.json();
+  const floods = (packetsData.packets || []).filter((p) => (p.route_type === 0 || p.route_type === 1) && p.observation_count > 1);
+  let candidateHash = null;
+  for (const p of floods.slice(0, 12)) {
+    const detailResp = await request.get(`/corescope-api/api/packets/${p.hash}`);
+    if (!detailResp.ok()) continue;
+    const detail = await detailResp.json();
+    if ((detail.observations || []).some((o) => Array.isArray(o.resolved_path) && o.resolved_path.length > 0 && o.resolved_path[0])) {
+      candidateHash = p.hash;
+      break;
+    }
+  }
+  test.skip(!candidateHash, "no flood packet with resolvable path data currently available from CoreScope");
+
+  await page.click("#sim-toggle");
+  await page.fill("#sim-replay-hash-input", candidateHash);
+  await page.fill("#sim-replay-window-secs", "20");
+  await page.click("#sim-reconstruct-episode");
+  // Reconstruction ends by re-enabling its button and reporting success — wait
+  // for the completed state, not just the episode entry point becoming visible
+  // (which can race the node commit under parallel load).
+  await expect(page.locator("#sim-reconstruct-episode")).toBeEnabled({ timeout: 120_000 });
+  await expect(page.locator("#sim-status")).toContainText("Reconstructed", { timeout: 5_000 });
+  await expect(page.locator("#sim-open-episode-modal")).toBeVisible();
+
+  // A runnable scenario was loaded from real data.
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBeGreaterThan(1);
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getLinkCount())).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getMessageGeneratorCount())).toBeGreaterThan(0);
+  const episode = await page.evaluate(() => window.__hopreachSimulatorDebug.getEpisode());
+  expect(episode.hash).toBe(candidateHash);
+
+  // Run it, then the episode analysis compares our simulation to reality.
+  await page.click("#sim-run");
+  await page.waitForFunction(() => window.__hopreachSimulatorDebug.getLastReport() !== null, { timeout: 60_000 });
+  await page.click("#sim-open-episode-modal");
+  await expect(page.locator("#sim-episode-modal")).toBeVisible();
+  await expect(page.locator("#sim-episode-provenance")).toContainText(candidateHash);
+  await expect(page.locator("#sim-episode-recall")).toContainText(/delivered this packet to/);
+  // The before/after problem table always has its three rows.
+  await expect(page.locator("#sim-episode-problems-tbody tr")).toHaveCount(3);
+
+  // Pin a baseline, and the delta column becomes populated.
+  await page.click("#sim-episode-set-baseline");
+  await expect(page.locator("#sim-episode-problems-tbody tr").first()).toContainText("no change");
+});
