@@ -146,6 +146,29 @@ strength overlaps still collide as `no_lock` on both sides. Covered by
 `TestRunComparablePreambleInterferersStillCollide`, plus updated
 single-interferer unit tests.
 
+## Fourth review pass — radio compatibility gating
+
+The per-node radio override lets a user set one repeater to a different
+spreading factor / frequency, but `buildLinksFromModel` created a link
+purely from geometry, ignoring whether the two radios could actually
+communicate. A LoRa receiver must match the transmitter's centre
+frequency, bandwidth, and spreading factor to demodulate at all — so a link
+between a SF8 node and a SF12 node, or between two nodes on different
+frequencies, is physically impossible, yet the sim rendered it as real
+connectivity.
+
+Fixed: `buildLinksFromModel` now requires `radiosCompatible` (same freq,
+bandwidth, SF — CR rides in the explicit header and needn't match) before
+forming a link. Every node defaults to the same preset, so a normal
+uniform-config mesh — the only kind real MeshCore runs — is entirely
+unchanged (verified: the default fixture still forms both links; switching
+one node to SF12 correctly drops the links to zero). Because interference
+audibility also flows through links (`engine.go` `audibleTo` needs a Link),
+this single gate keeps decoding AND interference consistent — mismatched
+radios neither hear nor jam each other. Observed CoreScope links are never
+gated: if two real repeaters actually heard each other, they were
+compatible in reality.
+
 ## What is deliberately still approximate (and why it's the right call)
 
 - **The margin→SNR and observation-count→SNR mappings are proxies**, not
@@ -158,6 +181,25 @@ single-interferer unit tests.
   two on different scales — worse, not better. Absolute-power calibration
   would also need hardware/foliage data the terrain model structurally
   lacks.
+- **Same-frequency, different-SF interference** is treated as no
+  interference (the two nodes get no link, so they don't jam each other),
+  whereas in reality co-frequency signals on different SFs are only
+  *quasi*-orthogonal and interfere weakly. This only arises under a
+  deliberately mixed-SF config (a misconfiguration for real MeshCore, which
+  is uniform-SF), and the link gate errs toward "these nodes are on
+  effectively separate channels," which is the closer of the two available
+  approximations.
+- **Sub-threshold interferers raise the noise floor but are ignored.** Only
+  decodable-strength interferers (those with a link) are considered as
+  interference; a swarm of individually-undecodable weak signals that would
+  collectively lift the noise floor isn't modelled. Second-order, and
+  modelling it would require carrying sub-threshold links the rest of the
+  engine has no use for.
+- **Channel fades are drawn sequentially, not per-(link, packet).** This
+  means two candidate policies in the optimizer don't see perfectly common
+  random channel draws (they already didn't, for relay-delay draws) — a
+  minor variance-reduction loss the racing/confirmation machinery already
+  absorbs, not a correctness issue.
 - **The upstream terrain propagation model** (`internal/propagation`,
   FSPL + single knife-edge, no foliage/buildings) is a separate accuracy
   axis feeding `margin`. The planner's own LOS check shares the same

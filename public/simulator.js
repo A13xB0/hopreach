@@ -1197,6 +1197,26 @@
     return effectivePrefsFor(node).radio.sf;
   }
 
+  // Two nodes can only form a modelled radio link if their radios are
+  // actually compatible — a LoRa receiver must match the transmitter's
+  // centre frequency, bandwidth, and spreading factor to demodulate at
+  // all (CR rides in the explicit header, so it needn't match). Nodes on
+  // different frequencies genuinely cannot hear each other, and a SF8
+  // receiver cannot decode a SF12 transmission. Every node defaults to the
+  // same preset, so this changes nothing for a normal uniform-config mesh
+  // (the only kind real MeshCore runs) — it only stops the per-node radio
+  // override from silently producing physically-impossible links between
+  // mismatched radios, which would otherwise read as connectivity that
+  // could never exist. Because interference audibility also flows through
+  // links (see engine.go audibleTo), this one gate keeps both decoding and
+  // interference consistent: mismatched-radio nodes neither hear nor jam
+  // each other.
+  function radiosCompatible(a, b) {
+    const ra = effectivePrefsFor(a).radio;
+    const rb = effectivePrefsFor(b).radio;
+    return ra.freqMhz === rb.freqMhz && ra.bwKhz === rb.bwKhz && ra.sf === rb.sf;
+  }
+
   // A node's own antenna height above ground (metres), used on BOTH ends of
   // a modelled link. A planned/real repeater uses its configured mast height
   // (falling back to the global repeater default); a companion is a handheld
@@ -1242,6 +1262,7 @@
       const txPowerDelta = (effectivePrefsFor(nodes[i]).txPowerDbm ?? baseTxPowerDbm) - baseTxPowerDbm;
       for (let j = 0; j < nodes.length; j++) {
         if (i === j) continue;
+        if (!radiosCompatible(nodes[i], nodes[j])) continue; // mismatched radios can't communicate — see radiosCompatible
         const d = Propagation.haversineKm(nodes[i].lat, nodes[i].lon, nodes[j].lat, nodes[j].lon);
         if (d > SIM_MAX_RANGE_KM) continue;
         // Receiver is j — anchor the receiver height to j's own antenna.
