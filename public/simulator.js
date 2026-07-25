@@ -6428,6 +6428,11 @@
   function setSimPanelOpen(open) {
     document.getElementById("sim-panel").classList.toggle("hidden", !open);
     document.getElementById("map-wrap").classList.toggle("sim-open", open);
+    // Clear the coverage raster and un-cluster the markers while simulating,
+    // and put both back on the way out — see applySimulateDeclutter.
+    if (window.MCCoverageMap && window.MCCoverageMap.applySimulateDeclutter) {
+      window.MCCoverageMap.applySimulateDeclutter(open);
+    }
     if (open) {
       if (window.HopReachPlanner) window.HopReachPlanner.closePanel();
       simNodesLayer.addTo(map);

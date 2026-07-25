@@ -825,6 +825,47 @@
 
   // Minimal surface for planner.js to hook into — it's loaded after this
   // script and has no other way to reach the map/layers control.
+  // Simulate mode is about individual repeaters and the links between
+  // them, and the two heaviest bits of the normal map actively get in its
+  // way: the coverage raster tints the whole area the simulator is drawing
+  // its own coloured lines over, and marker clustering collapses the very
+  // repeaters being simulated into count bubbles (which, being markers
+  // themselves, also swallow clicks meant for the simulated nodes). Both
+  // are switched off on the way in and put back on the way out.
+  //
+  // Restores the snapshot rather than blanket re-enabling: someone who had
+  // coverage off, or clustering already disabled, before opening the
+  // simulator gets exactly that back, not a map reconfigured behind them.
+  let simDeclutterSnapshot = null;
+
+  function setCoverageVisible(visible) {
+    if (!coverageLayer) return;
+    if (visible) coverageLayer.addTo(map);
+    else map.removeLayer(coverageLayer);
+  }
+
+  function applySimulateDeclutter(on) {
+    if (on) {
+      if (simDeclutterSnapshot) return; // already applied — don't overwrite the real snapshot
+      simDeclutterSnapshot = {
+        coverageVisible: !!(coverageLayer && map.hasLayer(coverageLayer)),
+        clusteringDisabled,
+      };
+      setCoverageVisible(false);
+      if (!clusteringDisabled) setClusteringDisabled(true);
+    } else {
+      if (!simDeclutterSnapshot) return;
+      const snap = simDeclutterSnapshot;
+      simDeclutterSnapshot = null;
+      setCoverageVisible(snap.coverageVisible);
+      if (clusteringDisabled !== snap.clusteringDisabled) setClusteringDisabled(snap.clusteringDisabled);
+    }
+    // The "Disable marker clustering" checkbox lives in its own map control
+    // and is the user's view of this state, so it has to follow.
+    const box = document.getElementById("disable-clustering-toggle");
+    if (box) box.checked = clusteringDisabled;
+  }
+
   window.MCCoverageMap = {
     map,
     layersControl,
@@ -833,5 +874,6 @@
     usesCalibratedPositions,
     currentCoverageMeta,
     setClusteringDisabled,
+    applySimulateDeclutter,
   };
 })();

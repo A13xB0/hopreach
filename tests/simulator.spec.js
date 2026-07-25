@@ -1450,6 +1450,52 @@ test("decodes real packet regions without SubtleCrypto", async ({ page, request 
   expect(scoped).toBeGreaterThan(0);
 });
 
+// Simulate mode is about individual repeaters and the links between them,
+// and both the coverage raster and marker clustering get in the way of
+// that — clustering especially, since a cluster bubble is itself a marker
+// and swallows clicks meant for the simulated node underneath it.
+test("entering simulate mode clears coverage and clustering, and restores them on exit", async ({ page }) => {
+  await page.waitForFunction(() => document.querySelectorAll(".leaflet-marker-icon").length > 0, { timeout: 60_000 });
+
+  const state = () =>
+    page.evaluate(() => {
+      let coverageOn = null;
+      document.querySelectorAll(".leaflet-control-layers-overlays label").forEach((l) => {
+        if (l.textContent.includes("Estimated coverage")) coverageOn = l.querySelector("input").checked;
+      });
+      return {
+        coverageOn,
+        clusters: document.querySelectorAll(".marker-cluster").length,
+        clusterDisabled: (document.getElementById("disable-clustering-toggle") || {}).checked,
+      };
+    });
+
+  const before = await state();
+  test.skip(before.coverageOn === null, "no coverage overlay published in this build");
+
+  await page.click("#sim-toggle");
+  await expect.poll(async () => (await state()).coverageOn, { timeout: 10_000 }).toBe(false);
+  const during = await state();
+  expect(during.clusterDisabled).toBe(true);
+  expect(during.clusters).toBe(0);
+
+  // Restored, not blanket re-enabled.
+  await page.click("#sim-panel-close");
+  await expect.poll(async () => (await state()).coverageOn, { timeout: 10_000 }).toBe(before.coverageOn);
+  expect((await state()).clusterDisabled).toBe(before.clusterDisabled);
+
+  // Someone who had already turned clustering off keeps it off afterwards,
+  // rather than having the map reconfigured behind them.
+  await page.evaluate(() => {
+    const el = document.getElementById("disable-clustering-toggle");
+    el.checked = true;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.click("#sim-toggle");
+  await page.click("#sim-panel-close");
+  await expect.poll(async () => (await state()).clusterDisabled, { timeout: 10_000 }).toBe(true);
+});
+
 test("the map key clears the map-tools buttons instead of sitting under them", async ({ page }) => {
   await page.goto("/");
   await page.click("#sim-toggle");
