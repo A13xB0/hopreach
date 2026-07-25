@@ -1315,19 +1315,19 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
     // in the window, in which case there's nothing to contrast it against.
     const colours = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityColors());
     expect(colours.filter((c) => c === "#f472b6").length).toBeGreaterThan(0);
-    expect(colours.every((c) => ["#f472b6", "#22d3ee", "#a855f7"].includes(c))).toBe(true);
+    expect(colours.every((c) => ["#f472b6", "#22d3ee", "#a855f7", "#f87171"].includes(c))).toBe(true);
 
-    // These are floods, so each real transmission should also show the rest
-    // of its broadcast — the repeaters our model puts in earshot that no
-    // observer was positioned to confirm. Without it a flood renders as a
-    // single thread and the whole mesh looks like it missed the packet.
-    // Conditional on the model actually giving the senders somewhere to
-    // reach: a sender with no outgoing links has no flood to draw, which is
-    // a real (if uninteresting) state rather than a failure.
-    if (colours.some((c) => c === "#a855f7")) {
+    // These are floods, so the replay also plays our model's own simulation
+    // of the same window alongside the observations — engine receptions, not
+    // a geometric fan, so they carry arrival times and collisions. Without
+    // them a flood renders as a single thread and the whole mesh looks like
+    // it missed the packet. Conditional because a window whose senders have
+    // no modelled links produces no predicted receptions, which is a real
+    // (if uninteresting) state rather than a failure.
+    if (colours.some((c) => c === "#a855f7" || c === "#f87171")) {
       await page.uncheck("#sim-map-show-flood-reach");
       const withoutReach = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityColors());
-      expect(withoutReach.filter((c) => c === "#a855f7").length).toBe(0);
+      expect(withoutReach.filter((c) => c === "#a855f7" || c === "#f87171").length).toBe(0);
       expect(withoutReach.filter((c) => c === "#f472b6").length).toBeGreaterThan(0);
       await page.check("#sim-map-show-flood-reach");
     }
@@ -1376,7 +1376,7 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
       await expect(page.locator("#sim-packet-modal-observed-section")).toBeVisible();
       await expect(page.locator("#sim-packet-modal-received-title")).toContainText("Predicted");
       await expect(page.locator("#sim-packet-modal-summary")).toContainText("observed sending");
-      await expect(page.locator("#sim-packet-modal-summary")).toContainText("in earshot");
+      await expect(page.locator("#sim-packet-modal-summary")).toContainText("observed receiving");
       // A repeater with no predicted activity explains itself rather than
       // dead-ending on "Nothing to show."
       const body = await page.locator("#sim-packet-modal-list").innerText();

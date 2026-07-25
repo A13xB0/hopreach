@@ -2374,27 +2374,21 @@
     if (obs) {
       for (const s of obs.sent) rows.push({ ...s, kind: "sent" });
       for (const h of obs.heard) rows.push({ ...h, kind: "heard" });
-      for (const p of obs.reach) rows.push({ ...p, kind: "reach" });
       rows.sort((a, b) => a.tMs - b.tMs);
     }
 
     if (rows.length === 0) {
       hint.textContent =
-        "Nothing in this window reached this repeater — no observation of it, and our model puts it out of earshot of every real sender too. A hop is only ever recorded when some observer reconstructs a path through it, so silence here is weaker evidence than it looks.";
-      list.innerHTML = '<div class="plan-empty">No real traffic reached this repeater in the window.</div>';
+        "CoreScope never reported this repeater relaying or hearing anything in this window. That isn't the same as it being deaf — a hop is only recorded when some observer reconstructs a path through it, so a working repeater nobody was watching looks exactly like this. Whatever our model predicts below is unconfirmed here, not contradicted.";
+      list.innerHTML = '<div class="plan-empty">No observations of this repeater in the window.</div>';
       return;
     }
-    const measured = rows.filter((r) => r.kind !== "reach").length;
-    const predicted = rows.length - measured;
-    hint.textContent =
-      `${measured} measured, ${predicted} predicted — timed from the start of the window. ` +
-      `"Observed" rows are what CoreScope actually reported; "in earshot" rows are transmissions our model says this repeater could decode but no observer was positioned to confirm. These are floods, so every one of them was a broadcast, not a hop aimed at one node.`;
+    hint.textContent = `${rows.length} real CoreScope observation${rows.length === 1 ? "" : "s"}, timed from the start of the window. These are measurements; everything below is our model's own simulation of the same window.`;
     for (const r of rows) {
       const offsetS = ((r.tMs - replayWindowStartMs) / 1000).toFixed(1);
       const row = document.createElement("div");
-      const isReach = r.kind === "reach";
-      row.className = `plan-list-item sim-list-item sim-packet-row ${isReach ? "sim-packet-reach-row" : "sim-clean"}`;
-      const label = r.kind === "sent" ? "SENT" : r.kind === "heard" ? "HEARD" : "IN EARSHOT";
+      row.className = "plan-list-item sim-list-item sim-packet-row sim-clean";
+      const label = r.kind === "sent" ? "SENT" : "HEARD";
       const detail =
         r.kind === "sent"
           ? `relayed onward — ${r.count} confirmed recipient${r.count === 1 ? "" : "s"}`
@@ -2402,7 +2396,7 @@
       row.innerHTML = `
         <div class="sim-packet-row-top">
           <span class="sim-txrx-badge ${r.kind === "sent" ? "sim-txrx-relay" : "sim-txrx-rx"}">${label}</span>
-          <span class="sim-node-badge ${isReach ? "sim-badge-reach" : "sim-badge-observed"}">${isReach ? "predicted" : "observed"}</span>
+          <span class="sim-node-badge sim-badge-observed">observed</span>
           <span class="plan-item-label">${escapeHtml(r.hash === replayTargetHash ? "the replayed packet" : `packet ${String(r.hash).slice(0, 8)}`)}</span>
         </div>
         <div class="sim-packet-row-bottom">
@@ -2457,7 +2451,6 @@
     if (replayObservations.size > 0) {
       stats.push({ label: "observed sending", value: obs ? obs.sent.length : 0 });
       stats.push({ label: "observed receiving", value: obs ? obs.heard.length : 0 });
-      stats.push({ label: "in earshot (predicted)", value: obs ? obs.reach.length : 0 });
     }
     renderStatStrip(document.getElementById("sim-packet-modal-summary"), stats);
     renderObservedSection(nodeIndex, obs);
@@ -4762,6 +4755,59 @@
     return null;
   }
 
+  // Every real flood in the window, as simulator messages — real origin,
+  // real payload/hash size, and its real time offset from the start of the
+  // window as its send time.
+  //
+  // This is what makes the replay's predicted side a genuine simulation
+  // rather than a geometric guess. It used to run one packet from one
+  // origin, and "predicted" elsewhere meant a raw fan of every link out of a
+  // real sender — which can say "in earshot" but can't say received,
+  // relayed, collided, or dropped, because nothing was actually simulated.
+  // Feeding the whole window through the engine means the predicted half of
+  // the replay is the same thing a normal run produces, with the same
+  // outcomes and the same vocabulary.
+  //
+  // Sim time lines up with real time by construction (sendAtMs is the offset
+  // from the window's start), so predicted events and real observations are
+  // directly comparable rather than living on two unrelated clocks.
+  //
+  // Only route types 0/1 — our model relays floods, not addressed traffic
+  // (see the isDirect note in replayFromHash).
+  function buildWindowFloodMessages(windowPackets, pubkeyToIndex, windowStartMs) {
+    // One row per observation, so the same packet appears once per observer
+    // — dedupe by hash or the same flood gets sent several times over.
+    const byHash = new Map();
+    for (const p of windowPackets) {
+      if (p.route_type !== 0 && p.route_type !== 1) continue;
+      const tMs = Date.parse(p.timestamp);
+      if (Number.isNaN(tMs)) continue;
+      const prev = byHash.get(p.hash);
+      if (!prev || tMs < prev.tMs) byHash.set(p.hash, { p, tMs });
+    }
+    const msgs = [];
+    for (const { p, tMs } of byHash.values()) {
+      // Only an advert self-identifies its true origin; for everything else
+      // the first resolved hop is the earliest point in the path we can
+      // actually place on the map.
+      const chain = (p.resolved_path || []).filter(Boolean);
+      const originKey = originPubkeyOfPacket(p) || (chain.length ? chain[0].toLowerCase() : null);
+      if (!originKey) continue;
+      const origin = pubkeyToIndex.get(originKey);
+      if (origin == null) continue;
+      const frame = parseMeshFrame(p.raw_hex);
+      msgs.push({
+        origin,
+        sendAtMs: Math.max(0, tMs - windowStartMs),
+        payloadLen: frame ? frame.payloadLen : 20,
+        hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+        sourceHash: p.hash,
+      });
+    }
+    msgs.sort((a, b) => a.sendAtMs - b.sendAtMs);
+    return msgs;
+  }
+
   // Reconstructs the real CoreScope time window around the packet in the
   // replay input as a fully editable simulator setup (docs/SIMULATOR_PLAN_
   // PHASE8.md): real repeaters at their real positions, connectivity from the
@@ -5263,35 +5309,50 @@
     const at = (idx) => {
       let e = byNode.get(idx);
       if (!e) {
-        e = { sent: [], heard: [], reach: [] };
+        e = { sent: [], heard: [] };
         byNode.set(idx, e);
       }
       return e;
     };
-    // Outgoing links indexed once — this is O(transmissions × neighbours),
-    // and re-scanning every link per transmission made it O(n²) on a mesh
-    // with hundreds of links.
-    const outByNode = new Map();
-    for (const l of simLinks) {
-      let arr = outByNode.get(l.from);
-      if (!arr) {
-        arr = [];
-        outByNode.set(l.from, arr);
-      }
-      arr.push(l.to);
-    }
     for (const tx of events) {
       at(tx.from).sent.push({ tMs: tx.tMs, hash: tx.hash, isTarget: tx.isTarget, count: tx.tos.length });
-      const confirmed = new Set(tx.tos);
       for (const to of tx.tos) {
         at(to).heard.push({ tMs: tx.tMs, hash: tx.hash, isTarget: tx.isTarget, from: tx.from });
       }
-      for (const to of outByNode.get(tx.from) || []) {
-        if (confirmed.has(to)) continue;
-        at(to).reach.push({ tMs: tx.tMs, hash: tx.hash, isTarget: tx.isTarget, from: tx.from });
-      }
     }
     return byNode;
+  }
+
+  // Merges what was observed with what the engine predicts into one
+  // time-ordered list for the replay to play through.
+  //
+  // The two halves are directly comparable because they share a clock:
+  // buildWindowFloodMessages sends each real flood at its own offset from
+  // the start of the window, so a predicted reception at sim time t belongs
+  // at windowStartMs + t in real time. Predicted receptions are grouped back
+  // into the transmissions that caused them the same way the simulator's own
+  // replay does (see buildWaves) — one broadcast, many listeners.
+  //
+  // This replaced a fan drawn straight from simLinks. That could only ever
+  // say "in earshot", because nothing had been simulated: no arrival time,
+  // no hop count, no collision, no relay decision. These are engine
+  // receptions, so the replay can show a predicted flood exactly as the
+  // simulator shows its own — including where it collides.
+  function buildReplayTimeline(observedTransmissions, report, windowStartMs) {
+    const items = observedTransmissions.map((e) => ({ kind: "observed", ...e }));
+    const groups = new Map();
+    for (const r of (report && report.receptions) || []) {
+      const key = `${r.fromNode}:${r.packetId}:${r.atMs}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { kind: "predicted", tMs: windowStartMs + r.atMs, from: r.fromNode, packetId: r.packetId, receptions: [] };
+        groups.set(key, g);
+      }
+      g.receptions.push(r);
+    }
+    for (const g of groups.values()) items.push(g);
+    items.sort((a, b) => a.tMs - b.tMs);
+    return items;
   }
 
   let realTimelineEvents = [];
@@ -5330,6 +5391,9 @@
   const REAL_TARGET_COLOR = "#f472b6";
   const REAL_CONTEXT_COLOR = "#22d3ee";
   const REAL_FLOOD_REACH_COLOR = "#a855f7";
+  // Same red the simulator's own replay uses for a collided reception, so a
+  // predicted collision looks the same wherever it's drawn.
+  const REAL_PREDICTED_COLLIDED_COLOR = "#f87171";
 
   function showFloodReach() {
     const el = document.getElementById("sim-map-show-flood-reach");
@@ -5339,26 +5403,27 @@
   function playRealTimelineEvent(e, animate) {
     const from = simNodes[e.from];
     if (!from) return;
-    const color = e.isTarget ? REAL_TARGET_COLOR : REAL_CONTEXT_COLOR;
-    const confirmed = new Set(e.tos);
 
-    // The rest of the broadcast, drawn first so the confirmed hops sit on
-    // top of it rather than being buried by a dense fan.
-    if (showFloodReach()) {
-      for (const l of simLinks) {
-        if (l.from !== e.from || confirmed.has(l.to)) continue;
-        const other = simNodes[l.to];
-        if (!other) continue;
+    if (e.kind === "predicted") {
+      if (!showFloodReach()) return;
+      for (const r of e.receptions) {
+        const to = simNodes[r.node];
+        if (!to) continue;
+        // Predicted collisions are worth seeing — they're the whole reason
+        // to simulate the surrounding traffic rather than the target alone.
+        const color = r.collided ? REAL_PREDICTED_COLLIDED_COLOR : REAL_FLOOD_REACH_COLOR;
         L.polyline(
           [
             [from.lat, from.lon],
-            [other.lat, other.lon],
+            [to.lat, to.lon],
           ],
-          { color: REAL_FLOOD_REACH_COLOR, weight: 1.5, opacity: 0.35, dashArray: "4 6", interactive: false }
+          { color, weight: r.collided ? 2.5 : 1.5, opacity: r.collided ? 0.7 : 0.4, dashArray: "4 6", interactive: false }
         ).addTo(simRealActivityLayer);
       }
+      return;
     }
 
+    const color = e.isTarget ? REAL_TARGET_COLOR : REAL_CONTEXT_COLOR;
     for (const toIdx of e.tos) {
       const to = simNodes[toIdx];
       if (!to) continue;
@@ -5415,7 +5480,7 @@
           setRealReplayStatus(
             k >= realTimelineEvents.length
               ? `Replay finished — showing the full ±${lastRealTimelineWindowSecs}s window.`
-              : `Playing… t=+${offsetS}s (${k}/${realTimelineEvents.length})${e.isTarget ? " · this is the replayed packet" : ""}`
+              : `Playing… t=+${offsetS}s (${k}/${realTimelineEvents.length})${e.kind === "predicted" ? " · simulated" : e.isTarget ? " · this is the replayed packet" : " · observed"}`
           );
           return;
         }
@@ -5493,7 +5558,8 @@
         <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#818cf8"></span>Predicted, no evidence either way</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:${REAL_TARGET_COLOR}"></span>Replayed packet (window view)</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:${REAL_CONTEXT_COLOR}"></span>Other real traffic (window view)</div>
-        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:${REAL_FLOOD_REACH_COLOR}"></span>Rest of the flood (in earshot, unobserved)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:${REAL_FLOOD_REACH_COLOR}"></span>Simulated flood (unobserved)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:${REAL_PREDICTED_COLLIDED_COLOR}"></span>Simulated collision</div>
       `;
       div.innerHTML = `
         <div id="sim-map-real-replay-controls" class="sim-real-replay-controls hidden">
@@ -5657,12 +5723,13 @@
       renderMessageNodeOptions();
       redrawNodeMarkers();
 
-      realTimelineEvents = buildRealTimeline(windowPackets, hash, pubkeyToIndex);
-      replayWindowStartMs = realTimelineEvents.length ? realTimelineEvents[0].tMs : 0;
+      const observedTransmissions = buildRealTimeline(windowPackets, hash, pubkeyToIndex);
+      realTimelineEvents = observedTransmissions; // replaced below by the merged observed+predicted timeline
+      replayWindowStartMs = observedTransmissions.length ? observedTransmissions[0].tMs : targetMs;
       replayTargetHash = hash;
       stopRealTimelineReplay();
       simRealActivityLayer.clearLayers();
-      document.getElementById("sim-bottleneck-replay-section").classList.toggle("hidden", realTimelineEvents.length === 0);
+      document.getElementById("sim-bottleneck-replay-section").classList.toggle("hidden", observedTransmissions.length === 0);
       document.getElementById("sim-bottleneck-replay-title").textContent = `Replay real activity (±${windowSecs}s)`;
       const capNote = hitCap ? ` — CoreScope's recent-packet cap was reached before the window's oldest edge, so this may be partial` : "";
       setRealReplayStatus(
@@ -5685,10 +5752,7 @@
         "sim-links-status",
         `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(simNodes, simLinks)}`
       );
-      // Built here, not alongside realTimelineEvents above: the "in earshot"
-      // half of it is derived from simLinks, which only exists once the
-      // connectivity above has finished building.
-      replayObservations = buildReplayObservations(realTimelineEvents);
+      replayObservations = buildReplayObservations(observedTransmissions);
 
       await MeshSim.ready;
       // Parse the real frame precisely (validated against 400 real frames):
@@ -5703,12 +5767,44 @@
       const payloadLen = frame ? frame.payloadLen : 20;
       const originIndex = pubkeyToIndex.get(originPubkey);
       const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
-      const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
-      const predictedMessages = [{ origin: originIndex, sendAtMs: 0, payloadLen, hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE }];
+      // Simulate the whole window, not just the target packet: every real
+      // flood in it, from its real origin, at its real offset. That's what
+      // makes the predicted side say received/relayed/collided the way a
+      // normal run does — and it means the surrounding traffic contends for
+      // the channel with the target instead of the target flooding a mesh
+      // that's implausibly silent.
+      let predictedMessages = buildWindowFloodMessages(windowPackets, pubkeyToIndex, replayWindowStartMs);
+      // The target itself may be missing from the window list (it's fetched
+      // separately, and its own row can fall outside what /api/packets
+      // returned) — add it from the detail fetch so there's always something
+      // to compare against.
+      if (!predictedMessages.some((m) => m.sourceHash === hash)) {
+        predictedMessages.push({
+          origin: originIndex,
+          sendAtMs: Math.max(0, targetMs - replayWindowStartMs),
+          payloadLen,
+          hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+          sourceHash: hash,
+        });
+        predictedMessages.sort((a, b) => a.sendAtMs - b.sendAtMs);
+      }
+      // Long enough to cover the window itself plus the tail of relays the
+      // last packet in it sets off; the panel's own duration is the floor.
+      const configuredMaxMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
+      const windowSpanMs = predictedMessages.length ? predictedMessages[predictedMessages.length - 1].sendAtMs : 0;
+      const maxSimTimeMs = Math.max(configuredMaxMs, windowSpanMs + 60000);
       const predictedReport = MeshSim.run(scenarioFromState(), predictedMessages, seed, maxSimTimeMs);
 
       const routeType = packetData.packet ? packetData.packet.route_type : null;
-      renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport });
+      // The analysis is about the TARGET packet specifically, so it gets only
+      // that packet's own receptions — feeding it the whole window would
+      // credit hops from unrelated floods as if they were this one's.
+      const targetPid = predictedMessages.findIndex((m) => m.sourceHash === hash);
+      renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport, targetPid });
+
+      // Now the engine has run, the replay timeline can carry both halves —
+      // what was observed and what was predicted — on the one clock.
+      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, replayWindowStartMs);
       ensureBottleneckLegendControl();
       syncRealReplayControls();
 
@@ -5754,7 +5850,7 @@
     }
   }
 
-  function renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport }) {
+  function renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport, targetPid }) {
     const provenPairIndices = new Set();
     for (const e of provenEdges.values()) {
       const f = pubkeyToIndex.get(e.from);
@@ -5763,7 +5859,10 @@
     }
 
     const predictedPairs = new Map(); // "from:to" -> Reception
-    for (const r of predictedReport.receptions || []) predictedPairs.set(`${r.fromNode}:${r.node}`, r);
+    for (const r of predictedReport.receptions || []) {
+      if (targetPid != null && targetPid >= 0 && r.packetId !== targetPid) continue;
+      predictedPairs.set(`${r.fromNode}:${r.node}`, r);
+    }
 
     // Direction 1: the model expects this hop to work, but no real
     // observation ever confirmed it.
@@ -6295,6 +6394,7 @@
     getMessageCount: () => messagesFromState(parseInt(document.getElementById("sim-seed").value, 10) || 0).length,
     getMessageGeneratorCount: () => simMessageGenerators.length,
     getLastReport: () => lastReport,
+    getLastMessages: () => lastMessages,
     getWaveCount: () => replayWaves.length,
     // Polylines currently drawn on the results layer — how many paths are
     // actually visible on the map right now, as opposed to how many the
