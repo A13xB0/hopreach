@@ -633,6 +633,19 @@
           <div id="sim-packet-modal-checklist" class="plan-list"></div>
         </div>
 
+        <!-- Only shown while a real CoreScope packet replay is loaded: what
+             this repeater was actually OBSERVED doing, alongside what our
+             model predicts below. Kept as its own block rather than merged
+             into the activity list because the two run on different clocks
+             — real epoch time vs the simulator's own ms-from-zero — and
+             interleaving them would imply a correspondence that isn't
+             there. -->
+        <div id="sim-packet-modal-observed-section" class="hidden">
+          <div class="sim-subsection-title">Observed here by CoreScope</div>
+          <div class="plan-hint" id="sim-packet-modal-observed-hint"></div>
+          <div id="sim-packet-modal-observed-list" class="plan-list"></div>
+        </div>
+
         <div class="sim-subsection-title" id="sim-packet-modal-received-title">Activity (TX/RX, time order)</div>
         <div id="sim-packet-modal-list" class="plan-list"></div>
       </div>

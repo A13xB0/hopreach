@@ -194,6 +194,15 @@
   // go up, so a label, once used, is never handed out again this session.
   let companionCounter = 0;
 
+  // The simulator's own repeater markers live in a pane above Leaflet's
+  // default markerPane (z-index 600). Without this they share that pane with
+  // the base map's clustered real-repeater markers and lose to them on DOM
+  // order: a cluster icon drawn over a simulated repeater swallows the click
+  // entirely, so clicking the repeater you can plainly see does nothing at
+  // all. Simulate mode is fundamentally about these markers, so they win.
+  map.createPane("simNodesPane");
+  map.getPane("simNodesPane").style.zIndex = 650;
+
   const simNodesLayer = L.layerGroup().addTo(map);
   const simResultsLayer = L.layerGroup().addTo(map);
   // A selected sent message's own path/collisions (see selectSentMessage)
@@ -811,6 +820,7 @@
       L.marker([n.lat, n.lon], {
         icon: L.divIcon({ className: iconClass, iconSize: [12, 12] }),
         draggable: n.source === "companion",
+        pane: "simNodesPane",
       })
         .addTo(simNodesLayer)
         .bindTooltip(`${n.label} (${n.source})${n.address ? ` · ${n.address}` : ""}`)
@@ -2141,10 +2151,10 @@
   // (received) events — a single row shape covers both kinds, with a
   // colour-coded TX/RX badge as the only structural difference. Each row
   // drills into that packet's own full details.
-  function renderNodeActivityRows(container, events, { showAt, drillTo, showAll }) {
+  function renderNodeActivityRows(container, events, { showAt, drillTo, showAll, emptyHtml }) {
     container.innerHTML = "";
     if (events.length === 0) {
-      container.innerHTML = `<div class="plan-hint">Nothing to show.</div>`;
+      container.innerHTML = `<div class="plan-hint">${emptyHtml || "Nothing to show."}</div>`;
       return;
     }
     const capped = !showAll && events.length > LONG_LIST_ROW_CAP;
@@ -2346,6 +2356,64 @@
     else openPacketDetails(prev.packetId, "back");
   }
 
+  // The observed half of the inspector — hidden entirely outside a replay,
+  // where there's nothing real to compare against and the section would just
+  // be an empty box.
+  function renderObservedSection(nodeIndex, obs) {
+    const section = document.getElementById("sim-packet-modal-observed-section");
+    if (replayObservations.size === 0) {
+      section.classList.add("hidden");
+      return;
+    }
+    section.classList.remove("hidden");
+    const hint = document.getElementById("sim-packet-modal-observed-hint");
+    const list = document.getElementById("sim-packet-modal-observed-list");
+    list.innerHTML = "";
+
+    const rows = [];
+    if (obs) {
+      for (const s of obs.sent) rows.push({ ...s, kind: "sent" });
+      for (const h of obs.heard) rows.push({ ...h, kind: "heard" });
+      for (const p of obs.reach) rows.push({ ...p, kind: "reach" });
+      rows.sort((a, b) => a.tMs - b.tMs);
+    }
+
+    if (rows.length === 0) {
+      hint.textContent =
+        "Nothing in this window reached this repeater — no observation of it, and our model puts it out of earshot of every real sender too. A hop is only ever recorded when some observer reconstructs a path through it, so silence here is weaker evidence than it looks.";
+      list.innerHTML = '<div class="plan-empty">No real traffic reached this repeater in the window.</div>';
+      return;
+    }
+    const measured = rows.filter((r) => r.kind !== "reach").length;
+    const predicted = rows.length - measured;
+    hint.textContent =
+      `${measured} measured, ${predicted} predicted — timed from the start of the window. ` +
+      `"Observed" rows are what CoreScope actually reported; "in earshot" rows are transmissions our model says this repeater could decode but no observer was positioned to confirm. These are floods, so every one of them was a broadcast, not a hop aimed at one node.`;
+    for (const r of rows) {
+      const offsetS = ((r.tMs - replayWindowStartMs) / 1000).toFixed(1);
+      const row = document.createElement("div");
+      const isReach = r.kind === "reach";
+      row.className = `plan-list-item sim-list-item sim-packet-row ${isReach ? "sim-packet-reach-row" : "sim-clean"}`;
+      const label = r.kind === "sent" ? "SENT" : r.kind === "heard" ? "HEARD" : "IN EARSHOT";
+      const detail =
+        r.kind === "sent"
+          ? `relayed onward — ${r.count} confirmed recipient${r.count === 1 ? "" : "s"}`
+          : `from ${escapeHtml(nodeLabel(r.from))}`;
+      row.innerHTML = `
+        <div class="sim-packet-row-top">
+          <span class="sim-txrx-badge ${r.kind === "sent" ? "sim-txrx-relay" : "sim-txrx-rx"}">${label}</span>
+          <span class="sim-node-badge ${isReach ? "sim-badge-reach" : "sim-badge-observed"}">${isReach ? "predicted" : "observed"}</span>
+          <span class="plan-item-label">${escapeHtml(r.hash === replayTargetHash ? "the replayed packet" : `packet ${String(r.hash).slice(0, 8)}`)}</span>
+        </div>
+        <div class="sim-packet-row-bottom">
+          <span class="sim-packet-context">${detail}</span>
+          <span class="sim-packet-time">+${offsetS}s</span>
+        </div>
+      `;
+      list.appendChild(row);
+    }
+  }
+
   function openPacketInspectorForNode(nodeIndex, mode = "fresh") {
     if (!lastReport) return;
     enterPacketModalView(mode, { kind: "node", nodeIndex });
@@ -2382,19 +2450,49 @@
     if (neverAired > 0) {
       stats.push({ label: "scheduled, never aired", value: neverAired, tone: "bad" });
     }
+    // With a replay loaded, every figure above is a *prediction* — so put
+    // what was actually observed at this repeater right beside it rather
+    // than leaving the reader to assume the model's numbers are measurements.
+    const obs = replayObservations.get(nodeIndex);
+    if (replayObservations.size > 0) {
+      stats.push({ label: "observed sending", value: obs ? obs.sent.length : 0 });
+      stats.push({ label: "observed receiving", value: obs ? obs.heard.length : 0 });
+      stats.push({ label: "in earshot (predicted)", value: obs ? obs.reach.length : 0 });
+    }
     renderStatStrip(document.getElementById("sim-packet-modal-summary"), stats);
+    renderObservedSection(nodeIndex, obs);
 
     // The delivery checklist is a per-packet view (every node's status for
     // ONE packet) — doesn't apply here, where the packet is the varying
     // dimension instead.
     document.getElementById("sim-packet-modal-checklist-section").classList.add("hidden");
 
-    document.getElementById("sim-packet-modal-received-title").textContent = "Activity (TX/RX, time order)";
+    document.getElementById("sim-packet-modal-received-title").textContent =
+      replayObservations.size > 0 ? "Predicted activity — our model (TX/RX, time order)" : "Activity (TX/RX, time order)";
     resetPacketModalFilters();
     currentPacketModalEvents = events;
-    currentPacketModalShowOpts = { showAt: false, drillTo: "packet" };
+    currentPacketModalShowOpts = { showAt: false, drillTo: "packet", emptyHtml: nodeActivityEmptyExplanation(nodeIndex) };
     applyPacketModalFilters();
     openModal("sim-packet-modal");
+  }
+
+  // "Nothing to show." is a dead end when what you actually want to know is
+  // *why* a repeater sat out the run — especially on a replay, where the
+  // node set is now the whole loaded mesh rather than only the repeaters
+  // reality already confirmed, so plenty of them legitimately have no
+  // predicted activity at all. Answer the question in place instead.
+  function nodeActivityEmptyExplanation(nodeIndex) {
+    if (simLinks.length === 0) {
+      return "No connectivity has been built for this node set yet, so nothing could propagate anywhere — build links, then run again.";
+    }
+    const inbound = simLinks.filter((l) => l.to === nodeIndex).length;
+    const outbound = simLinks.filter((l) => l.from === nodeIndex).length;
+    if (inbound === 0) {
+      return outbound === 0
+        ? "Our model gives this repeater no links at all — nothing else is within decodable range of it under the current propagation assumptions, so no flood could ever reach it. That's a statement about the model's assumptions (range, antenna heights, terrain), not proof the real repeater is isolated."
+        : `Our model gives this repeater ${outbound} outgoing link${outbound === 1 ? "" : "s"} but no incoming ones, so nothing could arrive here to relay.`;
+    }
+    return `Our model puts this repeater within range of ${inbound} sender${inbound === 1 ? "" : "s"}, but no flood in this run actually reached it — it was either too many hops away, or every packet that could have arrived was stopped before it got here.`;
   }
 
   function openPacketDetails(packetId, mode = "fresh") {
@@ -2739,6 +2837,11 @@
     clearTransportSource();
     replayWaves = [];
     replayIndex = 0;
+    // Observations belong to the replay whose report is being discarded —
+    // leaving them behind would label a fresh simulation's inspector with
+    // measurements from a packet that has nothing to do with it.
+    replayObservations = new Map();
+    replayTargetHash = "";
     lastReport = null;
     lastMessages = null;
     lastTuneResult = null;
@@ -5112,6 +5215,63 @@
     return events;
   }
 
+  // Per-repeater view of the loaded replay window: nodeIndex ->
+  // { sent, heard, reach }.
+  //
+  // This is the same data the map draws, deliberately — the map's flood fan
+  // and this table have to be one prediction, not two. They weren't at
+  // first: the fan came from simLinks (who was in earshot of a real sender)
+  // while the inspector read the engine's own report, so a repeater could
+  // have a line drawn to it on the map and then report zero activity when
+  // clicked. Both now come from here.
+  //
+  //   sent  — CoreScope observed this repeater relaying (a measurement)
+  //   heard — CoreScope observed it receiving (a measurement)
+  //   reach — our model puts it in earshot of a real sender, unobserved
+  //
+  // "reach" is the honest middle ground these floods need: a broadcast went
+  // out, our model says this repeater could decode it, and no observer was
+  // positioned to confirm either way.
+  let replayObservations = new Map();
+  let replayWindowStartMs = 0;
+  let replayTargetHash = "";
+
+  function buildReplayObservations(events) {
+    const byNode = new Map();
+    const at = (idx) => {
+      let e = byNode.get(idx);
+      if (!e) {
+        e = { sent: [], heard: [], reach: [] };
+        byNode.set(idx, e);
+      }
+      return e;
+    };
+    // Outgoing links indexed once — this is O(transmissions × neighbours),
+    // and re-scanning every link per transmission made it O(n²) on a mesh
+    // with hundreds of links.
+    const outByNode = new Map();
+    for (const l of simLinks) {
+      let arr = outByNode.get(l.from);
+      if (!arr) {
+        arr = [];
+        outByNode.set(l.from, arr);
+      }
+      arr.push(l.to);
+    }
+    for (const tx of events) {
+      at(tx.from).sent.push({ tMs: tx.tMs, hash: tx.hash, isTarget: tx.isTarget, count: tx.tos.length });
+      const confirmed = new Set(tx.tos);
+      for (const to of tx.tos) {
+        at(to).heard.push({ tMs: tx.tMs, hash: tx.hash, isTarget: tx.isTarget, from: tx.from });
+      }
+      for (const to of outByNode.get(tx.from) || []) {
+        if (confirmed.has(to)) continue;
+        at(to).reach.push({ tMs: tx.tMs, hash: tx.hash, isTarget: tx.isTarget, from: tx.from });
+      }
+    }
+    return byNode;
+  }
+
   let realTimelineEvents = [];
   let realTimelineIndex = 0;
   let realTimelineWindowStartMs = 0;
@@ -5476,6 +5636,8 @@
       redrawNodeMarkers();
 
       realTimelineEvents = buildRealTimeline(windowPackets, hash, pubkeyToIndex);
+      replayWindowStartMs = realTimelineEvents.length ? realTimelineEvents[0].tMs : 0;
+      replayTargetHash = hash;
       stopRealTimelineReplay();
       simRealActivityLayer.clearLayers();
       document.getElementById("sim-bottleneck-replay-section").classList.toggle("hidden", realTimelineEvents.length === 0);
@@ -5501,6 +5663,10 @@
         "sim-links-status",
         `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(simNodes, simLinks)}`
       );
+      // Built here, not alongside realTimelineEvents above: the "in earshot"
+      // half of it is derived from simLinks, which only exists once the
+      // connectivity above has finished building.
+      replayObservations = buildReplayObservations(realTimelineEvents);
 
       await MeshSim.ready;
       // Parse the real frame precisely (validated against 400 real frames):
@@ -6094,6 +6260,10 @@
   // Test-only introspection hook.
   window.__hopreachSimulatorDebug = {
     getNodeCount: () => simNodes.length,
+    // Opens a node's inspector without needing to hit its map marker —
+    // markers overlap heavily on a real mesh, which makes a click-based test
+    // flaky for reasons that have nothing to do with what it's asserting.
+    openNodeInspector: (i) => openPacketInspectorForNode(i),
     getLinkCount: () => simLinks.length,
     // The directed link between two node indices (or undefined) — lets a
     // test confirm a built link's SNR actually responds to per-node

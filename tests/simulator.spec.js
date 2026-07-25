@@ -1353,6 +1353,38 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
     if (realMax > 1) expect(linesStart).toBeLessThan(linesEnd);
     else expect(linesStart).toBe(linesEnd);
 
+    // Clicking a repeater during a replay has to answer "what happened
+    // here", the same as it does after a simulation — and label which half
+    // is measured and which is predicted. It used to open an inspector of
+    // all zeros and "Nothing to show." for any repeater the engine's own
+    // single-packet run didn't reach, even ones the map had just drawn a
+    // flood line to.
+    const probe = await page.evaluate(() => {
+      const d = window.__hopreachSimulatorDebug;
+      const n = d.getNodeCount();
+      const rep = d.getLastReport() || {};
+      const busy = new Set((rep.receptions || []).map((r) => r.node));
+      let quiet = -1;
+      for (let i = 0; i < n; i++) if (!busy.has(i)) { quiet = i; break; }
+      return { any: n > 0 ? 0 : -1, quiet };
+    });
+    for (const idx of [probe.any, probe.quiet]) {
+      if (idx < 0) continue;
+      await page.evaluate((i) => window.__hopreachSimulatorDebug.openNodeInspector(i), idx);
+      await expect(page.locator("#sim-packet-modal")).toBeVisible();
+      // Both halves are labelled, so neither can be mistaken for the other.
+      await expect(page.locator("#sim-packet-modal-observed-section")).toBeVisible();
+      await expect(page.locator("#sim-packet-modal-received-title")).toContainText("Predicted");
+      await expect(page.locator("#sim-packet-modal-summary")).toContainText("observed sending");
+      await expect(page.locator("#sim-packet-modal-summary")).toContainText("in earshot");
+      // A repeater with no predicted activity explains itself rather than
+      // dead-ending on "Nothing to show."
+      const body = await page.locator("#sim-packet-modal-list").innerText();
+      expect(body).not.toBe("Nothing to show.");
+      await page.locator("#sim-packet-modal [data-close]").first().click();
+      await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+    }
+
     // ...including after a close/reopen of the simulator panel, which is
     // the exact sequence that used to detach it.
     await page.click("#sim-panel-close");
