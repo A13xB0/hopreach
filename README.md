@@ -2,6 +2,10 @@
   <img src="docs/hopreach-logo.png" alt="HopReach" width="420">
 </p>
 
+<p align="center">
+  <a href="https://scotmesh-coverage.mm7roq.compute.oarc.uk">Live demo — ScotMesh Repeater Coverage</a>
+</p>
+
 # HopReach
 
 Interactive coverage map for [MeshCore](https://meshcore.co.uk/) repeater
@@ -177,10 +181,10 @@ planning sub-mode) for testing and tuning MeshCore's flood-relay timing
 before touching a real device — and for replaying what a real packet
 actually did. It runs a discrete-event simulation (`internal/meshsim`)
 built from a faithful, from-source port of MeshCore's own airtime,
-packet-score, and retransmit-delay formulas — verified line-for-line
-against `github.com/meshcore-dev/MeshCore`'s actual source
-(`Dispatcher.cpp`, `MyMesh.cpp`, `RadioLibWrappers.cpp`), not a secondhand
-approximation — compiled to the same shared WASM module as the
+packet-score, retransmit-delay, and duty-cycle formulas — verified
+line-for-line against `github.com/meshcore-dev/MeshCore`'s actual source
+(`Dispatcher.cpp`, `MyMesh.cpp`, `RadioLibWrappers.cpp`, `Packet.cpp`), not
+a secondhand approximation — compiled to the same shared WASM module as the
 [planning tools](#planning-tools) (`wasm/meshsim.go`; see
 [WASM shared core](#wasm-shared-core)).
 
@@ -196,7 +200,14 @@ map visible at all — and was reverted).
    location**) any number of virtual handheld/companion devices at
    arbitrary points you click on the map — draggable afterward, and, unlike
    a repeater, never relays traffic (originates/receives only, matching a
-   real MeshCore companion app).
+   real MeshCore companion app). Each repeater's own settings — tx/rx delay
+   factors, tx power, loop-detect level and hash size, radio parameters (a
+   dropdown of all 20 real presets MeshCore's own app ships, defaulting to
+   EU/UK Narrow, each field individually overridable), the three real
+   firmware hop limits (`flood.max`/`flood.max.unscoped`/`flood.max.advert`,
+   64/64/8 by default), and which regions/scopes it holds (or whether it
+   relays unscoped traffic at all) — are all editable per-node or in bulk
+   from the **⚙ Repeaters & settings** table.
 2. **Build connectivity** — choose how links between nodes are decided:
    the propagation model (terrain-aware, works for planned repeaters and
    companion locations too), CoreScope's own observed reach data (real
@@ -208,29 +219,67 @@ map visible at all — and was reverted).
    documented proxy, not a certified RF measurement. After building, any
    node left with no links at all is called out by name, since that's
    usually worth knowing before scheduling a send through it.
-3. **Schedule sends** — pick which node(s) transmit a flood packet and
-   when (milliseconds into the simulation), then **Run** to watch it
-   happen: an animated replay steps through the flood wave by wave (every
-   listener a single transmission reached, all at once) with an expanding
-   pulse at the sender and a line to each receiver as it arrives — green
-   for a clean reception, red for a collision — rather than dumping the
-   whole result on the map at once. **Replay** watches it again from the
-   start; **Skip to end** jumps straight to the final picture. The results
-   log lists every reception in order underneath.
-4. **Predict settings** — grid-searches candidate `txdelay`/`rxdelay`
+3. **Schedule sends** — pick which node(s) transmit a packet and when
+   (milliseconds into the simulation), as an ordinary flood or (now
+   modeled) a direct/routed send addressed to one specific next hop, using
+   its own, lower default delay factor since far fewer nodes contend for
+   it. Optionally tag it with a region/scope, matching real `region
+   default <name>` — only repeaters holding that region's own key relay it
+   onward. **Run** to watch it happen: an animated replay steps through the
+   flood wave by wave with an expanding pulse at the sender and a line to
+   each receiver as it arrives, then, in the packet inspector, every
+   repeater's own RX *and* its resulting relay TX are shown as linked
+   events (hover or click one to jump to the other) — with the relay's
+   real air time, after any channel-busy or duty-cycle deferral, not just
+   when it was scheduled. **Replay** watches it again from the start;
+   **Skip to end** jumps straight to the final picture.
+4. **See exactly why a packet didn't arrive.** A reception that didn't
+   succeed is broken down into its real, physically distinct cause rather
+   than one undifferentiated "collided": `no_lock` (an interferer arrived
+   during the demodulator's own preamble/sync window — nothing was ever
+   decoded), `corrupted` (lock was achieved, but the interferer wasn't
+   beaten by LoRa's own ~6dB capture margin), or `tx_busy` (the listener's
+   own transmitter was keyed at the time — LoRa radios are half-duplex,
+   they simply cannot receive while transmitting, a real physical
+   constraint that's easy to forget models entirely). A signal that
+   survived a weaker overlapping transmission via the capture effect shows
+   as **Captured**, distinct from a genuinely silent, uncontended
+   reception.
+5. **Per-repeater scoreboard** (🏆 Rankings) — after a run, every node's
+   own duty cycle (airtime used, as a % of the sim window), real delivery
+   (distinct packets received, out of everything actually reachable given
+   the current topology — not just "not collided"), and, most directly
+   actionable: **unique deliveries** vs **redundant relays** — is this
+   repeater's own airtime actually reaching someone new, or is it
+   spending duty cycle relaying into an audience that already had the
+   packet from someone else.
+6. **Predict settings** — grid-searches candidate `txdelay`/`rxdelay`
    overrides (global, or conditional on a repeater's altitude/neighbour
-   count once that data is supplied — altitude comes from the same terrain
-   grid connectivity-building already fetched, neighbour count from the
-   built links themselves) and ranks them by measured collision rate
-   against the scheduled sends, averaged over repeated deterministic-RNG
-   trials so one candidate isn't judged on a lucky draw. Suggested values
-   are expressed in the same units as MeshCore's own CLI (`set txdelay`/
-   `set direct.txdelay`/`set rxdelay`), so a suggestion can be pasted
-   straight onto a real device — and shown two ways: ranked strategies
-   ("altitude >= 600m: txdelay 1.0"), and, applying the top-ranked one, the
-   concrete resulting `txdelay`/`rxdelay` pair next to each individual
-   repeater by name.
-5. **Replay a real CoreScope packet** — paste a packet hash (or a link
+   count once that data is supplied) and ranks them by measured collision
+   rate against the scheduled sends, averaged over repeated
+   deterministic-RNG trials so one candidate isn't judged on a lucky draw.
+7. **🧬 Search policies** — a broader, delivery-driven search: composite,
+   multi-rule policies (not just one global override) ranked by actual
+   **delivery ratio**, not collision rate alone — a policy that makes
+   every node back off heavily collides less *and* delivers less, and
+   those aren't the same goal. Covers eleven topology- and terrain-aware
+   models — dense/sparse neighbour-count-keyed, hilltop-first/-last,
+   articulation-point-first (a cut vertex's relay is never redundant),
+   MPR-style marginal coverage, hop-limit trimming, and composites of the
+   above — each searched alongside its own inverse, since which direction
+   actually helps is a property of the specific network, not something to
+   assume. The result is a **per-repeater action list**: only the
+   repeaters whose settings genuinely need to change, each with a
+   copy-pasteable MeshCore CLI line (`set txdelay …`, `set rxdelay …`,
+   `set flood.max …`) and a CSV export.
+8. **🔥 Stress test** — pushes synthetic offered load (not your own
+   scheduled sends — randomly-originated messages at increasing
+   rates) up through a configurable series of load levels and reports the
+   **knee**: the highest load this specific network still delivers
+   acceptably at, alongside the full collision/delivery curve at every
+   level swept. That's the actual, measured answer to "how many messages
+   can this network handle."
+9. **Replay a real CoreScope packet** — paste a packet hash (or a link
    containing one) and it reconstructs what actually happened: every relay
    CoreScope has proof of (aggregated across every station that observed
    it, since a real flood is commonly heard via more than one path),
@@ -247,11 +296,16 @@ map visible at all — and was reverted).
    sited than this tool's default planning assumptions, not that anything's
    wrong with the real network). Proven hops draw as solid lines on the map
    (green where the model agrees, blue where it doesn't), predicted-but-
-   unconfirmed ones as dashed amber.
+   unconfirmed ones as dashed amber. The surrounding real-activity replay
+   window is adjustable up to ±120 seconds either side of the target
+   packet, with partial coverage surfaced honestly rather than silently
+   truncated if a busy mesh hits CoreScope's own page-size cap.
 
-Direct/routed traffic isn't modeled yet — only flood packets, which is
-where relay-timing collisions actually happen. Correspondingly, the packet
-replay's "predicted" side is only meaningful for flood-routed packets.
+Since a real repeater can be configured to a different path-hash size
+(1-3 bytes) than its neighbours, every hop in a shown path is labelled with
+the size it was actually recorded at — directly relevant to how
+collision-prone `loop.detect` is at that specific hop, not just a display
+detail.
 
 ## Region: not just Scotland
 
@@ -278,16 +332,18 @@ recently observed MeshCore hashtag scope) to match a given region tag —
 useful if a CoreScope instance's operators consistently self-tag, but off by
 default since not every repeater broadcasts one.
 
-### Inferring real scope from each packet's transport code
+### Observing real scope from each packet's transport code
 
 `default_scope` is self-reported and, in practice, sparse — on a real
 production CoreScope instance, roughly three quarters of repeaters have
-none set at all. `corescope.scope_inference` (off by default) fills that
+none set at all. `corescope.scope_observation` (off by default) fills that
 gap by decoding real MeshCore region membership directly, rather than
 guessing from a packet's channel name (a related but genuinely different
 concept — a channel is a communication group like `#test` or `Public`;
 a region/scope like `#sco` or `#fif` is MeshCore's own separate
-network-segmentation mechanism).
+network-segmentation mechanism). Called "observed," not "inferred": every
+entry comes from a cryptographic transport-code match, not a guess — see
+below.
 
 MeshCore regions work cryptographically: a `ROUTE_TYPE_TRANSPORT_FLOOD`/
 `ROUTE_TYPE_TRANSPORT_DIRECT` packet (see
@@ -302,12 +358,22 @@ region name list from CoreScope's own analytics (`GET /api/scope-stats`
 — e.g. `#sco`, `#fif`, `#edi`), and for each transport-coded packet tries
 every candidate region's key until one's computed code matches the
 packet's own — deterministic, not a guess, and verified against a real
-captured packet before being relied on. The result — `inferred_scopes`,
+captured packet before being relied on. The result — `observed_scopes`,
 a **list**, since a real repeater can genuinely have more than one region
 enabled at once (confirmed against production: the majority of tagged
 repeaters have several) — is written alongside (not merged with)
 `default_scope` in `repeaters.geojson`, since the two can legitimately
-disagree, and shown in the map popup for both.
+disagree, and shown in the map popup for both. (Older cached
+`repeaters.geojson` output, and the deprecated `corescope.scope_inference`
+config key, both still work — see the field/key rename note in each
+relevant Go doc comment — but new deployments should use
+`scope_observation`/`observed_scopes`.)
+
+The same packet walk also tallies **unscoped** (plain flood, no transport
+code at all) relay participation, so a repeater that's never actually been
+seen relaying unscoped traffic can be told apart from one that's simply
+never been asked to — feeding the [flood simulator](#lora-flood-simulator)'s
+own per-repeater "allow unscoped" default.
 
 Real relay-path hops are recorded as short public-key prefixes (MeshCore
 trims each hop to that node's own configured `hash_size`), resolved back
@@ -320,7 +386,7 @@ never silently happens.
 
 Alongside the whole-region Standard/Calibrated/Precision tiers, `run()`
 also renders one **Standard-tier coverage raster per known region** —
-e.g. a `#fif` raster computed using *only* the repeaters `inferred_scopes`/
+e.g. a `#fif` raster computed using *only* the repeaters `observed_scopes`/
 `default_scope` place in `#fif`, so it shows where that region's own
 repeaters actually reach, not diluted by every other region's — the same
 model as the main Standard tier, just restricted to that region's own
@@ -332,7 +398,7 @@ rather than a mostly-empty whole-map-sized one. Tiles are written to
 `scope_coverage` (keyed by region name), the same tiled-PNG shape as the
 main coverage tiers (see `coverage.WriteTiles`) — served as ordinary
 static images, not computed on the fly. Regions with zero member
-repeaters get no entry. Gated on `corescope.scope_inference.enabled`
+repeaters get no entry. Gated on `corescope.scope_observation.enabled`
 (off by default): without it there's no reliable per-repeater region
 membership at scale to split by.
 
@@ -696,7 +762,7 @@ field within each):
 | `site` | Frontend branding, active/degraded/silent status thresholds, scope-filter checkboxes |
 | `map` | Initial Leaflet view (center, zoom) |
 | `region` | [Region boundary](#region-not-just-scotland), required CoreScope scope |
-| `corescope` | Which CoreScope instance to query, request timeout, [real scope inference](#inferring-real-scope-from-each-packets-transport-code) |
+| `corescope` | Which CoreScope instance to query, request timeout, [real scope observation](#observing-real-scope-from-each-packets-transport-code) |
 | `terrain` | DEM zoom/cache/tile source |
 | `propagation` | Link-budget/RF model inputs — see [How the coverage estimate works](#how-the-coverage-estimate-works) |
 | `coverage` | Raster resolution, [per-tier GPU gating](#remote-gpu-worker), recompute interval |
