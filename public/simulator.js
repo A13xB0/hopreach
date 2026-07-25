@@ -902,8 +902,8 @@
       tr.dataset.nodeId = n.id;
       tr.innerHTML = `
         <td class="sim-col-sticky"><span class="sim-node-badge ${SOURCE_BADGE[n.source]}">${n.source}</span> <span title="${n.address ? `Address: ${n.address}` : "No address"}">${escapeHtml(n.label)}</span></td>
-        <td><input type="text" data-field="regions" value="${escapeHtml(regionsToDisplayString(regions))}" placeholder="all (*)" title="Comma-delimited region list, no # (e.g. sco, ioi). Blank = holds no region key (still relays unscoped traffic unless Allow unscoped is off). * = accept every region."></td>
-        <td class="sim-checkbox-cell"><input type="checkbox" data-field="allowUnscoped" ${denyUnscoped ? "" : "checked"} title="Whether this node relays ordinary unscoped (regionless) flood traffic. For a real repeater, defaults to off unless CoreScope has actually observed it doing so — absence over the observation window isn't proof of denial, just the best signal available."></td>
+        <td><input type="text" data-field="regions" value="${escapeHtml(regionsToDisplayString(regions))}" placeholder="none" title="Which region (scope) keys this repeater holds — comma-delimited, no # (e.g. sco, ioi), or * for every region. Blank means it holds none, so it relays no scoped traffic at all. Independent of Allow unscoped, exactly as in MeshCore: scoped traffic is gated purely on this list, unscoped traffic purely on that checkbox."></td>
+        <td class="sim-checkbox-cell"><input type="checkbox" data-field="allowUnscoped" ${denyUnscoped ? "" : "checked"} title="Whether this node relays ordinary unscoped (regionless) flood traffic. Independent of the Scopes list — this gates only regionless traffic, and turning it off never stops the node relaying a region it holds a key for. For a real repeater, defaults to off unless CoreScope has actually observed it relaying unscoped traffic; absence over the observation window isn't proof of denial, just the best signal available."></td>
         <td><input type="number" step="1" min="1" data-field="floodMax" value="${floodMax || ""}" placeholder="64" title="flood.max — blank uses the firmware default (64)"></td>
         <td><input type="number" step="1" min="1" data-field="floodMaxUnscoped" value="${floodMaxUnscoped || ""}" placeholder="64" title="flood.max.unscoped — blank uses the firmware default (64); only gates unscoped traffic, additional to flood.max"></td>
         <td class="sim-radio-cell">
@@ -4755,6 +4755,70 @@
     return null;
   }
 
+  // Which region (scope) a real packet's flood actually belongs to, decoded
+  // from its own over-the-air bytes. A direct port of
+  // internal/corescope/scope.go's decodePacketRegion — see that function for
+  // the wire format and the firmware reference
+  // (TransportKeyStore::calcTransportCode).
+  //
+  // A region's transport key is public — sha256(name)[:16], no secret
+  // involved — but the packet carries only a 2-byte transport code derived
+  // from it, so recovering the region means computing that code for every
+  // candidate region name and looking for the one that matches.
+  let regionKeyCache = null;
+
+  async function ensureRegionKeys() {
+    if (regionKeyCache) return regionKeyCache;
+    const keys = new Map();
+    try {
+      const resp = await fetch("/corescope-api/api/scope-stats?window=7d");
+      if (resp.ok) {
+        const data = await resp.json();
+        for (const r of data.byRegion || []) {
+          if (!r.name) continue;
+          const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(r.name)));
+          keys.set(r.name, await crypto.subtle.importKey("raw", digest.slice(0, 16), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]));
+        }
+      }
+    } catch {
+      // CoreScope unreachable, or no crypto (an insecure origin has no
+      // SubtleCrypto) — every packet then stays unscoped, which is the
+      // behaviour this replaced rather than a new failure.
+    }
+    regionKeyCache = keys;
+    return keys;
+  }
+
+  async function decodeRegionOfPacket(rawHex) {
+    if (!rawHex || typeof rawHex !== "string") return "";
+    const keys = await ensureRegionKeys();
+    if (keys.size === 0) return "";
+    const raw = [];
+    for (let i = 0; i + 1 < rawHex.length; i += 2) raw.push(parseInt(rawHex.substr(i, 2), 16));
+    if (raw.length < 6) return "";
+    const header = raw[0];
+    const routeType = header & 0x03;
+    // Only TRANSPORT_FLOOD (0) / TRANSPORT_DIRECT (3) carry a transport code
+    // at all; a plain flood is genuinely unscoped.
+    if (routeType !== 0 && routeType !== 3) return "";
+    const payloadType = (header >> 2) & 0x0f;
+    const transportCode1 = raw[1] | (raw[2] << 8); // little-endian, matching the firmware's uint16_t
+    const pathLenByte = raw[5];
+    const hopCount = pathLenByte & 0x3f;
+    const hashSize = (pathLenByte >> 6) + 1;
+    const pathEnd = 6 + hopCount * hashSize;
+    if (pathEnd > raw.length) return ""; // malformed/truncated capture
+    const payload = raw.slice(pathEnd);
+    const msg = new Uint8Array(1 + payload.length);
+    msg[0] = payloadType;
+    msg.set(Uint8Array.from(payload), 1);
+    for (const [name, key] of keys) {
+      const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, msg));
+      if ((sig[0] | (sig[1] << 8)) === transportCode1) return name;
+    }
+    return "";
+  }
+
   // Every real flood in the window, as simulator messages — real origin,
   // real payload/hash size, and its real time offset from the start of the
   // window as its send time.
@@ -4774,7 +4838,7 @@
   //
   // Only route types 0/1 — our model relays floods, not addressed traffic
   // (see the isDirect note in replayFromHash).
-  function buildWindowFloodMessages(windowPackets, pubkeyToIndex, windowStartMs) {
+  async function buildWindowFloodMessages(windowPackets, pubkeyToIndex, windowStartMs) {
     // One row per observation, so the same packet appears once per observer
     // — dedupe by hash or the same flood gets sent several times over.
     const byHash = new Map();
@@ -4801,6 +4865,12 @@
         sendAtMs: Math.max(0, tMs - windowStartMs),
         payloadLen: frame ? frame.payloadLen : 20,
         hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+        // Real ScotMesh traffic is overwhelmingly scoped (TRANSPORT_FLOOD).
+        // Replaying it untagged made every repeater that doesn't relay
+        // unscoped traffic refuse the lot — a whole window of "Region
+        // mismatch — not relayed" that says nothing about the real network,
+        // only about our having thrown the region away.
+        region: await decodeRegionOfPacket(p.raw_hex),
         sourceHash: p.hash,
       });
     }
@@ -5713,7 +5783,14 @@
         // CoreScope-labelled "listener" only ever receives in real life
         // and should never appear as a predicted relay hop, regardless of
         // whether our model's own connectivity would otherwise allow it.
-        simNodes.push({ id: randomId(), source: "real", refId: pk, label: info.name, lat: info.lat, lon: info.lon, role: info.role, address: shortAddressFromPubkey(pk) });
+        // regions "*" (accepts any scope), matching what the episode
+        // reconstruction does for the same reason: this repeater is in the
+        // window's real path data, so it demonstrably WAS relaying this
+        // traffic. We just have no scope list for it — the node directory
+        // doesn't carry one — and defaulting to "holds no region key" would
+        // have the model refuse traffic reality shows it carrying. Load the
+        // real repeaters first if you want their actual observed scopes.
+        simNodes.push({ id: randomId(), source: "real", refId: pk, label: info.name, lat: info.lat, lon: info.lon, role: info.role, regions: ["*"], address: shortAddressFromPubkey(pk) });
         placedForReplay++;
       }
       if (!pubkeyToIndex.has(originPubkey)) {
@@ -5773,7 +5850,7 @@
       // normal run does — and it means the surrounding traffic contends for
       // the channel with the target instead of the target flooding a mesh
       // that's implausibly silent.
-      let predictedMessages = buildWindowFloodMessages(windowPackets, pubkeyToIndex, replayWindowStartMs);
+      let predictedMessages = await buildWindowFloodMessages(windowPackets, pubkeyToIndex, replayWindowStartMs);
       // The target itself may be missing from the window list (it's fetched
       // separately, and its own row can fall outside what /api/packets
       // returned) — add it from the detail fetch so there's always something
@@ -5784,6 +5861,7 @@
           sendAtMs: Math.max(0, targetMs - replayWindowStartMs),
           payloadLen,
           hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+          region: await decodeRegionOfPacket(packetData.packet ? packetData.packet.raw_hex : null),
           sourceHash: hash,
         });
         predictedMessages.sort((a, b) => a.sendAtMs - b.sendAtMs);

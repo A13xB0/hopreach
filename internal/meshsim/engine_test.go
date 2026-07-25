@@ -815,6 +815,17 @@ func TestAcceptsRegionDenyUnscoped(t *testing.T) {
 	if !scoped.acceptsRegion("sco") {
 		t.Error("DenyUnscoped should not affect a scoped message the node holds the region key for")
 	}
+	// ...and the mirror image: holding region keys must not revoke plain
+	// unscoped relaying. The two gates are independent in firmware, so a
+	// repeater configured with scopes still carries regionless traffic
+	// unless unscoped is explicitly denied.
+	keyed := SimNode{Regions: []string{"sco", "ioi"}}
+	if !keyed.acceptsRegion("") {
+		t.Error("holding region keys should not stop a node relaying unscoped traffic")
+	}
+	if keyed.acceptsRegion("edi") {
+		t.Error("a node should refuse a region it holds no key for")
+	}
 }
 
 // TestAcceptsRegionWildcard proves the "*" sentinel (used as a planned
