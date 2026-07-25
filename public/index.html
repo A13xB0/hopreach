@@ -37,6 +37,24 @@
       <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
       <button id="map-declutter-toggle" title="Collapse (or restore) every map control at once">🧹 Declutter</button>
     </div>
+    <!-- Shared replay transport: one bar drives both the simulated flood and
+         the real-packet replay (see setTransportSource), docked along the
+         bottom of the map so you can scrub and watch at the same time. -->
+    <div id="sim-transport" class="sim-transport hidden">
+      <button id="sim-transport-play" title="Play / pause (space)" aria-label="Play">▶</button>
+      <input type="range" id="sim-transport-seek" min="0" max="1000" value="0" step="1" aria-label="Seek through the replay">
+      <span id="sim-transport-time" class="sim-transport-time">0.0s</span>
+      <label class="sim-transport-speed-label">
+        <span class="sr-only">Playback speed</span>
+        <select id="sim-transport-speed" title="Playback speed">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </label>
+      <span id="sim-transport-label" class="sim-transport-label"></span>
+    </div>
     <div id="companion-pin-hint" class="plan-hint hidden">
       Click the map to drop a pin. Drag it to move. Click the button again to remove it. Search is capped to ~35km for speed.
       <label id="companion-pin-height-label">
@@ -432,6 +450,7 @@
         <div id="sim-bottleneck-replay-section" class="hidden">
           <div class="sim-subsection-title" id="sim-bottleneck-replay-title">Replay real activity (±30s)</div>
           <div class="plan-hint">Every real packet CoreScope observed within the configured window either side of this one (see "Surrounding activity window" above), played back in the order it actually happened — the replayed packet itself is highlighted; everything else is context for what else was going on at the time.</div>
+          <div class="plan-hint">This modal covers the map, so the same controls are docked on the map itself — close this and use them there to actually watch the replay.</div>
           <div class="plan-row">
             <button id="sim-bottleneck-replay">▶ Replay</button>
             <button id="sim-bottleneck-replay-skip">⏭ Skip to end</button>
@@ -440,7 +459,8 @@
         </div>
 
         <div class="sim-subsection-title">Predicted but never confirmed</div>
-        <div class="plan-hint">Our model expects this hop to work, but no real observation ever confirmed it — a candidate for where a collision or interference happened.</div>
+        <div class="plan-hint">Our model expects this hop to work, and this packet's real observations do cover the receiving repeater — they just never record it being reached this way. That makes it a candidate for where a collision or interference happened.</div>
+        <div id="sim-bottleneck-unconfirmable-note" class="plan-hint"></div>
         <div id="sim-bottleneck-list" class="plan-list"></div>
 
         <div class="sim-subsection-title">Real links our model doesn't predict</div>

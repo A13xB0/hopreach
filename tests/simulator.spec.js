@@ -1061,6 +1061,63 @@ test("runs a replay after a simulation and can skip to the final state", async (
   await expect(page.locator("#sim-replay-status")).not.toContainText("final state");
 });
 
+test("the replay transport plays, pauses, and seeks in both directions", async ({ page }) => {
+  test.slow(); // link-building fetches real DEM tiles
+
+  await page.click("#plan-toggle");
+  await page.selectOption("#plan-select", TEST_PLAN.id);
+  await page.click("#plan-toggle");
+
+  await page.click("#sim-toggle");
+  await page.click("#sim-load-planned");
+  await page.selectOption("#sim-connectivity-source", "model");
+  await page.click("#sim-build-links");
+  await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
+
+  await addMessageSenderViaModal(page);
+  await page.click("#sim-run");
+  await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 30_000 });
+
+  // A run points the shared transport at its own flood and starts playing.
+  const bar = page.locator("#sim-transport");
+  await expect(bar).toBeVisible();
+  await expect(page.locator("#sim-transport-label")).toHaveText("Simulated flood");
+
+  const seek = page.locator("#sim-transport-seek");
+  const max = parseInt(await seek.getAttribute("max"), 10);
+  expect(max).toBeGreaterThan(0);
+
+  // Pause has to actually stop the clock, not just relabel the button.
+  await page.click("#sim-transport-play");
+  await expect(page.locator("#sim-transport-play")).toHaveText("▶");
+  const pausedAt = await seek.inputValue();
+  await page.waitForTimeout(600);
+  expect(await seek.inputValue()).toBe(pausedAt);
+
+  // Seeking is what the old fire-and-forget setTimeout replays couldn't do:
+  // the drawn state has to follow the scrubber in BOTH directions, which
+  // only works because the renderer rebuilds from scratch on a seek rather
+  // than assuming it only ever moves forward.
+  const linesAt = async (v) => {
+    await seek.fill(String(v));
+    return page.evaluate(() => window.__hopreachSimulatorDebug.getResultLineCount());
+  };
+  const atEnd = await linesAt(max);
+  const atStart = await linesAt(0);
+  const atMiddle = await linesAt(Math.round(max / 2));
+  expect(atStart).toBeLessThan(atEnd);
+  expect(atMiddle).toBeGreaterThanOrEqual(atStart);
+  expect(atMiddle).toBeLessThanOrEqual(atEnd);
+
+  // Playing from the end restarts rather than sitting there doing nothing.
+  await seek.fill(String(max));
+  await page.click("#sim-transport-play");
+  await expect(page.locator("#sim-transport-play")).toHaveText("⏸");
+  await expect
+    .poll(async () => parseInt(await seek.inputValue(), 10), { timeout: 5000 })
+    .toBeLessThan(max);
+});
+
 // "Keep all paths" is a live analysis lens, not a pre-run setting: it used
 // to only take effect on the NEXT wave tick, so toggling it in a finished
 // (skipped-to-end) view — the common case, having just watched a replay —
@@ -1200,7 +1257,19 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   await page.click("#sim-replay-hash-go");
   await expect(page.locator("#sim-replay-hash-status")).toContainText("Loaded", { timeout: 60_000 });
 
-  // Replaying a packet opens the Bottleneck analysis modal automatically.
+  // A replay deliberately does NOT open the analysis modal — that modal
+  // covers the whole map, which is exactly what you need to see while a
+  // replay plays. The map-docked control carries the key and the transport
+  // controls instead, and opens the modal on demand.
+  await expect(page.locator("#sim-bottleneck-modal")).not.toBeVisible();
+  await expect(page.locator(".sim-bottleneck-legend")).toBeVisible();
+  await expect(page.locator(".sim-bottleneck-legend")).toContainText("Proven & modeled");
+
+  // The predicted run is a real report and fills the reception log like any
+  // other run, rather than being computed, diffed, and thrown away.
+  await expect(page.locator("#sim-map-results-log")).toBeVisible();
+
+  await page.click("#sim-map-open-bottleneck");
   await expect(page.locator("#sim-bottleneck-modal")).toBeVisible();
   await expect(page.locator("#sim-bottleneck-summary")).toContainText("proven hop");
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getNodeCount())).toBeGreaterThan(0);
@@ -1212,11 +1281,6 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   const unmodeledText = await page.locator("#sim-unmodeled-list").innerText();
   expect(bottleneckText.length + unmodeledText.length).toBeGreaterThan(0);
 
-  // The map key explaining the line colours should be showing alongside
-  // the analysis (see ensureBottleneckLegendControl).
-  await expect(page.locator(".sim-bottleneck-legend")).toBeVisible();
-  await expect(page.locator(".sim-bottleneck-legend")).toContainText("Proven & modeled");
-
   // The ±30s real-activity replay only shows once some other real traffic
   // was actually found in that window — on a quiet mesh at replay time
   // there may genuinely be none, so this is conditional rather than
@@ -1225,7 +1289,85 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   if (!replaySectionHidden) {
     await page.click("#sim-bottleneck-replay-skip");
     await expect(page.locator("#sim-bottleneck-replay-status")).not.toHaveText("");
+
+    // Status is mirrored between the modal and the map-docked control, so
+    // the two can never disagree about what the replay is doing.
+    await expect(page.locator("#sim-map-real-replay-status")).not.toHaveText("");
+
+    // The hops must land on a layer that's actually attached to the map:
+    // the layer used to be removed when the simulator panel closed and
+    // never re-added when it reopened, so every line went into a detached
+    // group and the replay silently drew nothing at all.
+    expect(await page.evaluate(() => window.__hopreachSimulatorDebug.isRealActivityLayerOnMap())).toBe(true);
+    expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityLineCount())).toBeGreaterThan(0);
+
+    // The replayed packet must be visually distinct from the surrounding
+    // traffic — that's the whole point of the window view, so it's asserted
+    // on stroke colour rather than left to the eye. Only the target's own
+    // colour is guaranteed: a quiet mesh can genuinely have no other traffic
+    // in the window, in which case there's nothing to contrast it against.
+    const colours = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityColors());
+    expect(colours.filter((c) => c === "#f472b6").length).toBeGreaterThan(0);
+    expect(colours.every((c) => c === "#f472b6" || c === "#64748b")).toBe(true);
+
+    // Everything below drives the replay from the map-docked controls, so
+    // the analysis modal (and its full-map backdrop) has to be out of the
+    // way first — which is exactly the workflow the docked controls exist
+    // for.
+    await page.click("#sim-bottleneck-modal [data-close]");
+    await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+
+    // The same shared transport drives the real replay, scrubbing real
+    // seconds into the window (compressed play time under the hood).
+    await page.click("#sim-map-real-replay");
+    await expect(page.locator("#sim-transport")).toBeVisible();
+    await expect(page.locator("#sim-transport-label")).toContainText("Real traffic ±");
+    await expect(page.locator("#sim-transport-time")).toContainText("s ·");
+    const realSeek = page.locator("#sim-transport-seek");
+    const realMax = parseInt(await realSeek.getAttribute("max"), 10);
+    await realSeek.fill(String(realMax));
+    const linesEnd = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityLineCount());
+    await realSeek.fill("0");
+    const linesStart = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityLineCount());
+    expect(linesEnd).toBeGreaterThan(0);
+    // CoreScope timestamps a whole observation at one instant, so a quiet
+    // window can legitimately collapse to a single point in time — there's
+    // nothing to scrub through then, and the transport correctly draws
+    // everything at position 0. Only demand progression when the window
+    // actually spans more than one instant.
+    if (realMax > 1) expect(linesStart).toBeLessThan(linesEnd);
+    else expect(linesStart).toBe(linesEnd);
+
+    // ...including after a close/reopen of the simulator panel, which is
+    // the exact sequence that used to detach it.
+    await page.click("#sim-panel-close");
+    await page.click("#sim-toggle");
+    expect(await page.evaluate(() => window.__hopreachSimulatorDebug.isRealActivityLayerOnMap())).toBe(true);
+    await page.click("#sim-map-real-replay-skip");
+    expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityLineCount())).toBeGreaterThan(0);
   }
+});
+
+test("the map key clears the map-tools buttons instead of sitting under them", async ({ page }) => {
+  await page.goto("/");
+  await page.click("#sim-toggle");
+
+  // The Plan/Simulate/Companion pin/Declutter row is absolutely positioned
+  // in the bottom-left corner above Leaflet's control corners, so anything
+  // Leaflet docks along the bottom edge has to clear it. Both corners are
+  // lifted by the measured height of that row (see --map-tools-clearance).
+  // Measured with a probe in the corner rather than the corner element
+  // itself: an empty corner has no size to measure, and the thing that
+  // actually has to clear the buttons is a control sitting in it.
+  await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.id = "clearance-probe";
+    probe.style.cssText = "width:40px;height:40px";
+    document.querySelector("#map-wrap .leaflet-bottom.leaflet-left").appendChild(probe);
+  });
+  const toolsBox = await page.locator("#map-tools").boundingBox();
+  const probeBox = await page.locator("#clearance-probe").boundingBox();
+  expect(probeBox.y + probeBox.height).toBeLessThanOrEqual(toolsBox.y);
 });
 
 test("reconstructs a real CoreScope window as an editable episode with actual-vs-predicted analysis", async ({ page, request }) => {

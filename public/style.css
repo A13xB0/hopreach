@@ -109,6 +109,112 @@ header .subtitle {
   }
 }
 
+/* #map-tools (Plan / Simulate / Companion pin / Declutter) is absolutely
+   positioned in the bottom-left corner at z-index 1100 — above Leaflet's
+   own control corners — so anything Leaflet docks along the bottom edge
+   sits underneath the buttons unless it clears them. Lifting the corners
+   themselves rather than the individual controls means every bottom-docked
+   control is covered, however many of them there are and in whatever order
+   they were added (the simulator stacks two: the playback panel and the
+   "Map key"). app.js measures the real rendered row into
+   --map-tools-clearance so a button row that wraps to two lines on a
+   narrow viewport pushes the controls up by the right amount instead of a
+   hardcoded single-row guess; the value here is the single-row fallback
+   used before that first measurement lands. */
+#map-wrap { --map-tools-clearance: 3.25rem; --transport-clearance: 0px; }
+#map-wrap .leaflet-bottom.leaflet-left,
+#map-wrap .leaflet-bottom.leaflet-right {
+  bottom: var(--map-tools-clearance);
+}
+
+/* Shared replay transport (see setTransportSource): the bottom-most element
+   of the map's bottom stack, spanning the visible map width — it shifts
+   left with the docked panels exactly like the Leaflet control corners do,
+   so the scrubber never runs underneath the simulator panel. */
+.sim-transport {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.85rem;
+  background: var(--card-bg);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
+  font-size: 0.78rem;
+  transition: right 0.15s ease;
+}
+.sim-transport.hidden { display: none; }
+#map-wrap.plan-open .sim-transport { right: 320px; }
+#map-wrap.sim-open .sim-transport { right: 480px; }
+@media (max-width: 500px) {
+  #map-wrap.plan-open .sim-transport,
+  #map-wrap.sim-open .sim-transport { right: 90vw; }
+}
+#sim-transport-play {
+  flex-shrink: 0;
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#sim-transport-play:hover { filter: brightness(1.1); }
+#sim-transport-seek {
+  flex: 1;
+  min-width: 80px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.sim-transport-time {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  min-width: 9ch;
+  text-align: right;
+}
+.sim-transport-speed-label { flex-shrink: 0; display: flex; }
+#sim-transport-speed {
+  background: var(--surface1, #0a1929);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.15rem 0.3rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.sim-transport-label {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+/* Below the label's breakpoint the bar keeps only the controls that matter
+   for driving playback. */
+@media (max-width: 700px) {
+  .sim-transport-label { display: none; }
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .leaflet-popup-content-wrapper {
   background: var(--card-bg);
   color: var(--text);
@@ -313,11 +419,11 @@ header .subtitle {
   font-size: 0.75rem;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
   width: 240px;
-  /* Now docked bottom-left (see ensureSimPlaybackControl) — #map-tools
-     (the Plan/Simulate/Companion pin buttons) occupies that same corner at
-     bottom:0.75rem, so this needs enough clearance to sit above them
-     rather than overlapping. */
-  margin-bottom: 3.25rem;
+  /* Clearance from #map-tools is handled once for the whole bottom-left
+     corner (see --map-tools-clearance above) rather than per-control — a
+     margin here only ever lifted whichever control happened to be last in
+     the corner, leaving the other one (the "Map key") sitting under the
+     buttons. */
 }
 .sim-playback-buttons { margin-bottom: 0.4rem; }
 .sim-playback-buttons button {
@@ -336,9 +442,10 @@ header .subtitle {
   overflow-y: auto;
 }
 
-/* Bottleneck-analysis map key (see ensureBottleneckLegendControl) — plain
-   static header, not collapsible like the other map controls, since it's
-   only ever a handful of short rows. */
+/* The real-packet replay's map-docked control (see
+   ensureBottleneckLegendControl): transport buttons, live status, and the
+   key for the line colours. Sized to match .sim-playback-control so the two
+   stack tidily in the same corner. */
 .sim-bottleneck-legend {
   background: var(--card-bg);
   color: var(--text);
@@ -347,7 +454,23 @@ header .subtitle {
   padding: 0.5rem 0.65rem;
   font-size: 0.72rem;
   box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  width: 240px;
 }
+.sim-real-replay-controls { margin-bottom: 0.5rem; }
+.sim-real-replay-controls .plan-hint { margin: 0; font-size: 0.68rem; }
+.sim-map-open-analysis {
+  display: block;
+  width: 100%;
+  margin-top: 0.5rem;
+  background: var(--surface1, #0a1929);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.sim-map-open-analysis:hover { border-color: var(--accent); }
 .map-control-header-static {
   font-size: 0.68rem;
   font-weight: 700;
@@ -432,7 +555,10 @@ header .subtitle {
 
 #map-tools {
   position: absolute;
-  bottom: 0.75rem;
+  /* Sits above the replay transport bar when one is showing (see
+     --transport-clearance, measured in app.js) and drops back to the map's
+     own bottom edge when there isn't one. */
+  bottom: calc(0.75rem + var(--transport-clearance, 0px));
   left: 0.75rem;
   /* Leaflet's own control corners sit at z-index:1000, and the layers
      control (top-right, expanded) can overlap the panel's top edge since
@@ -482,7 +608,7 @@ header .subtitle {
 }
 #companion-pin-hint {
   position: absolute;
-  bottom: 3.5rem;
+  bottom: calc(3.5rem + var(--transport-clearance, 0px));
   left: 0.75rem;
   z-index: 1100;
   max-width: 280px;

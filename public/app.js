@@ -120,6 +120,34 @@
   const layersControl = L.control.layers(baseLayers, {}, { collapsed: true, position: "topright" }).addTo(map);
   map.on("baselayerchange", (e) => localStorage.setItem(BASEMAP_STORAGE_KEY, e.name));
 
+  // Everything docked along the bottom of the map has to stack without
+  // overlapping, and none of the heights are knowable up front: the
+  // #map-tools button row wraps to a second line on narrow viewports, and
+  // the replay transport bar is only present while there's something to
+  // replay. So measure both and publish two CSS variables the stack is
+  // built from (see style.css) — bottom to top, that's the transport bar,
+  // then #map-tools, then Leaflet's own bottom control corners.
+  const mapToolsEl = document.getElementById("map-tools");
+  const mapWrapEl = document.getElementById("map-wrap");
+  const transportEl = document.getElementById("sim-transport");
+  function syncBottomClearances() {
+    if (!mapToolsEl || !mapWrapEl) return;
+    const gapPx = 12; // matches #map-tools' own 0.75rem bottom offset
+    // A hidden bar is display:none, so this is 0 and the stack collapses
+    // back down on its own.
+    const transportH = transportEl ? transportEl.getBoundingClientRect().height : 0;
+    const toolsH = mapToolsEl.getBoundingClientRect().height;
+    mapWrapEl.style.setProperty("--transport-clearance", `${Math.round(transportH)}px`);
+    mapWrapEl.style.setProperty("--map-tools-clearance", `${Math.round(transportH + toolsH + gapPx * 2)}px`);
+  }
+  window.HopReachSyncBottomClearances = syncBottomClearances;
+  if (mapToolsEl && mapWrapEl && typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(syncBottomClearances);
+    ro.observe(mapToolsEl);
+    if (transportEl) ro.observe(transportEl);
+    syncBottomClearances();
+  }
+
   // Roads and place names, drawn in their own panes above the coverage
   // overlay (imageOverlay defaults to Leaflet's overlayPane, z-index 400)
   // but below markers (markerPane, z-index 600) — so both stay legible

@@ -2734,6 +2734,11 @@
     closeModals();
     setRankingsFullWindowOpen(false);
     removeSimPlaybackControl();
+    // The transport is scrubbing a report that's about to stop existing, so
+    // it has to go too — otherwise the bar stays up driving stale waves.
+    clearTransportSource();
+    replayWaves = [];
+    replayIndex = 0;
     lastReport = null;
     lastMessages = null;
     lastTuneResult = null;
@@ -2775,9 +2780,207 @@
   // actually answers "watch the flood happen," not just "here's the
   // final tally."
 
+  // --- shared replay transport -------------------------------------------
+  //
+  // One play/pause/seek bar drives BOTH replays (the simulated flood and the
+  // real-packet window), because they're the same interaction: step a clock
+  // through a sorted list of timestamped events and draw the world as it was
+  // at that instant. They used to be two separate fire-and-forget setTimeout
+  // chains with no way to pause, rewind, or scrub — you got one pass at
+  // whatever speed the code chose, and if you blinked you re-ran it.
+  //
+  // Time is warped, not linear. Real mesh traffic is mostly dead air (a ±60s
+  // CoreScope window can hold three packets), and a simulated flood is the
+  // opposite — bursts of near-simultaneous waves separated by relay delays.
+  // Playing either at 1:1 wall-clock is unwatchable in different directions.
+  // buildTimeWarp maps *source* time (real ms, what the readout shows, what
+  // renderers get) onto *play* time (what the scrubber moves through, gaps
+  // clamped into a watchable range). Seeking stays correct in both
+  // directions because the mapping is a proper invertible piecewise-linear
+  // function rather than an ad-hoc per-step delay.
+  const TRANSPORT_GAP_CAP_MS = 1500; // longest stretch of dead air we'll actually sit through
+  const TRANSPORT_MIN_STEP_MS = 120; // shortest, so a burst doesn't flash past unwatchably
+
+  function buildTimeWarp(times) {
+    const uniq = [];
+    for (const t of times) {
+      if (!Number.isFinite(t)) continue;
+      if (!uniq.length || t !== uniq[uniq.length - 1]) uniq.push(t);
+    }
+    const segs = [];
+    let play = 0;
+    for (let i = 1; i < uniq.length; i++) {
+      const gap = uniq[i] - uniq[i - 1];
+      const played = Math.min(TRANSPORT_GAP_CAP_MS, Math.max(TRANSPORT_MIN_STEP_MS, gap));
+      segs.push({ srcStart: uniq[i - 1], srcEnd: uniq[i], playStart: play, playEnd: play + played });
+      play += played;
+    }
+    return {
+      segs,
+      durationPlayMs: play,
+      srcFirst: uniq.length ? uniq[0] : 0,
+      srcLast: uniq.length ? uniq[uniq.length - 1] : 0,
+    };
+  }
+
+  // Play time -> source time. Binary search rather than a scan: a dense run
+  // produces thousands of segments and this runs every animation frame.
+  function playToSrc(warp, playMs) {
+    if (!warp || warp.segs.length === 0) return warp ? warp.srcFirst : 0;
+    if (playMs <= 0) return warp.srcFirst;
+    if (playMs >= warp.durationPlayMs) return warp.srcLast;
+    let lo = 0;
+    let hi = warp.segs.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (warp.segs[mid].playEnd < playMs) lo = mid + 1;
+      else hi = mid;
+    }
+    const s = warp.segs[lo];
+    const span = s.playEnd - s.playStart;
+    const f = span > 0 ? (playMs - s.playStart) / span : 0;
+    return s.srcStart + f * (s.srcEnd - s.srcStart);
+  }
+
+  // A transport source is whatever is being scrubbed. `times` seeds the warp;
+  // `render(srcMs, prevSrcMs)` draws the world at srcMs (prevSrcMs null means
+  // "rebuild from scratch" — a seek or a backwards jump); `format(srcMs)`
+  // renders the readout; `label` names it in the bar.
+  let transportSource = null;
+  let transportWarp = null;
+  let transportPlayMs = 0;
+  let transportPlaying = false;
+  let transportRate = 1;
+  let transportRaf = null;
+  let transportLastFrameTs = 0;
+  let transportLastSrcMs = null;
+
+  function transportEl(id) {
+    return document.getElementById(id);
+  }
+
+  // app.js owns the bottom-of-map stacking (it measures every docked
+  // element into CSS variables); showing/hiding the transport bar changes
+  // that stack, so nudge it. Guarded because the observer in app.js already
+  // covers the normal case — this is just belt and braces for the frame the
+  // class flips on.
+  function syncBottomClearances() {
+    if (typeof window.HopReachSyncBottomClearances === "function") window.HopReachSyncBottomClearances();
+  }
+
+  function setTransportSource(source) {
+    transportPause();
+    transportSource = source;
+    transportWarp = source ? buildTimeWarp(source.times) : null;
+    transportPlayMs = 0;
+    transportLastSrcMs = null;
+    const bar = transportEl("sim-transport");
+    const hasTimeline = !!(source && transportWarp && source.times.length > 0);
+    bar.classList.toggle("hidden", !hasTimeline);
+    if (!hasTimeline) {
+      syncBottomClearances();
+      return;
+    }
+    const seek = transportEl("sim-transport-seek");
+    seek.min = "0";
+    // A single-instant timeline (every event at the same ms) has zero play
+    // duration; give the scrubber a nonzero range so it isn't a dead control.
+    seek.max = String(Math.max(1, Math.round(transportWarp.durationPlayMs)));
+    seek.value = "0";
+    transportEl("sim-transport-label").textContent = source.label || "";
+    transportRender(false);
+    syncBottomClearances();
+  }
+
+  function clearTransportSource() {
+    transportPause();
+    transportSource = null;
+    transportWarp = null;
+    transportLastSrcMs = null;
+    transportEl("sim-transport").classList.add("hidden");
+    syncBottomClearances();
+  }
+
+  // Draws the world at the current play position. `animate` is passed to the
+  // source so it can pulse newly-crossed events while playing but stay silent
+  // while scrubbing — dragging the bar across a hundred hops shouldn't fire a
+  // hundred overlapping pulse animations.
+  function transportRender(animate) {
+    if (!transportSource || !transportWarp) return;
+    const srcMs = playToSrc(transportWarp, transportPlayMs);
+    const prev = animate && transportLastSrcMs != null && srcMs >= transportLastSrcMs ? transportLastSrcMs : null;
+    transportSource.render(srcMs, prev);
+    transportLastSrcMs = srcMs;
+    const seek = transportEl("sim-transport-seek");
+    if (document.activeElement !== seek) seek.value = String(Math.round(transportPlayMs));
+    transportEl("sim-transport-time").textContent = transportSource.format(srcMs);
+  }
+
+  function transportFrame(ts) {
+    if (!transportPlaying) return;
+    const dt = transportLastFrameTs ? ts - transportLastFrameTs : 0;
+    transportLastFrameTs = ts;
+    // Clamp the frame delta so a backgrounded tab (which stops firing rAF)
+    // doesn't resume by jumping the whole elapsed wall-clock at once.
+    transportPlayMs += Math.min(250, dt) * transportRate;
+    if (transportPlayMs >= transportWarp.durationPlayMs) {
+      transportPlayMs = transportWarp.durationPlayMs;
+      transportRender(true);
+      transportPause();
+      return;
+    }
+    transportRender(true);
+    transportRaf = requestAnimationFrame(transportFrame);
+  }
+
+  function transportPlay() {
+    if (!transportSource || !transportWarp) return;
+    // Playing from the very end restarts, rather than sitting there doing
+    // nothing — the common case after watching one through.
+    if (transportPlayMs >= transportWarp.durationPlayMs) {
+      transportPlayMs = 0;
+      transportLastSrcMs = null;
+      transportRender(false);
+    }
+    transportPlaying = true;
+    transportLastFrameTs = 0;
+    transportEl("sim-transport-play").textContent = "⏸";
+    transportEl("sim-transport-play").setAttribute("aria-label", "Pause");
+    transportRaf = requestAnimationFrame(transportFrame);
+  }
+
+  function transportPause() {
+    transportPlaying = false;
+    if (transportRaf) cancelAnimationFrame(transportRaf);
+    transportRaf = null;
+    const btn = transportEl("sim-transport-play");
+    if (btn) {
+      btn.textContent = "▶";
+      btn.setAttribute("aria-label", "Play");
+    }
+  }
+
+  function transportSeekTo(playMs) {
+    if (!transportWarp) return;
+    transportPlayMs = Math.max(0, Math.min(transportWarp.durationPlayMs, playMs));
+    transportLastSrcMs = null; // a seek can go backwards, so always rebuild
+    transportRender(false);
+  }
+
+  function transportToEnd() {
+    if (!transportWarp) return;
+    transportPause();
+    transportSeekTo(transportWarp.durationPlayMs);
+  }
+
+  function transportRestart() {
+    if (!transportWarp) return;
+    transportSeekTo(0);
+    transportPlay();
+  }
+
   let replayWaves = [];
   let replayIndex = 0;
-  let replayTimer = null;
 
   function buildWaves(report) {
     const groups = new Map();
@@ -3011,61 +3214,104 @@
     }
   }
 
-  function stopReplay() {
-    if (replayTimer) {
-      clearTimeout(replayTimer);
-      replayTimer = null;
+  // How many waves have happened by srcMs. replayWaves is sorted by atMs,
+  // so this is a binary search — it runs on every animation frame.
+  function countWavesUpTo(srcMs) {
+    let lo = 0;
+    let hi = replayWaves.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (replayWaves[mid].atMs <= srcMs) lo = mid + 1;
+      else hi = mid;
     }
+    return lo;
   }
 
-  function replayStep() {
-    if (replayIndex >= replayWaves.length) {
-      replayTimer = null;
-      setReplayStatus(replayWaves.length ? "Replay finished — showing final state." : "");
-      return;
-    }
-    const wave = replayWaves[replayIndex];
-    playWave(wave);
-    setReplayStatus(`Playing… t=${wave.atMs}ms (${replayIndex + 1}/${replayWaves.length})`);
-    const next = replayWaves[replayIndex + 1];
-    const deltaMs = next ? next.atMs - wave.atMs : 0;
-    // Clamp so a long gap between sends doesn't stall playback for real
-    // minutes, and a burst of near-simultaneous waves doesn't flash by too
-    // fast to actually watch.
-    const waitMs = Math.min(1200, Math.max(150, deltaMs));
-    replayIndex++;
-    replayTimer = setTimeout(replayStep, waitMs);
+  // The simulated flood as a transport source. Rendering is incremental
+  // while playing forward (append only the waves just crossed, pulses and
+  // all) and a full rebuild on any seek — with an early-out when the play
+  // head hasn't crossed a wave boundary at all, which is most frames.
+  function simTransportSource() {
+    return {
+      kind: "sim",
+      label: "Simulated flood",
+      times: replayWaves.map((w) => w.atMs),
+      format: (srcMs) => {
+        const k = countWavesUpTo(srcMs);
+        return `t=${Math.round(srcMs)}ms · ${k}/${replayWaves.length}`;
+      },
+      render: (srcMs, prevSrcMs) => {
+        const k = countWavesUpTo(srcMs);
+        if (prevSrcMs != null) {
+          const prevK = countWavesUpTo(prevSrcMs);
+          if (k === prevK) return; // nothing new happened this frame
+          // playWave already honours keepAllPaths (clearing the previous
+          // wave's lines when it's off), so this one path covers both views.
+          for (let i = prevK; i < k; i++) playWave(replayWaves[i]);
+          replayIndex = k;
+          setReplayStatus(k >= replayWaves.length ? "Replay finished — showing final state." : `Playing… t=${replayWaves[k - 1].atMs}ms (${k}/${replayWaves.length})`);
+          return;
+        }
+        // Seek (or first render): rebuild from scratch. redrawPathsForKeep-
+        // AllPaths reads replayIndex to decide what "now" means, so set it
+        // first — it's the same function the Keep-all-paths toggle uses, which
+        // keeps scrubbing and toggling in perfect agreement about what should
+        // be on screen.
+        replayIndex = k;
+        if (lastReport) redrawPathsForKeepAllPaths();
+        else {
+          simResultsLayer.clearLayers();
+          growthMarkers.clear();
+          currentWaveLines = [];
+          nodeGrowthCounts = [];
+        }
+        setReplayStatus(
+          replayWaves.length === 0 ? "" : k >= replayWaves.length ? "Showing final state." : `t=${Math.round(srcMs)}ms (${k}/${replayWaves.length})`
+        );
+      },
+    };
+  }
+
+  function stopReplay() {
+    transportPause();
   }
 
   function startReplay() {
-    stopReplay();
+    replayWaves = lastReport ? buildWaves(lastReport) : [];
+    replayIndex = 0;
     simResultsLayer.clearLayers();
     growthMarkers.clear();
     nodeGrowthCounts = [];
     currentWaveLines = [];
-    replayWaves = lastReport ? buildWaves(lastReport) : [];
-    replayIndex = 0;
-    replayStep();
+    if (replayWaves.length === 0) {
+      clearTransportSource();
+      setReplayStatus("");
+      return;
+    }
+    setTransportSource(simTransportSource());
+    transportPlay();
   }
 
   function skipToEnd() {
-    stopReplay();
-    // replayIndex first: redrawPathsForKeepAllPaths reads it to decide
-    // what "the current view" even is, and this IS the finished state.
-    replayIndex = replayWaves.length;
-    if (lastReport) {
-      // Honours "Keep all paths" rather than unconditionally drawing
-      // every line — skipping to the end of a live-view replay should
-      // land on that replay's own final wave, not silently switch the
-      // user into the accumulated-trail view they didn't ask for.
-      redrawPathsForKeepAllPaths();
-    } else {
+    // Skipping to the end before ever pressing play still needs the waves
+    // built and the transport pointed at them.
+    if (replayWaves.length === 0 && lastReport) {
+      replayWaves = buildWaves(lastReport);
+      if (replayWaves.length > 0) setTransportSource(simTransportSource());
+    }
+    if (!transportSource || transportSource.kind !== "sim") {
+      if (replayWaves.length > 0) setTransportSource(simTransportSource());
+    }
+    if (replayWaves.length === 0) {
       simResultsLayer.clearLayers();
       growthMarkers.clear();
       currentWaveLines = [];
       nodeGrowthCounts = [];
+      setReplayStatus("");
+      return;
     }
-    setReplayStatus(replayWaves.length ? "Showing final state." : "");
+    transportToEnd();
+    setReplayStatus("Showing final state.");
   }
 
   // Per-node real-world attributes (altitude, neighbour count) the rule
@@ -4850,7 +5096,6 @@
 
   let realTimelineEvents = [];
   let realTimelineIndex = 0;
-  let realTimelineTimer = null;
   let realTimelineWindowStartMs = 0;
   // The actual ± window (seconds) used for the most recent replay — read
   // from the "Surrounding activity window" control in replayFromHash, kept
@@ -4858,80 +5103,142 @@
   // rather than a stale hardcoded "±30s" (item 8).
   let lastRealTimelineWindowSecs = 30;
 
-  function playRealTimelineEvent(e) {
+  // The real-activity replay's status shows in two places at once — the
+  // bottleneck modal and the map-docked control (see
+  // ensureBottleneckLegendControl) — so everything goes through here rather
+  // than setStatus directly, same pattern as setReplayStatus.
+  let lastRealReplayStatusText = "";
+
+  function setRealReplayStatus(text) {
+    lastRealReplayStatusText = text;
+    setStatus("sim-bottleneck-replay-status", text);
+    const mapStatus = document.getElementById("sim-map-real-replay-status");
+    if (mapStatus) mapStatus.textContent = text;
+  }
+
+  // The packet being investigated is drawn hot pink and heavy; everything
+  // else CoreScope saw in the same window is thin, dim slate. The whole
+  // point of the window view is "what else was on the air while my packet
+  // was travelling", so the two have to be separable at a glance without
+  // reading a key — hence a difference in colour AND weight AND opacity
+  // rather than just hue (which alone is easy to lose against a busy
+  // basemap, and unreadable for anyone with a red/green deficiency).
+  const REAL_TARGET_COLOR = "#f472b6";
+  const REAL_CONTEXT_COLOR = "#64748b";
+
+  function playRealTimelineEvent(e, animate) {
     const from = simNodes[e.from];
     const to = simNodes[e.to];
     if (!from || !to) return;
-    const color = e.isTarget ? "#f472b6" : "#94a3b8";
+    const color = e.isTarget ? REAL_TARGET_COLOR : REAL_CONTEXT_COLOR;
     L.polyline(
       [
         [from.lat, from.lon],
         [to.lat, to.lon],
       ],
-      { color, weight: e.isTarget ? 4 : 2, opacity: e.isTarget ? 0.95 : 0.55 }
+      { color, weight: e.isTarget ? 5 : 2, opacity: e.isTarget ? 1 : 0.45 }
     ).addTo(simRealActivityLayer);
-    if (e.isTarget) pulseAt([to.lat, to.lon], color);
+    if (animate) pulseAt([to.lat, to.lon], color);
   }
 
-  function realTimelineStep() {
-    if (realTimelineIndex >= realTimelineEvents.length) {
-      realTimelineTimer = null;
-      setStatus(
-        "sim-bottleneck-replay-status",
-        realTimelineEvents.length
-          ? `Replay finished — showing the full ±${lastRealTimelineWindowSecs}s window.`
-          : `No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`
-      );
-      return;
+  // How many real hops have happened by srcMs (realTimelineEvents is sorted
+  // by tMs) — the real replay's equivalent of countWavesUpTo.
+  function countRealEventsUpTo(srcMs) {
+    let lo = 0;
+    let hi = realTimelineEvents.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (realTimelineEvents[mid].tMs <= srcMs) lo = mid + 1;
+      else hi = mid;
     }
-    const e = realTimelineEvents[realTimelineIndex];
-    playRealTimelineEvent(e);
-    const offsetS = ((e.tMs - realTimelineWindowStartMs) / 1000).toFixed(1);
-    setStatus(
-      "sim-bottleneck-replay-status",
-      `Playing… t=+${offsetS}s (${realTimelineIndex + 1}/${realTimelineEvents.length})${e.isTarget ? " · this is the replayed packet" : ""}`
-    );
-    const next = realTimelineEvents[realTimelineIndex + 1];
-    const deltaMs = next ? next.tMs - e.tMs : 0;
-    // Compress up to a minute of real wall-clock time into a watchable
-    // playback, same clamping approach as the simulator's own replayStep.
-    const waitMs = Math.min(1200, Math.max(150, deltaMs / 20));
-    realTimelineIndex++;
-    realTimelineTimer = setTimeout(realTimelineStep, waitMs);
+    return lo;
+  }
+
+  function realTransportSource() {
+    return {
+      kind: "real",
+      label: `Real traffic ±${lastRealTimelineWindowSecs}s`,
+      times: realTimelineEvents.map((e) => e.tMs),
+      // The readout stays in real seconds relative to the window's start,
+      // even though the scrubber moves through compressed play time — the
+      // offset into the real window is the number that actually means
+      // something when comparing against CoreScope.
+      format: (srcMs) => {
+        const offsetS = (srcMs - realTimelineWindowStartMs) / 1000;
+        const k = countRealEventsUpTo(srcMs);
+        return `+${offsetS.toFixed(1)}s · ${k}/${realTimelineEvents.length}`;
+      },
+      render: (srcMs, prevSrcMs) => {
+        const k = countRealEventsUpTo(srcMs);
+        if (prevSrcMs != null) {
+          const prevK = countRealEventsUpTo(prevSrcMs);
+          if (k === prevK) return;
+          for (let i = prevK; i < k; i++) playRealTimelineEvent(realTimelineEvents[i], realTimelineEvents[i].isTarget);
+          realTimelineIndex = k;
+          const e = realTimelineEvents[k - 1];
+          const offsetS = ((e.tMs - realTimelineWindowStartMs) / 1000).toFixed(1);
+          setRealReplayStatus(
+            k >= realTimelineEvents.length
+              ? `Replay finished — showing the full ±${lastRealTimelineWindowSecs}s window.`
+              : `Playing… t=+${offsetS}s (${k}/${realTimelineEvents.length})${e.isTarget ? " · this is the replayed packet" : ""}`
+          );
+          return;
+        }
+        // Seek: rebuild the window's state at this instant from scratch.
+        simRealActivityLayer.clearLayers();
+        for (let i = 0; i < k; i++) playRealTimelineEvent(realTimelineEvents[i], false);
+        realTimelineIndex = k;
+        const offsetS = ((srcMs - realTimelineWindowStartMs) / 1000).toFixed(1);
+        setRealReplayStatus(
+          realTimelineEvents.length === 0
+            ? `No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`
+            : k >= realTimelineEvents.length
+              ? `Showing the full ±${lastRealTimelineWindowSecs}s window.`
+              : `t=+${offsetS}s (${k}/${realTimelineEvents.length})`
+        );
+      },
+    };
   }
 
   function stopRealTimelineReplay() {
-    if (realTimelineTimer) {
-      clearTimeout(realTimelineTimer);
-      realTimelineTimer = null;
-    }
+    if (transportSource && transportSource.kind === "real") transportPause();
   }
 
   function startRealTimelineReplay() {
-    stopRealTimelineReplay();
+    if (realTimelineEvents.length === 0) {
+      setRealReplayStatus(`No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`);
+      return;
+    }
+    realTimelineWindowStartMs = realTimelineEvents[0].tMs;
     simRealActivityLayer.clearLayers();
     realTimelineIndex = 0;
-    if (realTimelineEvents.length > 0) realTimelineWindowStartMs = realTimelineEvents[0].tMs;
-    realTimelineStep();
+    setTransportSource(realTransportSource());
+    transportPlay();
   }
 
   function skipRealTimelineToEnd() {
-    stopRealTimelineReplay();
-    simRealActivityLayer.clearLayers();
-    for (const e of realTimelineEvents) playRealTimelineEvent(e);
-    realTimelineIndex = realTimelineEvents.length;
-    setStatus(
-      "sim-bottleneck-replay-status",
-      realTimelineEvents.length ? `Showing the full ±${lastRealTimelineWindowSecs}s window.` : `No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`
-    );
+    if (realTimelineEvents.length === 0) {
+      setRealReplayStatus(`No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`);
+      return;
+    }
+    realTimelineWindowStartMs = realTimelineEvents[0].tMs;
+    if (!transportSource || transportSource.kind !== "real") setTransportSource(realTransportSource());
+    transportToEnd();
   }
 
-  // A small always-on-top legend explaining the map's line colours while
-  // the bottleneck analysis is showing — added because a real replay can
-  // put four differently-coloured/styled line types on the map at once
-  // (proven+modeled, proven+unmodeled, predicted-unconfirmed, plus the
-  // ±30s real-activity replay's own target/context colours), which is
-  // genuinely hard to read without a key.
+  // The map-docked home for everything you need while *watching* a real
+  // packet replay: the transport controls, the live status line, and a key
+  // explaining the line colours (a replay can put five differently
+  // coloured/styled line types on the map at once — proven+modeled,
+  // proven+unmodeled, predicted-unconfirmed, plus the real-activity
+  // replay's own target/context colours — which is genuinely hard to read
+  // without one).
+  //
+  // The transport controls are duplicated here rather than living only in
+  // the bottleneck modal because that modal covers the map: driving the
+  // replay from it meant never being able to see the replay it was
+  // driving. Both copies call the same functions and share one status
+  // string (setRealReplayStatus), so they can't drift.
   let bottleneckLegendControl = null;
 
   function ensureBottleneckLegendControl() {
@@ -4942,21 +5249,51 @@
       // Item 14 — a real collapsible header, replacing the old static one.
       // Kept expanded by default (the shared helper's own normal default)
       // rather than collapsed: tests/simulator.spec.js asserts this key's
-      // own row text is present right after opening the bottleneck
-      // modal, with no prior interaction with this control itself.
+      // own row text is present right after a replay, with no prior
+      // interaction with this control itself.
       const rows = `
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#4ade80"></span>Proven &amp; modeled</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#38bdf8"></span>Proven, outside our model</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#facc15"></span>Predicted, unconfirmed</div>
-        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#f472b6"></span>Replayed packet (±30s view)</div>
-        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#94a3b8"></span>Other real traffic (±30s view)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#64748b"></span>Predicted, no evidence either way</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#f472b6"></span>Replayed packet (window view)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#94a3b8"></span>Other real traffic (window view)</div>
       `;
-      div.innerHTML = window.HopReachMapControls.collapsibleHtml("Map key", rows, "sim-bottleneck-legend");
+      div.innerHTML = `
+        <div id="sim-map-real-replay-controls" class="sim-real-replay-controls hidden">
+          <div class="plan-row sim-playback-buttons">
+            <button id="sim-map-real-replay" title="Watch the real traffic in this packet's window play out on the map, in the order it actually happened">▶ Play real traffic</button>
+            <button id="sim-map-real-replay-skip" title="Jump straight to the whole window drawn at once">⏭ Skip to end</button>
+          </div>
+          <div class="plan-hint" id="sim-map-real-replay-status"></div>
+        </div>
+        ${window.HopReachMapControls.collapsibleHtml("Map key", rows, "sim-bottleneck-legend")}
+        <button id="sim-map-open-bottleneck" class="sim-map-open-analysis" title="Open the full proven-vs-predicted breakdown (covers the map while it's open)">🔍 Bottleneck analysis</button>
+      `;
       L.DomEvent.disableClickPropagation(div);
       window.HopReachMapControls.wireCollapsible(div);
+      div.querySelector("#sim-map-real-replay").addEventListener("click", startRealTimelineReplay);
+      div.querySelector("#sim-map-real-replay-skip").addEventListener("click", skipRealTimelineToEnd);
+      div.querySelector("#sim-map-open-bottleneck").addEventListener("click", () => openModal("sim-bottleneck-modal"));
       return div;
     };
     bottleneckLegendControl.addTo(map);
+  }
+
+  // Shows/hides the map-docked transport controls and labels them with the
+  // window actually in use, so "±20s" on the panel control and what the map
+  // offers to play can never disagree.
+  function syncRealReplayControls() {
+    const wrap = document.getElementById("sim-map-real-replay-controls");
+    if (!wrap) return;
+    wrap.classList.toggle("hidden", realTimelineEvents.length === 0);
+    const btn = document.getElementById("sim-map-real-replay");
+    if (btn) btn.textContent = `▶ Play real ±${lastRealTimelineWindowSecs}s`;
+    // Also called after the control is rebuilt from scratch (reopening the
+    // simulator panel tears it down), so the status has to be restored onto
+    // the fresh DOM rather than left blank.
+    const mapStatus = document.getElementById("sim-map-real-replay-status");
+    if (mapStatus) mapStatus.textContent = lastRealReplayStatusText;
   }
 
   function removeBottleneckLegendControl() {
@@ -5034,9 +5371,29 @@
         if (p.observer_id) allPubkeys.add(p.observer_id.toLowerCase());
       }
 
-      clearNodes(); // a replay is a fresh investigation, not additive to whatever was already set up
+      // Keep every repeater already on the map and ADD the ones this
+      // packet's observations mention. This used to clearNodes() first —
+      // "a replay is a fresh investigation" — which quietly rigged the whole
+      // comparison: the only repeaters left standing were the ones CoreScope
+      // had already proved heard something, so the "predicted" flood had
+      // nowhere to spread that reality hadn't already confirmed, and any
+      // repeater that exists but simply wasn't heard was deleted before the
+      // model got a chance to predict a hop into it. Those are exactly the
+      // interesting ones. They stay, the model predicts into them, and
+      // renderBottleneckAnalysis reports the result honestly (it can't be
+      // confirmed OR refuted from this packet's observations — see its
+      // unconfirmable split).
       const pubkeyToIndex = new Map();
+      simNodes.forEach((n, i) => {
+        // Real repeaters carry their pubkey as refId, but the node directory
+        // and CoreScope's path data are lowercased — match case-insensitively
+        // or an already-loaded repeater gets silently duplicated.
+        if (n.source === "real" && n.refId) pubkeyToIndex.set(String(n.refId).toLowerCase(), i);
+      });
+      const alreadyLoaded = pubkeyToIndex.size;
+      let placedForReplay = 0;
       for (const pk of allPubkeys) {
+        if (pubkeyToIndex.has(pk)) continue; // already on the map
         const info = nodeDir.get(pk);
         if (!info) continue; // CoreScope knows the key but has no position for it — can't place it
         pubkeyToIndex.set(pk, simNodes.length);
@@ -5045,6 +5402,7 @@
         // and should never appear as a predicted relay hop, regardless of
         // whether our model's own connectivity would otherwise allow it.
         simNodes.push({ id: randomId(), source: "real", refId: pk, label: info.name, lat: info.lat, lon: info.lon, role: info.role, address: shortAddressFromPubkey(pk) });
+        placedForReplay++;
       }
       if (!pubkeyToIndex.has(originPubkey)) {
         throw new Error("The packet's origin has no known position — can't place it on the map.");
@@ -5059,8 +5417,7 @@
       document.getElementById("sim-bottleneck-replay-section").classList.toggle("hidden", realTimelineEvents.length === 0);
       document.getElementById("sim-bottleneck-replay-title").textContent = `Replay real activity (±${windowSecs}s)`;
       const capNote = hitCap ? ` — CoreScope's recent-packet cap was reached before the window's oldest edge, so this may be partial` : "";
-      setStatus(
-        "sim-bottleneck-replay-status",
+      setRealReplayStatus(
         realTimelineEvents.length
           ? `${windowPackets.length} real packet${windowPackets.length === 1 ? "" : "s"} observed within ±${windowSecs}s${capNote} — ready to replay.`
           : ""
@@ -5095,21 +5452,47 @@
       const originIndex = pubkeyToIndex.get(originPubkey);
       const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
       const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
-      const predictedReport = MeshSim.run(scenarioFromState(), [{ origin: originIndex, sendAtMs: 0, payloadLen, hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE }], seed, maxSimTimeMs);
+      const predictedMessages = [{ origin: originIndex, sendAtMs: 0, payloadLen, hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE }];
+      const predictedReport = MeshSim.run(scenarioFromState(), predictedMessages, seed, maxSimTimeMs);
 
       const routeType = packetData.packet ? packetData.packet.route_type : null;
       renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport });
       ensureBottleneckLegendControl();
-      openModal("sim-bottleneck-modal");
+      syncRealReplayControls();
+
+      // A replay's predicted run is a real report and belongs in the same
+      // places every other run's does — the reception log, the packet
+      // inspector, the per-repeater breakdown. It used to be computed,
+      // diffed against reality, and then thrown away: clearNodes() above
+      // has already nulled lastReport and torn down the playback control,
+      // so the map's reception log sat empty for the whole replay even
+      // though a full set of predicted receptions existed. Rendering it
+      // (deliberately without startReplay, which would clear the
+      // proven/predicted overlay renderBottleneckAnalysis just drew) means
+      // the log fills in and "▶ Replay" is there to animate the predicted
+      // flood whenever you want it.
+      lastReport = predictedReport;
+      lastMessages = predictedMessages;
+      rebuildLinkIndexes(predictedReport);
+      renderResults(predictedReport);
+      renderSentMessagesList();
+
       // Flood route types are TRANSPORT_FLOOD (0) and FLOOD (1); direct are
       // DIRECT (2) and TRANSPORT_DIRECT (3). Our model only predicts flood
       // relaying, so warn only for the DIRECT types — the previous check
       // (routeType !== 0) wrongly warned on plain floods and stayed silent
       // on transport-floods.
       const isDirect = routeType === 2 || routeType === 3;
+      // Deliberately doesn't open the bottleneck modal automatically. It
+      // covers the whole map (see #sim-modal-backdrop), which is precisely
+      // what you need to see while a replay plays — the transport controls
+      // and the map key are docked on the map itself now, and the
+      // "🔍 Bottleneck analysis" button opens the full breakdown on demand.
       setStatus(
         "sim-replay-hash-status",
-        `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}.` +
+        `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}. ` +
+          `Predicting over ${simNodes.length} repeaters (${alreadyLoaded} already loaded, ${placedForReplay} added from this packet's observations). ` +
+          `Press "▶ Play real ±${windowSecs}s" on the map to watch it, or open the bottleneck analysis for the full breakdown.` +
           (isDirect ? " Note: our model only predicts flood relaying, but this packet used direct (addressed) routing — the prediction side won't be meaningful." : "")
       );
     } catch (err) {
@@ -5131,11 +5514,36 @@
     for (const r of predictedReport.receptions || []) predictedPairs.set(`${r.fromNode}:${r.node}`, r);
 
     // Direction 1: the model expects this hop to work, but no real
-    // observation ever confirmed it — a candidate collision/bottleneck.
-    const unconfirmed = Array.from(predictedPairs.entries())
+    // observation ever confirmed it.
+    //
+    // "Unconfirmed" on its own badly overstates the case, and it's why this
+    // list looks alarmingly long: the node set on the map is every repeater
+    // seen anywhere in the whole ±window of surrounding traffic, while
+    // provenEdges only ever covers THIS packet's own observations. A
+    // predicted hop into a repeater that never appears anywhere in this
+    // packet's real path data can't be confirmed or refuted — CoreScope
+    // simply has no evidence either way (it only ever learns a hop happened
+    // when some observer reported a path through it). Absence of evidence
+    // there isn't evidence of absence, so those are split out as
+    // "unconfirmable" and are NOT bottleneck candidates.
+    //
+    // What's left — a predicted hop into a repeater that DOES appear in
+    // this packet's real path data, reached some other way but not this one
+    // — is the genuinely interesting set: reality had visibility of that
+    // node and still didn't record this hop.
+    const observedNodeIndices = new Set();
+    for (const e of provenEdges.values()) {
+      const f = pubkeyToIndex.get(e.from);
+      const t = pubkeyToIndex.get(e.to);
+      if (f != null) observedNodeIndices.add(f);
+      if (t != null) observedNodeIndices.add(t);
+    }
+    const allUnconfirmed = Array.from(predictedPairs.entries())
       .filter(([key]) => !provenPairIndices.has(key))
       .map(([, r]) => r)
       .sort((a, b) => a.atMs - b.atMs);
+    const unconfirmed = allUnconfirmed.filter((r) => observedNodeIndices.has(r.node));
+    const unconfirmable = allUnconfirmed.filter((r) => !observedNodeIndices.has(r.node));
 
     // Direction 2: CoreScope proved this hop happened, but our model
     // doesn't even consider it a possible link at all (never appears in
@@ -5157,12 +5565,16 @@
     document.getElementById("sim-bottleneck-summary").textContent =
       `${provenEdges.size} proven hop${provenEdges.size === 1 ? "" : "s"} from real CoreScope observations, ` +
       `${predictedPairs.size} predicted by our model — ${unconfirmed.length} predicted but never confirmed, ` +
+      `${unconfirmable.length} predicted into repeaters this packet's observations say nothing about (can't be judged either way), ` +
       `${unmodeled.length} proven but not even predicted possible.`;
+    document.getElementById("sim-bottleneck-unconfirmable-note").textContent = unconfirmable.length
+      ? `${unconfirmable.length} further predicted hop${unconfirmable.length === 1 ? "" : "s"} went into repeaters that never appear in this packet's real path data at all — CoreScope only learns a hop happened when one of its observers reports a path through it, so it has no evidence either way about those. They're excluded from the list below rather than counted as misses.`
+      : "";
 
     const list = document.getElementById("sim-bottleneck-list");
     list.innerHTML = "";
     if (unconfirmed.length === 0) {
-      list.innerHTML = '<div class="plan-empty">Every predicted relay was confirmed by a real observation.</div>';
+      list.innerHTML = `<div class="plan-empty">Every predicted relay into a repeater this packet's observations cover was confirmed by a real observation.</div>`;
     }
     for (const r of unconfirmed) {
       const from = simNodes[r.fromNode];
@@ -5171,7 +5583,7 @@
       row.className = "plan-list-item sim-list-item sim-collided";
       row.innerHTML = `
         <span class="plan-item-label">${escapeHtml(from ? from.label : "?")} → ${escapeHtml(to ? to.label : "?")}</span>
-        <span class="plan-item-sub">predicted at ~${r.atMs}ms, hop ${r.hopCount}${r.collided ? " · our model also predicts a collision here" : " · no real observer ever confirmed this hop"}</span>
+        <span class="plan-item-sub">predicted at ~${r.atMs}ms, hop ${r.hopCount}${r.collided ? " · our model also predicts a collision here" : " · this repeater does appear in the packet's real path data, just never via this hop"}</span>
       `;
       list.appendChild(row);
     }
@@ -5195,7 +5607,11 @@
 
     // Map: solid green for proven+modeled hops, solid blue for proven but
     // unmodeled (the model's own blind spot), dashed amber for
-    // predicted-but-unconfirmed (the bottleneck candidates).
+    // predicted-but-unconfirmed (the bottleneck candidates), and faint
+    // dashed slate for predicted-but-unjudgeable — drawn, because they're
+    // still what the model thinks happened and hiding them would misrepresent
+    // the predicted flood, but visually demoted so they don't read as
+    // failures the way a wall of amber did.
     simResultsLayer.clearLayers();
     const unmodeledPairs = new Set(unmodeled.map((e) => `${e.from}:${e.to}`));
     for (const e of provenEdges.values()) {
@@ -5223,6 +5639,18 @@
           [to.lat, to.lon],
         ],
         { color: "#facc15", weight: 3, opacity: 0.9, dashArray: "6 6" }
+      ).addTo(simResultsLayer);
+    }
+    for (const r of unconfirmable) {
+      const from = simNodes[r.fromNode];
+      const to = simNodes[r.node];
+      if (!from || !to) continue;
+      L.polyline(
+        [
+          [from.lat, from.lon],
+          [to.lat, to.lon],
+        ],
+        { color: "#64748b", weight: 2, opacity: 0.5, dashArray: "3 7" }
       ).addTo(simResultsLayer);
     }
   }
@@ -5433,11 +5861,27 @@
       simNodesLayer.addTo(map);
       simResultsLayer.addTo(map);
       simMessagePathLayer.addTo(map);
+      // Must be re-added alongside the other three: closing the panel
+      // removes it, and it used to be the one layer the open path never put
+      // back — so after a close/reopen the real-activity replay drew every
+      // hop into a detached layer group and nothing at all showed on the
+      // map, looking exactly like a replay that had found no traffic.
+      simRealActivityLayer.addTo(map);
       ensureSimViewControl();
       if (lastReport) ensureSimPlaybackControl(); // reopening Simulate mode with a report already computed
+      // Same for a replay already loaded: closing the panel tears the
+      // control down, and the replay's own state (realTimelineEvents, the
+      // drawn overlay) survives, so reopening has to put the transport
+      // controls and the map key back rather than leaving a loaded replay
+      // with no way to play it.
+      if (realTimelineEvents.length > 0) {
+        ensureBottleneckLegendControl();
+        syncRealReplayControls();
+      }
     } else {
       setPlacementMode("off");
       stopReplay();
+      clearTransportSource(); // the bar belongs to the simulator, not the map
       closeModals();
       setRankingsFullWindowOpen(false);
       map.removeLayer(simNodesLayer);
@@ -5510,6 +5954,32 @@
   });
   document.getElementById("sim-replay").addEventListener("click", startReplay);
   document.getElementById("sim-skip-to-end").addEventListener("click", skipToEnd);
+
+  // --- transport wiring ---
+  document.getElementById("sim-transport-play").addEventListener("click", () => {
+    if (transportPlaying) transportPause();
+    else transportPlay();
+  });
+  document.getElementById("sim-transport-seek").addEventListener("input", (e) => {
+    transportPause(); // grabbing the scrubber takes over from playback
+    transportSeekTo(parseInt(e.target.value, 10) || 0);
+  });
+  document.getElementById("sim-transport-speed").addEventListener("change", (e) => {
+    transportRate = parseFloat(e.target.value) || 1;
+  });
+  // Space toggles play/pause while the simulator is open, the way every
+  // other media transport does — but not while typing in a field, and not
+  // when a button has focus (space is that button's own activation key).
+  document.addEventListener("keydown", (e) => {
+    if (e.code !== "Space" || !transportSource) return;
+    if (document.getElementById("sim-transport").classList.contains("hidden")) return;
+    const el = document.activeElement;
+    const tag = el ? el.tagName : "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || (el && el.isContentEditable)) return;
+    e.preventDefault();
+    if (transportPlaying) transportPause();
+    else transportPlay();
+  });
   document.getElementById("sim-replay-hash-go").addEventListener("click", replayFromHash);
   document.getElementById("sim-reconstruct-episode").addEventListener("click", reconstructEpisodeFromWindow);
   document.getElementById("sim-packet-modal-back").addEventListener("click", goBackPacketModal);
@@ -5580,6 +6050,28 @@
         if (l instanceof L.Polyline) n++;
       });
       return n;
+    },
+    // Lines drawn by the real-activity replay, and whether the layer they
+    // go into is actually attached to the map — the two together are what a
+    // test needs to catch the replay drawing into a detached layer group
+    // (which looks identical to "found no traffic" from the outside).
+    getRealActivityLineCount: () => {
+      let n = 0;
+      simRealActivityLayer.eachLayer((l) => {
+        if (l instanceof L.Polyline) n++;
+      });
+      return n;
+    },
+    isRealActivityLayerOnMap: () => map.hasLayer(simRealActivityLayer),
+    // Stroke colour of every real-activity line — lets a test assert the
+    // replayed packet is actually drawn distinctly from the surrounding
+    // traffic, rather than just that some lines exist.
+    getRealActivityColors: () => {
+      const out = [];
+      simRealActivityLayer.eachLayer((l) => {
+        if (l instanceof L.Polyline) out.push(l.options.color);
+      });
+      return out;
     },
     getNodes: () => simNodes,
     getLinks: () => simLinks,
