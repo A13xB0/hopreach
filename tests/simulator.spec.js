@@ -1301,6 +1301,13 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
     expect(await page.evaluate(() => window.__hopreachSimulatorDebug.isRealActivityLayerOnMap())).toBe(true);
     expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityLineCount())).toBeGreaterThan(0);
 
+    // Everything below drives the replay from the map-docked controls, so
+    // the analysis modal (and its full-map backdrop) has to be out of the
+    // way first — which is exactly the workflow the docked controls exist
+    // for.
+    await page.click("#sim-bottleneck-modal [data-close]");
+    await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+
     // The replayed packet must be visually distinct from the surrounding
     // traffic — that's the whole point of the window view, so it's asserted
     // on stroke colour rather than left to the eye. Only the target's own
@@ -1308,14 +1315,22 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
     // in the window, in which case there's nothing to contrast it against.
     const colours = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityColors());
     expect(colours.filter((c) => c === "#f472b6").length).toBeGreaterThan(0);
-    expect(colours.every((c) => c === "#f472b6" || c === "#64748b")).toBe(true);
+    expect(colours.every((c) => ["#f472b6", "#22d3ee", "#a855f7"].includes(c))).toBe(true);
 
-    // Everything below drives the replay from the map-docked controls, so
-    // the analysis modal (and its full-map backdrop) has to be out of the
-    // way first — which is exactly the workflow the docked controls exist
-    // for.
-    await page.click("#sim-bottleneck-modal [data-close]");
-    await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
+    // These are floods, so each real transmission should also show the rest
+    // of its broadcast — the repeaters our model puts in earshot that no
+    // observer was positioned to confirm. Without it a flood renders as a
+    // single thread and the whole mesh looks like it missed the packet.
+    // Conditional on the model actually giving the senders somewhere to
+    // reach: a sender with no outgoing links has no flood to draw, which is
+    // a real (if uninteresting) state rather than a failure.
+    if (colours.some((c) => c === "#a855f7")) {
+      await page.uncheck("#sim-map-show-flood-reach");
+      const withoutReach = await page.evaluate(() => window.__hopreachSimulatorDebug.getRealActivityColors());
+      expect(withoutReach.filter((c) => c === "#a855f7").length).toBe(0);
+      expect(withoutReach.filter((c) => c === "#f472b6").length).toBeGreaterThan(0);
+      await page.check("#sim-map-show-flood-reach");
+    }
 
     // The same shared transport drives the real replay, scrubbing real
     // seconds into the window (compressed play time under the hood).

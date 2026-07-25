@@ -458,6 +458,16 @@ header .subtitle {
 }
 .sim-real-replay-controls { margin-bottom: 0.5rem; }
 .sim-real-replay-controls .plan-hint { margin: 0; font-size: 0.68rem; }
+.sim-flood-reach-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.35rem 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.sim-flood-reach-toggle input[type="checkbox"] { accent-color: var(--accent); }
 .sim-map-open-analysis {
   display: block;
   width: 100%;

@@ -5066,11 +5066,22 @@
     setStatus("sim-status", "Pinned the current run as the before/after baseline.");
   }
 
-  // Every hop of every packet observed in the window, in chronological
-  // order — the target packet's own hops are tagged isTarget so playback
-  // can highlight them distinctly from the surrounding real traffic.
+  // Every TRANSMISSION observed in the window, in chronological order — not
+  // every hop. That distinction is the whole point: CoreScope's
+  // resolved_path is a chain (origin → relay → relay → observer), which is
+  // the single thread it managed to reconstruct, but each link in that chain
+  // was a *broadcast*. These are floods (route type 0/1), not addressed
+  // packets: when a repeater relays one, every repeater in earshot hears it,
+  // not just the next node in the reconstructed path.
+  //
+  // Drawing the chain alone made a flood look like a piece of string and
+  // made the rest of the mesh look like it had missed the packet, when
+  // really CoreScope just has no observer positioned to report those hops.
+  // So hops sharing a sender and an instant are collapsed into one
+  // transmission with a list of confirmed recipients, and the renderer fans
+  // the rest of the model's predicted reach out from the same sender.
   function buildRealTimeline(windowPackets, targetHash, pubkeyToIndex) {
-    const events = [];
+    const byTransmission = new Map();
     for (const p of windowPackets) {
       const tMs = Date.parse(p.timestamp);
       if (Number.isNaN(tMs)) continue;
@@ -5087,9 +5098,16 @@
         const f = pubkeyToIndex.get(fromKey);
         const t = pubkeyToIndex.get(toKey);
         if (f == null || t == null) continue;
-        events.push({ tMs, from: f, to: t, isTarget, hash: p.hash });
+        const key = `${f}:${tMs}:${p.hash}`;
+        let tx = byTransmission.get(key);
+        if (!tx) {
+          tx = { tMs, from: f, tos: [], isTarget, hash: p.hash };
+          byTransmission.set(key, tx);
+        }
+        if (!tx.tos.includes(t)) tx.tos.push(t);
       }
     }
+    const events = Array.from(byTransmission.values());
     events.sort((a, b) => a.tMs - b.tMs);
     return events;
   }
@@ -5116,32 +5134,67 @@
     if (mapStatus) mapStatus.textContent = text;
   }
 
-  // The packet being investigated is drawn hot pink and heavy; everything
-  // else CoreScope saw in the same window is thin, dim slate. The whole
-  // point of the window view is "what else was on the air while my packet
-  // was travelling", so the two have to be separable at a glance without
-  // reading a key — hence a difference in colour AND weight AND opacity
-  // rather than just hue (which alone is easy to lose against a busy
-  // basemap, and unreadable for anyone with a red/green deficiency).
+  // The packet being investigated is hot pink; other real traffic in the
+  // same window is cyan. Both are saturated colours that hold up against a
+  // dark basemap — slate grey was used for the context traffic and was
+  // simply too close to the map itself to read. They also differ in weight
+  // and opacity, not just hue, so they stay separable without the key and
+  // for anyone with a colour deficiency.
+  //
+  // The violet fan is the flood itself: for every real transmission, every
+  // other repeater our model says was in earshot. A flood is a broadcast, so
+  // this is what actually went out over the air — the pink/cyan lines are
+  // only the subset CoreScope had an observer in place to reconstruct.
   const REAL_TARGET_COLOR = "#f472b6";
-  const REAL_CONTEXT_COLOR = "#64748b";
+  const REAL_CONTEXT_COLOR = "#22d3ee";
+  const REAL_FLOOD_REACH_COLOR = "#a855f7";
+
+  function showFloodReach() {
+    const el = document.getElementById("sim-map-show-flood-reach");
+    return el ? el.checked : true;
+  }
 
   function playRealTimelineEvent(e, animate) {
     const from = simNodes[e.from];
-    const to = simNodes[e.to];
-    if (!from || !to) return;
+    if (!from) return;
     const color = e.isTarget ? REAL_TARGET_COLOR : REAL_CONTEXT_COLOR;
-    L.polyline(
-      [
-        [from.lat, from.lon],
-        [to.lat, to.lon],
-      ],
-      { color, weight: e.isTarget ? 5 : 2, opacity: e.isTarget ? 1 : 0.45 }
-    ).addTo(simRealActivityLayer);
-    if (animate) pulseAt([to.lat, to.lon], color);
+    const confirmed = new Set(e.tos);
+
+    // The rest of the broadcast, drawn first so the confirmed hops sit on
+    // top of it rather than being buried by a dense fan.
+    if (showFloodReach()) {
+      for (const l of simLinks) {
+        if (l.from !== e.from || confirmed.has(l.to)) continue;
+        const other = simNodes[l.to];
+        if (!other) continue;
+        L.polyline(
+          [
+            [from.lat, from.lon],
+            [other.lat, other.lon],
+          ],
+          { color: REAL_FLOOD_REACH_COLOR, weight: 1.5, opacity: 0.35, dashArray: "4 6", interactive: false }
+        ).addTo(simRealActivityLayer);
+      }
+    }
+
+    for (const toIdx of e.tos) {
+      const to = simNodes[toIdx];
+      if (!to) continue;
+      L.polyline(
+        [
+          [from.lat, from.lon],
+          [to.lat, to.lon],
+        ],
+        { color, weight: e.isTarget ? 5 : 3, opacity: e.isTarget ? 1 : 0.8 }
+      ).addTo(simRealActivityLayer);
+      if (animate) pulseAt([to.lat, to.lon], color);
+    }
+    // Pulse the sender too — that's where the flood radiates from, and it
+    // reads as a transmission rather than just a line appearing.
+    if (animate) pulseAt([from.lat, from.lon], color);
   }
 
-  // How many real hops have happened by srcMs (realTimelineEvents is sorted
+  // How many real transmissions have happened by srcMs (realTimelineEvents is sorted
   // by tMs) — the real replay's equivalent of countWavesUpTo.
   function countRealEventsUpTo(srcMs) {
     let lo = 0;
@@ -5255,9 +5308,10 @@
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#4ade80"></span>Proven &amp; modeled</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#38bdf8"></span>Proven, outside our model</div>
         <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#facc15"></span>Predicted, unconfirmed</div>
-        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#64748b"></span>Predicted, no evidence either way</div>
-        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#f472b6"></span>Replayed packet (window view)</div>
-        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:#94a3b8"></span>Other real traffic (window view)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:#818cf8"></span>Predicted, no evidence either way</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:${REAL_TARGET_COLOR}"></span>Replayed packet (window view)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch" style="background:${REAL_CONTEXT_COLOR}"></span>Other real traffic (window view)</div>
+        <div class="sim-legend-row"><span class="sim-legend-swatch sim-legend-dashed" style="border-color:${REAL_FLOOD_REACH_COLOR}"></span>Rest of the flood (in earshot, unobserved)</div>
       `;
       div.innerHTML = `
         <div id="sim-map-real-replay-controls" class="sim-real-replay-controls hidden">
@@ -5265,6 +5319,10 @@
             <button id="sim-map-real-replay" title="Watch the real traffic in this packet's window play out on the map, in the order it actually happened">▶ Play real traffic</button>
             <button id="sim-map-real-replay-skip" title="Jump straight to the whole window drawn at once">⏭ Skip to end</button>
           </div>
+          <label class="sim-flood-reach-toggle" title="These are floods, so every transmission was heard by everyone in earshot — not just the one path CoreScope could reconstruct. This fans our model's predicted reach out from each real sender, filling in around the observations.">
+            <input type="checkbox" id="sim-map-show-flood-reach" checked>
+            Show the whole flood
+          </label>
           <div class="plan-hint" id="sim-map-real-replay-status"></div>
         </div>
         ${window.HopReachMapControls.collapsibleHtml("Map key", rows, "sim-bottleneck-legend")}
@@ -5274,6 +5332,12 @@
       window.HopReachMapControls.wireCollapsible(div);
       div.querySelector("#sim-map-real-replay").addEventListener("click", startRealTimelineReplay);
       div.querySelector("#sim-map-real-replay-skip").addEventListener("click", skipRealTimelineToEnd);
+      // Toggling redraws the current instant in place rather than only
+      // affecting the next play — same live-lens principle as "Keep all
+      // paths" (see redrawPathsForKeepAllPaths).
+      div.querySelector("#sim-map-show-flood-reach").addEventListener("change", () => {
+        if (transportSource && transportSource.kind === "real") transportSeekTo(transportPlayMs);
+      });
       div.querySelector("#sim-map-open-bottleneck").addEventListener("click", () => openModal("sim-bottleneck-modal"));
       return div;
     };
@@ -5650,7 +5714,7 @@
           [from.lat, from.lon],
           [to.lat, to.lon],
         ],
-        { color: "#64748b", weight: 2, opacity: 0.5, dashArray: "3 7" }
+        { color: "#818cf8", weight: 2, opacity: 0.6, dashArray: "3 7" }
       ).addTo(simResultsLayer);
     }
   }
