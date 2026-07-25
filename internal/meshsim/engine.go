@@ -856,10 +856,23 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 						continue
 					}
 					if startsBeforeLock(tx, other) {
+						// A preamble-window interferer prevents lock outright
+						// (see aggregation note below); its exact level never
+						// enters a margin comparison, so it isn't faded.
 						preambleInterferers = append(preambleInterferers, other.sender)
 					} else {
+						// Each post-lock interferer's own instantaneous level
+						// fades independently of the wanted signal — so the
+						// capture margin sees genuine both-sided channel
+						// variance, not just the wanted side (this was
+						// wanted-only in phase 7; both-sided is the faithful
+						// model). Only drawn when fading is enabled.
+						isnr := linkSNR(adj, other.sender, e.listener)
+						if channel.FadingSigmaDB > 0 {
+							isnr += channel.FadingSigmaDB * gaussian(rng)
+						}
 						payloadInterferers = append(payloadInterferers, other.sender)
-						payloadInterfererSNRs = append(payloadInterfererSNRs, linkSNR(adj, other.sender, e.listener))
+						payloadInterfererSNRs = append(payloadInterfererSNRs, isnr)
 					}
 				}
 				anyInterferer := len(preambleInterferers) > 0 || len(payloadInterferers) > 0

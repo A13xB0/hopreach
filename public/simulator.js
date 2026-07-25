@@ -252,7 +252,13 @@
       // dropping all scoped traffic (see SimNode.Regions' own doc comment
       // on the "*" wildcard). Editable afterwards in the nodes modal same
       // as a real repeater's observed scopes.
-      simNodes.push({ id: randomId(), source: "planned", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, regions: ["*"], address: generatedShortAddress() });
+      // antennaHeightM (mast height above ground) is threaded through from
+      // the plan — the model link builder uses it per-node on BOTH ends of
+      // a link (see nodeAntennaHeightM/buildLinksFromModel). Previously
+      // dropped here, so every repeater was simulated at the global default
+      // height regardless of the mast the user configured — badly wrong for
+      // the repeater-to-repeater links the flood sim is entirely about.
+      simNodes.push({ id: randomId(), source: "planned", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, antennaHeightM: r.antennaHeightM ?? null, regions: ["*"], address: generatedShortAddress() });
       added++;
     }
     invalidateLinks();
@@ -319,6 +325,7 @@
       // nodes modal, not asserted the way observed scopes are.
       simNodes.push({
         id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
+        antennaHeightM: r.antennaHeightM ?? null, // a repositioned real repeater may carry an override mast height; otherwise the default applies
         regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: !r.observedUnscoped,
         address: shortAddressFromPubkey(r.id),
       });
@@ -958,11 +965,13 @@
       if (radioTouched) radioChanged = true;
       applied++;
     });
-    // A link's baked-in SNR is anchored to its receiver's SF (see
-    // receiverSf) — changing any node's radio (SF in particular)
-    // invalidates every previously-built link's SNR, so rebuild is
-    // required for the reception model to stay consistent. Delay/power-only
-    // edits don't touch link SNR, so only invalidate when radio changed.
+    // A modelled link's baked-in SNR depends on the receiver's SF (see
+    // receiverSf) AND, now, each node's own tx power (see
+    // buildLinksFromModel's txPowerDelta) — both edited in this modal — so
+    // any radio/power change must invalidate the built links for the
+    // reception model to stay consistent. radioChanged is set whenever a
+    // radio field was applied (every row carries them), which also covers
+    // the tx-power case, so this rebuilds conservatively on Apply.
     if (radioChanged) invalidateLinks();
     // Re-render the Message senders picker/list — they can render
     // node-derived state (e.g. the picker's own option text), which would
@@ -1188,19 +1197,58 @@
     return effectivePrefsFor(node).radio.sf;
   }
 
+  // A node's own antenna height above ground (metres), used on BOTH ends of
+  // a modelled link. A planned/real repeater uses its configured mast height
+  // (falling back to the global repeater default); a companion is a handheld
+  // client device, not a mast, so it uses the receiver/handheld height
+  // instead. Getting this per-node right matters most for repeater-to-
+  // repeater links — the entire subject of the flood simulation — which were
+  // previously all computed at the single global default height.
+  function nodeAntennaHeightM(node) {
+    if (node.antennaHeightM != null) return node.antennaHeightM;
+    if (node.source === "companion") return cfg.propagation.rxHeightM;
+    return cfg.propagation.antennaHeightM;
+  }
+
+  // The propagation model bakes the receiver height into its Params
+  // (RxHeightM), but a modelled link's receiver is itself a repeater with
+  // its own mast height — so we hand pathMargin a params variant whose
+  // rxHeightM is the RECEIVER node's own height. Cached by height value so a
+  // whole mesh of same-height repeaters shares one Wasm params handle rather
+  // than marshalling a fresh one per link (see propagation.js handleFor).
+  const rxHeightParamsCache = new Map();
+  function propagationForRxHeight(rxHeightM) {
+    let p = rxHeightParamsCache.get(rxHeightM);
+    if (!p) {
+      p = { ...cfg.propagation, rxHeightM };
+      rxHeightParamsCache.set(rxHeightM, p);
+    }
+    return p;
+  }
+
   async function buildLinksFromModel(nodes) {
     const grid = await ensureGrid(nodes);
     const links = [];
+    const baseTxPowerDbm = cfg.propagation.txPowerDbm;
     for (let i = 0; i < nodes.length; i++) {
       const groundM = grid.at(nodes[i].lat, nodes[i].lon);
-      const txHeightASL = groundM + cfg.propagation.antennaHeightM;
+      const txHeightASL = groundM + nodeAntennaHeightM(nodes[i]);
+      // Received power scales 1:1 with transmit power, and margin is just
+      // received power minus a fixed sensitivity/fade — so a node's own
+      // `set tx` deviation from the model's baseline power shifts the margin
+      // by exactly that difference. This is what finally lets a tx-power
+      // change actually affect the simulation (previously it was ignored
+      // entirely — the model always used the config's single tx power).
+      const txPowerDelta = (effectivePrefsFor(nodes[i]).txPowerDbm ?? baseTxPowerDbm) - baseTxPowerDbm;
       for (let j = 0; j < nodes.length; j++) {
         if (i === j) continue;
         const d = Propagation.haversineKm(nodes[i].lat, nodes[i].lon, nodes[j].lat, nodes[j].lon);
         if (d > SIM_MAX_RANGE_KM) continue;
-        const margin = Propagation.pathMargin(grid, cfg.propagation, nodes[i].lat, nodes[i].lon, txHeightASL, nodes[j].lat, nodes[j].lon, d);
+        // Receiver is j — anchor the receiver height to j's own antenna.
+        const p = propagationForRxHeight(nodeAntennaHeightM(nodes[j]));
+        let margin = Propagation.pathMargin(grid, p, nodes[i].lat, nodes[i].lon, txHeightASL, nodes[j].lat, nodes[j].lon, d);
+        margin += txPowerDelta;
         if (margin < 0) continue; // below the model's own reception threshold — not a link
-        // Receiver is j (the link is "i's transmission is audible at j").
         links.push({ from: i, to: j, snrDb: approxSnrFromMargin(margin, receiverSf(nodes[j])) });
       }
     }
@@ -4943,6 +4991,10 @@
   window.__hopreachSimulatorDebug = {
     getNodeCount: () => simNodes.length,
     getLinkCount: () => simLinks.length,
+    // The directed link between two node indices (or undefined) — lets a
+    // test confirm a built link's SNR actually responds to per-node
+    // antenna height / tx power (see buildLinksFromModel).
+    getLink: (from, to) => simLinks.find((l) => l.from === from && l.to === to),
     getMessageCount: () => messagesFromState(parseInt(document.getElementById("sim-seed").value, 10) || 0).length,
     getMessageGeneratorCount: () => simMessageGenerators.length,
     getLastReport: () => lastReport,

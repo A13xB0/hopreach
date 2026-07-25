@@ -89,18 +89,58 @@ the new behaviour only appears with multiple simultaneous post-lock
 interferers. Preamble-window interferers are handled first and separately
 (any one prevents lock → `no_lock`, which still dominates `corrupted`).
 
-## What is deliberately still approximate (documented, not fixed here)
+## Second review pass — per-node siting and both-sided fading
+
+A follow-up review found the model link builder was throwing away
+per-node siting the user explicitly configures, which then fed the whole
+flood graph:
+
+- **Per-node antenna (mast) height was ignored.** `buildLinksFromModel`
+  used the single global `cfg.propagation.antennaHeightM` for the
+  transmitter of every link and the global `RxHeightM` for every receiver —
+  even though the planner lets each repeater set its own mast height (and
+  the coverage map respects it). Worse, `simNodes` didn't even carry
+  `antennaHeightM` from the plan, so it was dropped before the sim saw it.
+  Every repeater-to-repeater link — the entire subject of the flood sim —
+  was computed at handheld height on both ends, badly understating range
+  and SNR. Fixed: thread `antennaHeightM` into `simNodes`, and use each
+  node's own height on BOTH ends of a link (`nodeAntennaHeightM`; a
+  companion is treated as a handheld client at the receiver height, not a
+  mast). The receiver height is threaded via a per-height params variant
+  (`propagationForRxHeight`, cached so a same-height mesh shares one Wasm
+  handle) — no propagation-model signature change needed.
+- **Per-node tx power was ignored** (`set tx` couldn't be evaluated).
+  Received power scales 1:1 with transmit power and margin is received
+  power minus a fixed sensitivity, so a node's own tx-power deviation from
+  the model baseline shifts the margin by exactly that difference — applied
+  directly in `buildLinksFromModel`. Verified live: dropping a node from 22
+  to 1 dBm lowered its link SNR by exactly 21 dB.
+- **Fading is now applied to interferers too**, not just the wanted signal
+  (phase 7's first pass was wanted-only) — so the aggregated capture margin
+  sees genuine both-sided channel variance. Still gated on the same
+  `FadingSigmaDB` knob, so legacy (zero) behaviour is unchanged.
+
+## What is deliberately still approximate (and why it's the right call)
 
 - **The margin→SNR and observation-count→SNR mappings are proxies**, not
-  calibrated dB-above-noise. Good for relative comparison; the 6 dB capture
-  margin therefore operates on a synthetic SNR scale. Calibrating against
-  real measured SNR would need hardware data the tool doesn't have.
-- **Fading is applied to the wanted signal only**, not per-interferer.
-- **`set tx` power** still doesn't feed link SNR (links come from the
-  propagation model / observation counts, not per-node tx power), so a
-  suggested tx-power change can't yet be evaluated.
+  calibrated dB-above-noise. This is intentional, not a gap to close: the
+  two connectivity sources (terrain model vs. CoreScope observation count)
+  have no common physical SNR scale, and both are re-anchored to the same
+  per-SF reception threshold so they stay comparable when blended and when
+  they interact via the capture effect. Switching model links to a true
+  noise-floor SNR while observation links stayed a count-proxy would put the
+  two on different scales — worse, not better. Absolute-power calibration
+  would also need hardware/foliage data the terrain model structurally
+  lacks.
+- **Preamble-window interference prevents lock regardless of strength** (a
+  conservative choice — real LoRa preamble correlation can tolerate a much
+  weaker concurrent signal). Left as-is deliberately: strength-aware lock is
+  genuinely murkier physically than payload capture, and the conservative
+  model matches how the existing no_lock tests were written.
 - **The upstream terrain propagation model** (`internal/propagation`,
-  FSPL + knife-edge) is a separate accuracy axis feeding `margin`.
+  FSPL + single knife-edge, no foliage/buildings) is a separate accuracy
+  axis feeding `margin`. The planner's own LOS check shares the same
+  per-node-height limitation the sim just fixed — worth aligning later.
 
 ## Verification
 
