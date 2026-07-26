@@ -596,8 +596,16 @@
   const neighborWindowControl = L.control({ position: "topright" });
   neighborWindowControl.onAdd = function () {
     const div = L.DomUtil.create("div", "neighbor-window-control");
-    div.innerHTML = `
-      <label for="plan-neighbor-window">Neighbours observed in the last</label>
+    // The one floating map control that never had a collapse mechanism at
+    // all — every sibling (scope filter, map display, map detail) goes
+    // through the shared collapsibleHtml/wireCollapsible pair, this one
+    // was hand-rolled as a single always-expanded row. On a narrow
+    // viewport that's one more permanently-open card in a stack that
+    // already dominates the screen (see MOBILE-02), with no way to
+    // collapse it even via Declutter (which only ever touches
+    // .map-control-header elements). Brought in line with the others.
+    const body = `
+      <label for="plan-neighbor-window">Window</label>
       <select id="plan-neighbor-window">
         <option value="1" selected>24 hours</option>
         <option value="3">3 days</option>
@@ -606,8 +614,10 @@
         <option value="30">30 days</option>
       </select>
     `;
+    div.innerHTML = window.HopReachMapControls.collapsibleHtml("Neighbours observed", body, "neighbor-window");
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
+    window.HopReachMapControls.wireCollapsible(div);
     div.querySelector("#plan-neighbor-window").addEventListener("change", (e) => {
       setReachWindowDays(parseInt(e.target.value, 10));
     });

@@ -153,3 +153,116 @@ test("map detail defaults to Calibrated Precision, resetting an old saved prefer
   await page.waitForSelector("#position-mode-select", { timeout: 60_000 });
   await expect(page.locator("#position-mode-select")).toHaveValue("standard");
 });
+
+// Regression test for a real bug found from live phone screenshots:
+// #map-tools docks bottom-left and the panels used to dock right at up to
+// 92vw, so on a phone a panel's left edge sat ON TOP of the toolbar —
+// same z-index, later in DOM order, so the panel won. The toolbar stayed
+// visibly on screen but every tap on it hit whatever panel content was
+// underneath, confirmed via elementFromPoint at a button's own centre
+// landing on an unrelated button inside the panel.
+//
+// The phone layout removes the overlap rather than working around it: the
+// panels are bottom SHEETS and #map-tools is the full-width tab bar
+// directly beneath them, so the two stack. The invariant worth pinning
+// down is therefore the one the bug actually violated — a tap on a tab
+// bar button reaches that button — not the old workaround of hiding the
+// bar, which cost the phone layout its navigation.
+test("the tab bar stays tappable, not swallowed by an open sheet, on a narrow viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.goto("/");
+  await expect(page.locator("#map-tools")).toBeVisible();
+
+  for (const [openId, panelId, closeId] of [
+    ["#sim-toggle", "#sim-panel", "#sim-panel-close"],
+    ["#plan-toggle", "#plan-panel", "#plan-panel-close"],
+  ]) {
+    await page.click(openId);
+    await expect(page.locator(panelId)).toBeVisible();
+    // The nav stays put while a sheet is open — that's the whole point of
+    // a tab bar.
+    await expect(page.locator("#map-tools")).toBeVisible();
+
+    // The sheet must sit entirely ABOVE the bar, never across it.
+    const stacked = await page.evaluate((sel) => {
+      const sheet = document.querySelector(sel).getBoundingClientRect();
+      const bar = document.querySelector("#map-tools").getBoundingClientRect();
+      return { overlaps: sheet.bottom > bar.top + 1, barTop: bar.top, sheetBottom: sheet.bottom };
+    }, panelId);
+    expect(stacked.overlaps, `sheet ${panelId} overlaps the tab bar: ${JSON.stringify(stacked)}`).toBe(false);
+
+    // And the original bug directly: hit-testing each button's own centre
+    // must return that button, not something inside the sheet.
+    const misrouted = await page.evaluate(() => {
+      const bad = [];
+      document.querySelectorAll("#map-tools button").forEach((btn) => {
+        if (btn.offsetParent === null) return; // not shown at this width
+        const r = btn.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (!hit || hit.closest("#map-tools") === null) bad.push(btn.id);
+      });
+      return bad;
+    });
+    expect(misrouted, `taps on these tab bar buttons land elsewhere: ${misrouted.join(", ")}`).toEqual([]);
+
+    await page.click(closeId);
+    await expect(page.locator(panelId)).toBeHidden();
+  }
+
+  // Desktop must be completely unaffected — there the toolbar is still the
+  // floating bottom-left cluster and the panels are still right-docked
+  // sidebars, which coexist without overlapping at all.
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await page.click("#sim-toggle");
+  await expect(page.locator("#sim-panel")).toBeVisible();
+  await expect(page.locator("#map-tools")).toBeVisible();
+});
+
+// The phone layout moves the controls that stack down the map's right edge
+// on desktop into a single "Map options" sheet — MOVED, not copied, so
+// there's exactly one of each with its listeners intact. Both directions
+// of the breakpoint have to work: a rotate or a desktop window resize must
+// not leave a control stranded in a sheet that's now display:none.
+test("map controls move into the Map options sheet on a phone and back on desktop", async ({ page }) => {
+  const inSheet = () => page.locator("#map-options-body > *").count();
+  const onMap = () => page.locator(".leaflet-top.leaflet-right > *").count();
+
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await page.goto("/");
+  // Wait for the async-mounting controls (the region filter waits on a
+  // live CoreScope call) so the counts below aren't racing the last one in.
+  await expect(page.locator(".scope-filter-control")).toBeVisible({ timeout: 60_000 });
+
+  const desktopOnMap = await onMap();
+  expect(desktopOnMap).toBeGreaterThan(0);
+  expect(await inSheet()).toBe(0);
+  await expect(page.locator("#map-options-sheet")).toBeHidden();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(inSheet).toBeGreaterThan(0);
+  expect(await onMap()).toBe(0);
+
+  // Exactly one of each — a clone would silently double them up, and the
+  // copy without listeners is the one you'd end up tapping.
+  for (const sel of [".map-display-control", ".position-mode-control", ".scope-filter-control", ".legend"]) {
+    expect(await page.locator(sel).count(), `${sel} should exist exactly once`).toBe(1);
+  }
+
+  // The sheet opens from the tab bar and the moved controls still work —
+  // toggling a real checkbox proves the listeners came with the element.
+  await page.click("#map-options-toggle");
+  await expect(page.locator("#map-options-sheet")).toBeVisible();
+  const clustering = page.locator("#map-options-body #toggle-clustering");
+  if (await clustering.count()) {
+    await page.click("#map-options-body .map-display-control .map-control-header");
+    await clustering.check();
+    await expect(clustering).toBeChecked();
+  }
+  await page.click("#map-options-close");
+  await expect(page.locator("#map-options-sheet")).toBeHidden();
+
+  // Back to desktop: everything returns to the map, nothing stranded.
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await expect.poll(onMap).toBe(desktopOnMap);
+  expect(await inSheet()).toBe(0);
+});

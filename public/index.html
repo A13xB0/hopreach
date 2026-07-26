@@ -16,10 +16,13 @@
       <h1 id="site-title">ScotMesh Repeater Coverage</h1>
       <span class="subtitle" id="site-subtitle">MeshCore repeater map, refreshed daily</span>
     </div>
+    <!-- The status words are wrapped so a phone header can drop to just
+         "●43 ●19 ●11" (dot + count) without losing them for screen
+         readers — see the .stat-word rule in style.css's mobile block. -->
     <div id="stats">
-      <span class="stat"><span class="dot active"></span><span id="count-active">–</span> active</span>
-      <span class="stat"><span class="dot degraded"></span><span id="count-degraded">–</span> degraded</span>
-      <span class="stat"><span class="dot silent"></span><span id="count-silent">–</span> silent</span>
+      <span class="stat"><span class="dot active"></span><span id="count-active">–</span> <span class="stat-word">active</span></span>
+      <span class="stat"><span class="dot degraded"></span><span id="count-degraded">–</span> <span class="stat-word">degraded</span></span>
+      <span class="stat"><span class="dot silent"></span><span id="count-silent">–</span> <span class="stat-word">silent</span></span>
       <span class="stat" id="last-updated">Last updated: –</span>
     </div>
   </header>
@@ -31,11 +34,36 @@
   <div id="map-wrap">
     <div id="map"></div>
 
+    <!-- Below 700px this row stops being a floating button cluster and
+         becomes the full-width bottom tab bar (see style.css) — hence the
+         icon/label split, and the two label variants: a phone shows the
+         short one so four tabs fit a 360px screen without wrapping.
+         #map-options-toggle is phone-only (it opens the sheet that the
+         right-edge control stack gets folded into) and #map-declutter-toggle
+         is desktop-only (that sheet is what decluttering is *for* on a
+         phone, so the button has nothing left to do there). -->
     <div id="map-tools">
-      <button id="plan-toggle" title="Planning tools">Plan</button>
-      <button id="sim-toggle" title="LoRa flood simulator">📡 Simulate <span class="alpha-badge">ALPHA</span></button>
-      <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it">📍 Companion pin</button>
-      <button id="map-declutter-toggle" title="Collapse (or restore) every map control at once">🧹 Declutter</button>
+      <button id="plan-toggle" title="Planning tools"><span class="tool-icon" aria-hidden="true">✎</span><span class="tool-label">Plan</span><span class="tool-label-short">Plan</span></button>
+      <button id="sim-toggle" title="LoRa flood simulator"><span class="tool-icon" aria-hidden="true">📡</span><span class="tool-label">Simulate</span><span class="tool-label-short">Sim</span><span class="alpha-badge">ALPHA</span></button>
+      <button id="companion-pin-toggle" title="Drop a pin anywhere to see who'd hear it"><span class="tool-icon" aria-hidden="true">📍</span><span class="tool-label">Companion pin</span><span class="tool-label-short">Pin</span></button>
+      <button id="map-options-toggle" title="Basemap, filters and legend"><span class="tool-icon" aria-hidden="true">⚙</span><span class="tool-label">Map</span><span class="tool-label-short">Map</span></button>
+      <button id="map-declutter-toggle" title="Collapse (or restore) every map control at once"><span class="tool-icon" aria-hidden="true">🧹</span><span class="tool-label">Declutter</span><span class="tool-label-short">Tidy</span></button>
+    </div>
+
+    <!-- Phone-only home for the controls that live stacked down the map's
+         right edge on desktop (basemap picker, Map display, Neighbours
+         observed, Map detail, region scope filter, coverage legend). They
+         are MOVED here rather than duplicated — see app.js's
+         syncMapOptionsSheet — so there's exactly one of each control with
+         its existing listeners intact, and they move back to the map on
+         return to a desktop width. -->
+    <div id="map-options-sheet" class="mobile-sheet hidden" role="dialog" aria-label="Map options">
+      <div class="mobile-sheet-grab" aria-hidden="true"></div>
+      <div class="mobile-sheet-head">
+        <span class="mobile-sheet-title">Map options</span>
+        <button id="map-options-close" class="mobile-sheet-close" aria-label="Close map options">✕</button>
+      </div>
+      <div class="mobile-sheet-body" id="map-options-body"></div>
     </div>
     <!-- Shared replay transport: one bar drives both the simulated flood and
          the real-packet replay (see setTransportSource), docked along the
@@ -63,9 +91,19 @@
       </label>
     </div>
     <div id="plan-panel" class="hidden">
+      <!-- Only rendered as a grabber below 700px, where the panel is a
+           bottom sheet rather than a right-edge sidebar (see app.js's
+           initBottomSheet, which drags/snaps/dismisses by it). -->
+      <div class="panel-grab" aria-hidden="true"></div>
       <div class="plan-panel-header">
         <span>Planning tools</span>
-        <button id="plan-panel-close" aria-label="Close">×</button>
+        <span class="panel-header-actions">
+          <!-- Phone-only: shrinks the sheet to a title strip so the map is
+               watchable, WITHOUT closing the panel (closing tears down
+               modes and layers — see the sheet's own comment in app.js). -->
+          <button class="panel-minimise" aria-label="Minimise to watch the map" title="Minimise to watch the map">▾</button>
+          <button id="plan-panel-close" aria-label="Close">×</button>
+        </span>
       </div>
 
       <div class="plan-row">
@@ -169,9 +207,13 @@
     </div>
 
     <div id="sim-panel" class="hidden">
+      <div class="panel-grab" aria-hidden="true"></div>
       <div class="plan-panel-header">
         <span>LoRa flood simulator</span>
-        <button id="sim-panel-close" aria-label="Close">×</button>
+        <span class="panel-header-actions">
+          <button class="panel-minimise" aria-label="Minimise to watch the map" title="Minimise to watch the map">▾</button>
+          <button id="sim-panel-close" aria-label="Close">×</button>
+        </span>
       </div>
 
       <div class="sim-workspace">

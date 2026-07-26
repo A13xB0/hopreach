@@ -16,6 +16,13 @@
   // storageKey) — having several of these stacked up at once was the
   // whole reason to make each one collapsible, so leaving one collapsed
   // shouldn't reset just because the page reloaded.
+  // Phone widths don't get a different default here: below this
+  // breakpoint these controls aren't stacked on the map at all, they're
+  // moved into the Map options sheet (see syncMapOptionsSheet), which is
+  // a surface you open specifically to change something — so arriving to
+  // a column of collapsed headers would just cost an extra tap each.
+  const NARROW_VIEWPORT_PX = 700;
+
   window.HopReachMapControls = {
     collapsibleHtml(title, bodyHtml, storageKey) {
       const collapsed = localStorage.getItem(`hopreach.mapControlCollapsed.${storageKey}`) === "1";
@@ -139,6 +146,12 @@
     const toolsH = mapToolsEl.getBoundingClientRect().height;
     mapWrapEl.style.setProperty("--transport-clearance", `${Math.round(transportH)}px`);
     mapWrapEl.style.setProperty("--map-tools-clearance", `${Math.round(transportH + toolsH + gapPx * 2)}px`);
+    // The row's height on its own, without the desktop layout's gaps: the
+    // phone tab bar is flush to the bottom edge and everything above it
+    // (transport bar, sheets, Leaflet's corners) stacks directly on top,
+    // so the mobile block needs the bare measurement rather than the
+    // padded desktop clearance.
+    mapWrapEl.style.setProperty("--tools-h", `${Math.round(toolsH)}px`);
   }
   window.HopReachSyncBottomClearances = syncBottomClearances;
   if (mapToolsEl && mapWrapEl && typeof ResizeObserver !== "undefined") {
@@ -147,6 +160,241 @@
     if (transportEl) ro.observe(transportEl);
     syncBottomClearances();
   }
+
+  // ===================================================================
+  // Phone layout: the Map options sheet, and panels-as-bottom-sheets
+  // ===================================================================
+  const isNarrow = () => window.innerWidth <= NARROW_VIEWPORT_PX;
+
+  // The controls that live stacked down the map's right edge on desktop
+  // and belong together in one sheet on a phone, in the order they should
+  // appear there. Deliberately an allowlist rather than "everything in
+  // the corner": the simulator also docks run-scoped controls there (the
+  // replay's own map key, the live stat strip) which are readouts for
+  // what's happening on the map right now and would be useless filed away
+  // behind a settings sheet.
+  const MAP_OPTIONS_CONTROLS = [
+    ".leaflet-control-layers",
+    ".map-display-control",
+    ".neighbor-window-control",
+    ".position-mode-control",
+    ".scope-filter-control",
+    ".sim-view-control",
+    ".legend",
+  ];
+
+  // Where each control came from, so a phone → desktop resize can put it
+  // back exactly where Leaflet had it rather than leaving it orphaned in
+  // a sheet that's now display:none.
+  const controlHomes = new WeakMap();
+  const optionsSheet = document.getElementById("map-options-sheet");
+  const optionsBody = document.getElementById("map-options-body");
+  const optionsToggle = document.getElementById("map-options-toggle");
+
+  // These are MOVED, not cloned: a copy would be a second set of inputs
+  // with no listeners on them (Leaflet binds to the element it created),
+  // so the sheet's controls would look right and do nothing.
+  function syncMapOptionsSheet() {
+    if (!optionsBody) return;
+    const narrow = isNarrow();
+    MAP_OPTIONS_CONTROLS.forEach((sel) => {
+      document.querySelectorAll(sel).forEach((el) => {
+        if (narrow) {
+          if (el.parentElement === optionsBody) return;
+          controlHomes.set(el, { parent: el.parentElement, next: el.nextElementSibling });
+          optionsBody.appendChild(el);
+        } else {
+          const home = controlHomes.get(el);
+          if (!home || el.parentElement !== optionsBody || !home.parent) return;
+          // Only reuse the remembered sibling if it's still where it was;
+          // otherwise fall back to appending to the original corner.
+          const before = home.next && home.next.parentElement === home.parent ? home.next : null;
+          home.parent.insertBefore(el, before);
+          controlHomes.delete(el);
+        }
+      });
+    });
+    if (!narrow) return;
+
+    // Controls arrive whenever they happen to mount — the region filter
+    // waits on a live CoreScope call, so it lands after the legend and the
+    // sheet ends up in load order rather than reading order. Re-append in
+    // the allowlist's order, but only when it's actually wrong: appendChild
+    // on a control the user is mid-interaction with would drop focus.
+    const desired = MAP_OPTIONS_CONTROLS.flatMap((sel) =>
+      [...optionsBody.children].filter((el) => el.matches(sel))
+    );
+    const current = [...optionsBody.children];
+    if (desired.length === current.length && desired.every((el, i) => el === current[i])) return;
+    desired.forEach((el) => optionsBody.appendChild(el));
+  }
+
+  function setMapOptionsOpen(open) {
+    if (!optionsSheet) return;
+    if (open) syncMapOptionsSheet();
+    optionsSheet.classList.toggle("hidden", !open);
+    if (optionsToggle) optionsToggle.classList.toggle("active", open);
+  }
+
+  if (optionsToggle && optionsSheet) {
+    optionsToggle.addEventListener("click", () => setMapOptionsOpen(optionsSheet.classList.contains("hidden")));
+    const optionsClose = document.getElementById("map-options-close");
+    if (optionsClose) optionsClose.addEventListener("click", () => setMapOptionsOpen(false));
+    // Only one sheet at a time — opening Plan or Simulate puts a sheet in
+    // exactly the space this one occupies.
+    ["plan-toggle", "sim-toggle"].forEach((id) => {
+      const btn = document.getElementById(id);
+      if (btn) btn.addEventListener("click", () => setMapOptionsOpen(false));
+    });
+  }
+
+  // Controls mount at different times — the region scope filter waits on a
+  // live CoreScope call, the simulator's view options only exist while
+  // Simulate is open — so the sheet is kept in step by watching the corners
+  // rather than by syncing once at startup and hoping. Moving a control OUT
+  // of a corner re-triggers this, which then finds it already in the sheet
+  // and does nothing, so it settles rather than looping.
+  if (typeof MutationObserver !== "undefined") {
+    const cornerObserver = new MutationObserver(() => {
+      if (isNarrow()) syncMapOptionsSheet();
+    });
+    [".leaflet-top.leaflet-right", ".leaflet-bottom.leaflet-right"].forEach((sel) => {
+      const corner = document.querySelector(sel);
+      if (corner) cornerObserver.observe(corner, { childList: true });
+    });
+  }
+
+  // Drag the grabber to resize a sheet between three heights: minimised to
+  // a title strip, half, or nearly full.
+  //
+  // Dragging DOWN bottoms out at minimised — it deliberately cannot close
+  // the sheet. Closing a panel is destructive (setSimPanelOpen(false) stops
+  // any replay, drops the transport bar and removes every simulator layer
+  // from the map), and "shrink this out of the way so I can watch the run"
+  // is the single most likely reason to drag a sheet down mid-simulation.
+  // Having that gesture tear the run down was exactly backwards. Closing
+  // stays available, but only through the explicit × next to the title.
+  const SHEET_PEEK_PX = 68; // grabber + the sticky title row
+  const SHEET_SNAP_FRACTIONS = [0.45, 0.88];
+  const TAP_SLOP_PX = 6;
+
+  function initBottomSheet(panelId) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    const grab = panel.querySelector(".panel-grab");
+    if (!grab) return;
+
+    let startY = 0;
+    let startH = 0;
+    let moved = 0;
+    let dragging = false;
+
+    const availableH = () =>
+      mapWrapEl.getBoundingClientRect().height -
+      (parseFloat(getComputedStyle(mapWrapEl).getPropertyValue("--tools-h")) || 0) -
+      (parseFloat(getComputedStyle(mapWrapEl).getPropertyValue("--transport-clearance")) || 0);
+
+    // Ascending, so "the next one up" is just the following entry.
+    const snapPoints = () => [SHEET_PEEK_PX, ...SHEET_SNAP_FRACTIONS.map((f) => Math.round(availableH() * f))];
+
+    const setHeight = (px) => {
+      panel.style.setProperty("--sheet-h", `${Math.round(px)}px`);
+      // Minimised, the body would still be scrollable behind a 68px window,
+      // so the title strip could be scrolled away leaving an unlabelled
+      // stub with no way back. Clipping it keeps the strip stable.
+      panel.classList.toggle("sheet-minimised", Math.round(px) <= SHEET_PEEK_PX + 1);
+    };
+
+    // Exposed so the header's own minimise button drives the same state as
+    // the drag, rather than a second, subtly different notion of "small".
+    panel.__hopreachSheet = {
+      minimise: () => setHeight(SHEET_PEEK_PX),
+      restore: () => setHeight(snapPoints()[1]),
+      isMinimised: () => panel.classList.contains("sheet-minimised"),
+    };
+
+    grab.addEventListener("pointerdown", (e) => {
+      if (!isNarrow()) return;
+      dragging = true;
+      moved = 0;
+      startY = e.clientY;
+      startH = panel.getBoundingClientRect().height;
+      grab.classList.add("dragging");
+      grab.setPointerCapture(e.pointerId);
+    });
+
+    grab.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      const dy = e.clientY - startY;
+      moved = Math.max(moved, Math.abs(dy));
+      const avail = availableH();
+      // Floors at the peek height rather than 0 — see SHEET_PEEK_PX.
+      const h = Math.max(SHEET_PEEK_PX, Math.min(avail, startH - dy));
+      setHeight(h);
+    });
+
+    const endDrag = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      grab.classList.remove("dragging");
+      if (e && e.pointerId !== undefined && grab.hasPointerCapture(e.pointerId)) {
+        grab.releasePointerCapture(e.pointerId);
+      }
+      const h = panel.getBoundingClientRect().height;
+      const points = snapPoints();
+
+      if (moved <= TAP_SLOP_PX) {
+        // Treated as a tap: step up to the next height, wrapping back round
+        // to minimised from the tallest. One repeatable gesture cycles the
+        // whole range without needing an accurate drag.
+        const next = points.find((p) => p > h + 1);
+        setHeight(next === undefined ? points[0] : next);
+        return;
+      }
+      setHeight(points.reduce((best, p) => (Math.abs(p - h) < Math.abs(best - h) ? p : best)));
+    };
+    grab.addEventListener("pointerup", endDrag);
+    grab.addEventListener("pointercancel", endDrag);
+  }
+
+  initBottomSheet("plan-panel");
+  initBottomSheet("sim-panel");
+
+  // The header's minimise button is the discoverable version of dragging
+  // the grabber all the way down: shrink to the title strip to watch a run
+  // on the map, press again to come back. Deliberately never closes — the
+  // × beside it is the only thing that does.
+  document.querySelectorAll(".panel-minimise").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sheet = btn.closest("#plan-panel, #sim-panel");
+      const api = sheet && sheet.__hopreachSheet;
+      if (!api) return;
+      const minimised = api.isMinimised();
+      if (minimised) api.restore();
+      else api.minimise();
+      btn.textContent = minimised ? "▾" : "▴";
+      btn.setAttribute("aria-label", minimised ? "Minimise to watch the map" : "Expand the panel");
+    });
+  });
+
+  let resizeRaf = null;
+  window.addEventListener("resize", () => {
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    resizeRaf = requestAnimationFrame(() => {
+      syncMapOptionsSheet();
+      if (!isNarrow()) {
+        setMapOptionsOpen(false);
+        // Drop any dragged height so the desktop sidebar isn't stuck at
+        // whatever the phone sheet was last left at.
+        ["plan-panel", "sim-panel"].forEach((id) => {
+          const p = document.getElementById(id);
+          if (p) p.style.removeProperty("--sheet-h");
+        });
+      }
+      syncBottomClearances();
+    });
+  });
+  syncMapOptionsSheet();
 
   // Roads and place names, drawn in their own panes above the coverage
   // overlay (imageOverlay defaults to Leaflet's overlayPane, z-index 400)
