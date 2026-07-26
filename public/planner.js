@@ -17,6 +17,10 @@
   let connectGeneration = 0;
   let connectPointA = null;
   let connectPointB = null;
+  // Below this the hop is over the demodulation threshold but has
+  // essentially no headroom for ordinary fading — worth flagging even when
+  // the simulation happens to deliver.
+  const MARGINAL_HOP_DB = 5;
   let connectOptions = [];
   let connectSelectedIndex = null;
   let areaGeneration = 0;
@@ -1064,6 +1068,7 @@
     connectLayer.clearLayers();
     setConnectStatus(null);
     renderConnectOptionList([]);
+    renderRouteCheck(null);
     renderConnectList([]);
   }
 
@@ -1091,6 +1096,7 @@
     setConnectStatus("Searching…");
     renderConnectOptionList([]);
     connectLayer.clearLayers();
+    renderRouteCheck(null);
     L.circleMarker([connectPointA.lat, connectPointA.lon], { radius: 6, color: "#38bdf8", weight: 2, fillOpacity: 1 }).addTo(connectLayer);
     L.circleMarker([connectPointB.lat, connectPointB.lon], { radius: 6, color: "#38bdf8", weight: 2, fillOpacity: 1 }).addTo(connectLayer);
 
@@ -1106,6 +1112,64 @@
       maxNewSites,
       config: { demTileURLBase: cfg.demTileURLBase, demZoom: cfg.demZoom, propagation: cfg.propagation },
     });
+  }
+
+  // The route's verdict from the flood simulator (planner-worker.js's
+  // checkRoute). Two separate things worth saying, because they fail
+  // independently: whether a packet actually gets end to end across
+  // repeated trials, and which single hop is the weakest — a route can
+  // deliver reliably today and still be worth knowing has one 1dB hop
+  // holding it together.
+  function renderRouteCheck(check) {
+    const el = document.getElementById("plan-connect-check");
+    if (!el) return;
+    if (!check) {
+      // Must keep the component class: there's no bare `.hidden` rule in
+      // this stylesheet, only scoped ones, so `hidden` alone wouldn't hide
+      // anything and stale verdict text would linger.
+      el.className = "plan-route-check hidden";
+      el.innerHTML = "";
+      return;
+    }
+    if (check.error) {
+      el.className = "plan-route-check warn";
+      el.innerHTML = `<span class="plan-route-check-head">Route check unavailable</span><span class="plan-route-check-detail">${escapeHtml(check.error)}</span>`;
+      return;
+    }
+
+    const { delivered, trials, hops, weakestHop } = check;
+    const allDelivered = delivered === trials;
+    const noneDelivered = delivered === 0;
+    // A hop scraping past the 0 dB demodulation threshold counts as
+    // "connected" by the search's own test and still isn't something to
+    // rely on. Delivery is measured across the whole local mesh (the
+    // surrounding real repeaters are in the scenario too, so an alternate
+    // path can carry the packet), which means every trial can succeed while
+    // this specific chain still hangs on one fragile hop — so it downgrades
+    // the verdict rather than sitting as a green tick with a caveat.
+    const marginal = !!weakestHop && weakestHop.marginDb < MARGINAL_HOP_DB;
+    const tone = noneDelivered ? "bad" : allDelivered && !marginal ? "good" : "warn";
+
+    let head;
+    if (noneDelivered) head = `Simulated — did not get through in any of ${trials} trials`;
+    else if (!allDelivered) head = `Simulated — got through in only ${delivered} of ${trials} trials`;
+    else if (marginal) head = `Simulated — delivered in all ${trials} trials, but one hop is marginal`;
+    else head = `Simulated OK — delivered in all ${trials} trials`;
+
+    const parts = [`${hops} hop${hops === 1 ? "" : "s"}`];
+    if (weakestHop) {
+      parts.push(
+        `weakest hop ${weakestHop.marginDb.toFixed(1)} dB (${escapeHtml(weakestHop.fromLabel)} → ${escapeHtml(weakestHop.toLabel)}, ${weakestHop.km.toFixed(1)} km)`
+      );
+    }
+    if (marginal && !noneDelivered) {
+      parts.push("that hop has very little headroom for fading");
+    }
+
+    el.className = `plan-route-check ${tone}`;
+    el.innerHTML =
+      `<span class="plan-route-check-head">${escapeHtml(head)}</span>` +
+      `<span class="plan-route-check-detail">${parts.join(" · ")}</span>`;
   }
 
   function renderConnectList(chain) {
@@ -1172,6 +1236,7 @@
     connectSelectedIndex = i;
     drawConnectChain(opt.chain);
     renderConnectList(opt.chain);
+    renderRouteCheck(opt.check);
     // Update the selected-row styling in place rather than rebuilding the
     // whole options list: this fires on every mouseenter, and rebuilding
     // destroys/recreates each row's own "Use this path" button — including
@@ -1203,6 +1268,7 @@
     }
     drawConnectChain(opt.chain);
     renderConnectList(opt.chain);
+    renderRouteCheck(opt.check);
 
     const newCount = opt.newSites ? opt.newSites.length : 0;
     setConnectStatus(
@@ -1233,6 +1299,7 @@
 
     drawConnectChain(connectOptions[0].chain);
     renderConnectList(connectOptions[0].chain);
+    renderRouteCheck(connectOptions[0].check);
     renderConnectOptionList(connectOptions);
     setConnectStatus(`${connectOptions.length} path options found — pick one to add to your plan.`);
   }

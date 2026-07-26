@@ -185,6 +185,9 @@
         </div>
         <div id="plan-connect-status" class="plan-hint hidden"></div>
         <div id="plan-connect-options" class="plan-list"></div>
+        <!-- Verdict from running the finished route through the flood
+             simulator — see planner-worker.js checkRoute. -->
+        <div id="plan-connect-check" class="plan-route-check hidden"></div>
         <div id="plan-connect-list" class="plan-list"></div>
         <button id="plan-connect-clear">Clear</button>
       </div>
@@ -293,11 +296,15 @@
               <button id="sim-load-real">+ Load real repeaters</button>
             </div>
             <div class="plan-row">
+              <button id="sim-add-repeater" title="Click the map to place a hypothetical repeater">📡 Add repeater</button>
               <button id="sim-add-companion" title="Click the map to place a virtual handheld/companion device">📱 Add companion location</button>
               <button id="sim-nodes-clear">Clear all</button>
             </div>
             <div id="sim-companion-hint" class="plan-hint hidden">
               Click the map to place a virtual companion device (originates/receives traffic like a handheld, but doesn't relay). Drag it to move; click the button again to stop placing.
+            </div>
+            <div id="sim-repeater-hint" class="plan-hint hidden">
+              Click the map to place a hypothetical repeater (relays traffic like a real one). Drag it to move; click the button again to stop placing. Any node's type can be changed later in ⚙ Repeaters &amp; settings.
             </div>
             <button id="sim-open-nodes-modal" class="plan-full-width-btn">⚙ Repeaters &amp; settings (<span id="sim-node-count-badge">0</span>)</button>
           </div>
@@ -541,7 +548,7 @@
         <div class="sim-config-table-scroll">
           <table class="sim-config-table">
             <thead><tr>
-              <th class="sim-col-sticky">Node</th><th>Scopes</th><th>Allow unscoped</th><th>Flood max</th><th>Unscoped max</th>
+              <th class="sim-col-sticky">Node</th><th title="Repeaters relay traffic onward; companions only originate and receive, like a real MeshCore companion app. Changing this is a what-if — it never alters the underlying CoreScope data.">Type</th><th>Scopes</th><th>Allow unscoped</th><th>Flood max</th><th>Unscoped max</th>
               <th>Radio</th><th>Tx delay</th><th>Direct tx</th><th>Rx delay</th><th>Tx power</th><th>Loop detect</th><th>Hash size</th>
               <th class="sim-results-col hidden" id="sim-results-col-duty" title="Airtime spent transmitting, as a percentage of Sim duration — only shown once a run exists">Duty cycle</th>
               <th class="sim-results-col hidden" id="sim-results-col-received" title="Distinct packets cleanly received, out of packets that could possibly have reached this node given the current topology — only shown once a run exists">Received</th>
@@ -853,6 +860,7 @@
 <script src="wasm-bridge.js"></script>
 <script src="terrain.js"></script>
 <script src="propagation.js"></script>
+<script src="meshsim-scenario.js"></script>
 <script src="meshsim-bridge.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>

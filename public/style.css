@@ -1878,6 +1878,32 @@ header .subtitle {
 }
 .leaflet-container .leaflet-control-layers-separator { border-top-color: var(--border); }
 
+/* Verdict from running a proposed connect-repeaters route through the
+   flood simulator (see planner-worker.js's checkRoute). Colour carries the
+   same three states the text does — delivered every trial, delivered
+   sometimes, never got through — so a glance is enough. */
+.plan-route-check {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.4rem 0 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.72rem;
+}
+.plan-route-check.hidden { display: none; }
+.plan-route-check.good { border-left-color: var(--status-active); }
+.plan-route-check.warn { border-left-color: var(--status-degraded); }
+.plan-route-check.bad { border-left-color: #f87171; }
+.plan-route-check-head { font-weight: 700; color: var(--text); }
+.plan-route-check.good .plan-route-check-head { color: var(--status-active); }
+.plan-route-check.warn .plan-route-check-head { color: var(--status-degraded); }
+.plan-route-check.bad .plan-route-check-head { color: #f87171; }
+.plan-route-check-detail { color: var(--text-muted); line-height: 1.35; }
+
 /* The phone-only furniture: a bottom sheet and the grabber that drags it.
    Both are in the markup at every width, so they need switching off
    explicitly above the breakpoint — otherwise the Map options sheet

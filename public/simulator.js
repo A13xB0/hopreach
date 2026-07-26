@@ -27,7 +27,9 @@
   const SIM_MAX_RANGE_KM = 35; // same rationale as planner.js's PREVIEW_MAX_RANGE_KM
   const SIM_ZOOM_CAP = 11;
   const CORESCOPE_REACH_DAYS = 7; // fixed window — simulator.js has no window-selector UI of its own (see planner.js's for the map's own hover tooltips)
-  const SF_THRESHOLDS_DB = [-7.5, -10, -12.5, -15, -17.5, -20]; // SF7..SF12, mirrors internal/meshsim/score.go
+  // Shared with the planner's connect-repeaters route check, which builds
+  // scenarios for the same engine — see meshsim-scenario.js.
+  const SF_THRESHOLDS_DB = self.HopReachMeshModel.SF_THRESHOLDS_DB;
   // Mirrors internal/meshsim's own defaultMessageHashSize (engine.go) — a
   // sender with no explicit hash size falls back to this. 3 bytes,
   // deliberately diverging from real firmware (which has no built-in
@@ -203,6 +205,7 @@
   // "Companion 2", colliding with the one still on the map. This can only
   // go up, so a label, once used, is never handed out again this session.
   let companionCounter = 0;
+  let placedRepeaterCounter = 0;
 
   // The simulator's own repeater markers live in a pane above Leaflet's
   // default markerPane (z-index 600). Without this they share that pane with
@@ -243,10 +246,25 @@
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   }
 
+  // A node's behavioural type, which is not the same thing as where it
+  // came from (n.source, shown as the provenance badge). The type can be
+  // changed per node in the Repeaters & settings table — flipping a real
+  // repeater to a companion to ask "what if this stopped relaying" is a
+  // legitimate what-if, and it never touches the underlying CoreScope
+  // data. Stored alongside the other per-node overrides so it saves,
+  // exports and imports with everything else.
+  function effectiveNodeType(node) {
+    if (node.role === "listener") return "listener"; // CoreScope-labelled listener — rx only, never retransmits (see replayFromHash); not user-overridable
+    const override = simNodePrefsOverrides[node.id];
+    if (override && (override.nodeType === "companion" || override.nodeType === "repeater")) return override.nodeType;
+    return node.source === "companion" ? "companion" : "repeater";
+  }
+
   function canRelay(node) {
-    if (node.source === "companion") return false; // a handheld companion originates/receives traffic but doesn't relay, same as real MeshCore companion apps
-    if (node.role === "listener") return false; // CoreScope-labelled listener — rx only, never retransmits (see replayFromHash)
-    return true; // "repeater" or no role at all (most nodes) — assume it repeats
+    // Only a repeater relays: a handheld companion originates/receives
+    // traffic but never retransmits, same as real MeshCore companion apps,
+    // and a listener is rx-only.
+    return effectiveNodeType(node) === "repeater";
   }
 
   // MeshCore's own short node address is the first 6 bytes of its public
@@ -387,15 +405,41 @@
     redrawNodeMarkers();
   }
 
+  // Same idea as addCompanionAt, but a node that actually relays. Recorded
+  // as source "planned" because that's exactly what it is — a hypothetical
+  // site that isn't in CoreScope — so it picks up the existing badge,
+  // rename and remove affordances rather than needing a fourth source kind.
+  function addPlacedRepeaterAt(lat, lon) {
+    placedRepeaterCounter++;
+    simNodes.push({
+      id: randomId(),
+      source: "planned",
+      refId: randomId(),
+      label: `Repeater ${placedRepeaterCounter}`,
+      lat,
+      lon,
+      regions: ["*"],
+      address: generatedShortAddress(),
+    });
+    invalidateLinks();
+    renderNodeList();
+    renderMessageNodeOptions();
+    redrawNodeMarkers();
+  }
+
   function setPlacementMode(next) {
     placementMode = placementMode === next ? "off" : next;
     document.getElementById("sim-add-companion").classList.toggle("active", placementMode === "companion");
     document.getElementById("sim-companion-hint").classList.toggle("hidden", placementMode !== "companion");
+    document.getElementById("sim-add-repeater").classList.toggle("active", placementMode === "repeater");
+    document.getElementById("sim-repeater-hint").classList.toggle("hidden", placementMode !== "repeater");
   }
 
   map.on("click", (e) => {
     if (placementMode === "companion") {
       addCompanionAt(e.latlng.lat, e.latlng.lng);
+    } else if (placementMode === "repeater") {
+      addPlacedRepeaterAt(e.latlng.lat, e.latlng.lng);
     }
   });
 
@@ -426,6 +470,10 @@
     simNodes = [];
     simMessageGenerators = [];
     simNodePrefsOverrides = {};
+    // Restart the auto-labels too, so a cleared workspace doesn't carry on
+    // at "Repeater 7" / "Companion 4".
+    companionCounter = 0;
+    placedRepeaterCounter = 0;
     lastEpisode = null;
     episodeBaseline = null;
     document.getElementById("sim-open-episode-modal").classList.add("hidden");
@@ -913,14 +961,20 @@
   function redrawNodeMarkers() {
     simNodesLayer.clearLayers();
     simNodes.forEach((n, nodeIndex) => {
-      const iconClass = n.source === "companion" ? "sim-marker-companion" : "sim-marker-icon";
+      // Icon follows the behavioural type, not the provenance: a node
+      // switched to companion should look like one. Anything not sourced
+      // from CoreScope was positioned by hand, so it stays draggable —
+      // that now includes hand-placed repeaters, not just companions.
+      const nodeType = effectiveNodeType(n);
+      const iconClass = nodeType === "companion" ? "sim-marker-companion" : "sim-marker-icon";
+      const typeSuffix = nodeType === n.source || (nodeType === "repeater" && n.source !== "companion") ? "" : ` · as ${nodeType}`;
       L.marker([n.lat, n.lon], {
         icon: L.divIcon({ className: iconClass, iconSize: [12, 12] }),
-        draggable: n.source === "companion",
+        draggable: n.source !== "real",
         pane: "simNodesPane",
       })
         .addTo(simNodesLayer)
-        .bindTooltip(`${n.label} (${n.source})${n.address ? ` · ${n.address}` : ""}`)
+        .bindTooltip(`${n.label} (${n.source})${typeSuffix}${n.address ? ` · ${n.address}` : ""}`)
         // Once a simulation has run, clicking a repeater is much more
         // often "what happened here" than "let me tweak its settings" —
         // show the packet inspector instead. Settings are still reachable
@@ -966,7 +1020,7 @@
     document.getElementById("sim-results-col-duty").classList.toggle("hidden", !lastReport);
     document.getElementById("sim-results-col-received").classList.toggle("hidden", !lastReport);
     if (simNodes.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="15" class="plan-empty">None yet — load repeaters or place a companion location, then reopen this.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="16" class="plan-empty">None yet — load or place some repeaters (or a companion location), then reopen this.</td></tr>';
       return;
     }
     // Read-only result columns (item 16) — computed once for the whole
@@ -988,6 +1042,7 @@
       const denyUnscoped = effectiveDenyUnscoped(n);
       const floodMax = effectiveFloodMax(n);
       const floodMaxUnscoped = effectiveFloodMaxUnscoped(n);
+      const nodeType = effectiveNodeType(n);
       const presetLabel = radioPresetLabelFor(prefs.radio);
       const radioPresetOptions = RADIO_PRESETS.map((p) => `<option value="${escapeHtml(p.label)}" ${p.label === presetLabel ? "selected" : ""}>${escapeHtml(p.label)}</option>`).join("");
       const ranking = rankingByNode ? rankingByNode[nodeIndex] : null;
@@ -999,6 +1054,14 @@
       tr.dataset.nodeId = n.id;
       tr.innerHTML = `
         <td class="sim-col-sticky"><span class="sim-node-badge ${SOURCE_BADGE[n.source]}">${n.source}</span> <span title="${n.address ? `Address: ${n.address}` : "No address"}">${escapeHtml(n.label)}</span></td>
+        <td>${
+          nodeType === "listener"
+            ? '<span class="sim-node-badge sim-badge-background" title="CoreScope labelled this a listener — receive-only, never relays. Not changeable here.">listener</span>'
+            : `<select data-field="nodeType" title="Repeaters relay traffic onward; companions only originate and receive. A what-if switch — it never changes the underlying CoreScope data.">
+                 <option value="repeater" ${nodeType === "repeater" ? "selected" : ""}>repeater</option>
+                 <option value="companion" ${nodeType === "companion" ? "selected" : ""}>companion</option>
+               </select>`
+        }</td>
         <td><input type="text" data-field="regions" value="${escapeHtml(regionsToDisplayString(regions))}" placeholder="none" title="Which region (scope) keys this repeater holds — comma-delimited, no # (e.g. sco, ioi), or * for every region. Blank means it holds none, so it relays no scoped traffic at all. Independent of Allow unscoped, exactly as in MeshCore: scoped traffic is gated purely on this list, unscoped traffic purely on that checkbox."></td>
         <td class="sim-checkbox-cell"><input type="checkbox" data-field="allowUnscoped" ${denyUnscoped ? "" : "checked"} title="Whether this node relays ordinary unscoped (regionless) flood traffic. Independent of the Scopes list — this gates only regionless traffic, and turning it off never stops the node relaying a region it holds a key for. For a real repeater, defaults to off unless CoreScope has actually observed it relaying unscoped traffic; absence over the observation window isn't proof of denial, just the best signal available."></td>
         <td><input type="number" step="1" min="1" data-field="floodMax" value="${floodMax || ""}" placeholder="64" title="flood.max — blank uses the firmware default (64)"></td>
@@ -1022,7 +1085,7 @@
         ${receivedCell}
         <td>
           ${lastReport ? '<button data-act="packets" title="See packets received here">📨</button>' : ""}
-          ${n.source === "companion" ? '<button data-act="rename" title="Rename">✎</button>' : ""}
+          ${n.source !== "real" ? '<button data-act="rename" title="Rename">✎</button>' : ""}
           <button data-act="remove" title="Remove">✕</button>
         </td>
       `;
@@ -1043,7 +1106,7 @@
       });
       Object.values(radioInputs).forEach((el) => el.addEventListener("input", () => { presetSelect.value = ""; }));
       if (lastReport) tr.querySelector('[data-act="packets"]').onclick = () => openPacketInspectorForNode(nodeIndex);
-      if (n.source === "companion") tr.querySelector('[data-act="rename"]').onclick = () => renameNode(n.id);
+      if (n.source !== "real") tr.querySelector('[data-act="rename"]').onclick = () => renameNode(n.id);
       tr.querySelector('[data-act="remove"]').onclick = () => {
         removeNode(n.id);
         renderNodesModalTable();
@@ -1062,6 +1125,7 @@
       const override = {};
       const beforePrefs = effectivePrefsFor(n);
       const beforeRadio = beforePrefs.radio;
+      const beforeType = effectiveNodeType(n);
       const radio = { ...beforeRadio };
       let radioTouched = false;
       tr.querySelectorAll("[data-field]").forEach((el) => {
@@ -1124,7 +1188,13 @@
       const radioReallyChanged =
         radio.freqMhz !== beforeRadio.freqMhz || radio.bwKhz !== beforeRadio.bwKhz || radio.sf !== beforeRadio.sf || radio.cr !== beforeRadio.cr;
       const powerReallyChanged = override.txPowerDbm != null && override.txPowerDbm !== beforePrefs.txPowerDbm;
-      if (radioReallyChanged || powerReallyChanged) radioChanged = true;
+      // Same reasoning, one step removed: a repeater/companion switch moves
+      // the node between mast height and handheld height (see
+      // nodeAntennaHeightM), which changes every modelled link it's part
+      // of. Compared before/after rather than "the field was present",
+      // because every row carries this select.
+      const typeReallyChanged = effectiveNodeType(n) !== beforeType;
+      if (radioReallyChanged || powerReallyChanged || typeReallyChanged) radioChanged = true;
       applied++;
     });
     if (radioChanged) invalidateLinks();
@@ -1136,6 +1206,9 @@
     // even while a sender is mid-edit.
     renderMessageNodeOptions();
     renderMessageList();
+    // A type switch changes a node's marker icon and whether it can be
+    // dragged, so the map has to be redrawn too — not just the panel.
+    redrawNodeMarkers();
     setStatus("sim-status", `Applied settings for ${applied} node${applied === 1 ? "" : "s"}.`);
   }
 
@@ -1288,8 +1361,7 @@
   // linearly with received power. Good for relative comparisons between
   // candidate settings; not a certified RF measurement.
   function approxSnrFromMargin(marginDb, sf) {
-    const idx = Math.min(Math.max(sf - 7, 0), 5);
-    return SF_THRESHOLDS_DB[idx] + marginDb;
+    return self.HopReachMeshModel.approxSnrFromMargin(marginDb, sf);
   }
 
   // CoreScope's reach API doesn't expose a raw SNR reading at all — only
@@ -1381,7 +1453,11 @@
   // previously all computed at the single global default height.
   function nodeAntennaHeightM(node) {
     if (node.antennaHeightM != null) return node.antennaHeightM;
-    if (node.source === "companion") return cfg.propagation.rxHeightM;
+    // Effective type, not source: switching a node to companion is asking
+    // "what if this were a handheld", and a handheld isn't on a mast — so
+    // the height has to follow, which is also why a type change
+    // invalidates modelled links (see the apply path in the nodes table).
+    if (effectiveNodeType(node) === "companion") return cfg.propagation.rxHeightM;
     return cfg.propagation.antennaHeightM;
   }
 
@@ -1641,8 +1717,8 @@
   // than giving an identical (over-confident) result every time. Modest,
   // LoRa-appropriate values — comfortably-strong links stay ~100% reliable
   // (see the Go test TestChannelSigmoidLeavesStrongLinksReliable).
-  const CHANNEL_PER_WIDTH_DB = 2.0;
-  const CHANNEL_FADING_SIGMA_DB = 2.0;
+  const CHANNEL_PER_WIDTH_DB = self.HopReachMeshModel.CHANNEL_PER_WIDTH_DB;
+  const CHANNEL_FADING_SIGMA_DB = self.HopReachMeshModel.CHANNEL_FADING_SIGMA_DB;
 
   function scenarioFromState() {
     return {
@@ -1700,20 +1776,10 @@
     return match ? match.label : "";
   }
 
+  // See meshsim-scenario.js — shared with the planner's route check so a
+  // node's starting settings can't drift between the two.
   function defaultPrefs() {
-    // Mirrors internal/meshsim.DefaultNodePrefs — kept in sync manually
-    // since this is plain JS, not generated from the Go struct. Radio
-    // defaults to the EU/UK (Narrow) preset (see RADIO_PRESETS) — preamble
-    // length isn't a field at all: real firmware derives it from SF alone
-    // (see preambleSymbolsForSF in Go), so it's never independently
-    // configurable here either.
-    return {
-      txDelayFactor: 0.5,
-      directTxDelayFactor: 0.3,
-      rxDelayBase: 0,
-      txPowerDbm: 22,
-      radio: { freqMhz: 869.618, bwKhz: 62.5, sf: 8, cr: 8, explicitHeader: true, crcEnabled: true },
-    };
+    return self.HopReachMeshModel.defaultPrefs();
   }
 
   // defaultPrefs() with whatever this specific node's manual override (see
@@ -2669,7 +2735,7 @@
   // the Go side, kept in sync
   // manually since this is plain JS, not generated from the Go source.
   function isCanonicalDelivery(r) {
-    return !r.collided && r.dropReason !== "weak_signal" && r.dropReason !== "tx_busy" && r.dropReason !== "already_seen";
+    return self.HopReachMeshModel.isCanonicalDelivery(r);
   }
 
   // JS mirror of internal/meshsim.reachableFrom — a node this message could
@@ -6641,6 +6707,7 @@
   document.getElementById("sim-load-planned").addEventListener("click", loadPlannedRepeaters);
   document.getElementById("sim-load-real").addEventListener("click", loadRealRepeaters);
   document.getElementById("sim-add-companion").addEventListener("click", () => setPlacementMode("companion"));
+  document.getElementById("sim-add-repeater").addEventListener("click", () => setPlacementMode("repeater"));
   document.getElementById("sim-nodes-clear").addEventListener("click", clearNodes);
   document.getElementById("sim-build-links").addEventListener("click", buildLinks);
   document.getElementById("sim-message-add").addEventListener("click", addMessage);

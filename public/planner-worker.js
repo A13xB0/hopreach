@@ -6,7 +6,7 @@
 // real repeaters) using the same terrain grid, since there's no observed
 // radio data for a site that doesn't exist yet — unlike real repeaters,
 // whose neighbours come from CoreScope's own reach data (see planner.js).
-importScripts("wasm_exec.js", "wasm-bridge.js", "terrain.js", "propagation.js");
+importScripts("wasm_exec.js", "wasm-bridge.js", "terrain.js", "propagation.js", "meshsim-scenario.js", "meshsim-bridge.js");
 
 // The real (nightly, server-side) map searches out to the full link-budget
 // range (often ~100km) because it's computed once a day over the whole
@@ -20,7 +20,12 @@ const PREVIEW_ZOOM_CAP = 10;
 const MAX_NEIGHBORS_PER_SITE = 8;
 
 self.onmessage = async (e) => {
+  // Both hang off the same compiled module (wasm/main.go registers
+  // propagation/demgrid and calls registerMeshsim for the simulator), so
+  // this is one load — connect-repeaters checks its finished route with
+  // the simulator, see checkRoute.
   await Propagation.ready; // wasm/main.go's exports must be registered before any handler below touches them
+  await MeshSim.ready;
   if (e.data.kind === "connect") return handleConnect(e.data);
   if (e.data.kind === "area-coverage") return handleAreaCoverage(e.data);
   return handlePreview(e.data);
@@ -207,6 +212,13 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
     const nodeById = new Map(nodes.map((n) => [n.id, n]));
     const adjacency = new Map(nodes.map((n) => [n.id, []]));
 
+    // Every pairwise margin computed here is also exactly what the
+    // route check below needs to build a simulator scenario, and each one
+    // is a full terrain walk — so keep them rather than recomputing the
+    // same corridor from scratch once per route option.
+    const pairMargins = new Map(); // "idA|idB" (sorted) -> best-direction margin dB
+    const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
     post({ type: "status", message: `Checking existing infrastructure (${nodes.length} repeaters)…` });
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
@@ -215,11 +227,117 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
         // share the same default antenna height in this model, so
         // genuine asymmetry is rare, and this matches how the rest of
         // the planning tools already treat predicted links.
-        if (marginBetween(n1.lat, n1.lon, n2.lat, n2.lon) >= 0 || marginBetween(n2.lat, n2.lon, n1.lat, n1.lon) >= 0) {
+        const best = Math.max(
+          marginBetween(n1.lat, n1.lon, n2.lat, n2.lon),
+          marginBetween(n2.lat, n2.lon, n1.lat, n1.lon)
+        );
+        pairMargins.set(pairKey(n1.id, n2.id), best);
+        if (best >= 0) {
           adjacency.get(n1.id).push(n2.id);
           adjacency.get(n2.id).push(n1.id);
         }
       }
+    }
+
+    // --- check a proposed route with the actual simulator ----------------
+    //
+    // The search above only ever asks "is this hop's margin >= 0?", which
+    // is the bare demodulation threshold — a hop scraping in at 0.2 dB
+    // counts exactly the same as one with 25 dB of headroom, even though
+    // the first won't survive ordinary fading. Rather than invent a second
+    // rule of thumb for "strong enough", hand the finished route to the
+    // same meshsim engine the Simulate panel uses and let it answer
+    // empirically: flood a packet from one end and see how often the other
+    // end actually receives it.
+    //
+    // That works because a scenario carries per-link channel noise (see
+    // meshsim-scenario.js) — a marginal link genuinely varies between
+    // seeded trials, so N trials give a reliability figure rather than a
+    // single over-confident yes. It also picks up the things pure link
+    // budget can't see at all: relay timing, duty cycle, the hop limit, and
+    // collisions between the route's own relays and the surrounding real
+    // repeaters (which are included for exactly that reason — a lone chain
+    // in an empty world would never collide with anything and the check
+    // would be theatre).
+    const ROUTE_CHECK_TRIALS = 5;
+    const ROUTE_CHECK_PAYLOAD_BYTES = 32;
+    const ROUTE_CHECK_SIM_MS = 60000;
+
+    function marginForPair(n1, n2) {
+      const cached = pairMargins.get(pairKey(n1.id, n2.id));
+      if (cached !== undefined) return cached;
+      const m = Math.max(
+        marginBetween(n1.lat, n1.lon, n2.lat, n2.lon),
+        marginBetween(n2.lat, n2.lon, n1.lat, n1.lon)
+      );
+      pairMargins.set(pairKey(n1.id, n2.id), m);
+      return m;
+    }
+
+    function checkRoute(chain) {
+      const model = self.HopReachMeshModel;
+      const prefs = model.defaultPrefs();
+      const sf = prefs.radio.sf;
+
+      // Weakest hop along the route itself — reported separately from the
+      // simulation because it's the specific, actionable "this hop is the
+      // problem" number, whereas delivery is a property of the whole route.
+      let weakest = null;
+      for (let i = 0; i + 1 < chain.length; i++) {
+        const from = chain[i], to = chain[i + 1];
+        const marginDb = marginForPair(from, to);
+        if (!weakest || marginDb < weakest.marginDb) {
+          weakest = {
+            marginDb,
+            fromLabel: from.label || (from.isNew ? "new relay" : from.id),
+            toLabel: to.label || (to.isNew ? "new relay" : to.id),
+            km: Propagation.haversineKm(from.lat, from.lon, to.lat, to.lon),
+          };
+        }
+      }
+
+      // The route plus the surrounding real repeaters, which relay and
+      // contend just as they would in reality.
+      const simNodes = [...chain];
+      const seen = new Set(chain.map((n) => n.id));
+      for (const n of nodes) {
+        if (!seen.has(n.id)) simNodes.push(n);
+      }
+
+      const links = [];
+      for (let i = 0; i < simNodes.length; i++) {
+        for (let j = i + 1; j < simNodes.length; j++) {
+          const marginDb = marginForPair(simNodes[i], simNodes[j]);
+          if (marginDb < 0) continue;
+          const snrDb = model.approxSnrFromMargin(marginDb, sf);
+          links.push({ from: i, to: j, snrDb });
+          links.push({ from: j, to: i, snrDb });
+        }
+      }
+
+      const scenario = {
+        nodes: simNodes.map(() => ({ prefs, canRelay: true })),
+        links,
+        channel: model.channel(),
+      };
+      const destIndex = chain.length - 1;
+      const messages = [{ origin: 0, sendAtMs: 0, payloadLen: ROUTE_CHECK_PAYLOAD_BYTES }];
+
+      let delivered = 0;
+      for (let seed = 1; seed <= ROUTE_CHECK_TRIALS; seed++) {
+        const report = MeshSim.run(scenario, messages, seed, ROUTE_CHECK_SIM_MS);
+        const got = (report.receptions || []).some(
+          (r) => r.node === destIndex && model.isCanonicalDelivery(r)
+        );
+        if (got) delivered++;
+      }
+
+      return {
+        trials: ROUTE_CHECK_TRIALS,
+        delivered,
+        hops: Math.max(0, chain.length - 1),
+        weakestHop: weakest,
+      };
     }
 
     function bfsPath(startId, targetId) {
@@ -261,13 +379,21 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
 
     const toChainPoint = (n) => ({ id: n.id, lat: n.lat, lon: n.lon, label: n.label, isReal: true, isNew: false });
 
-    // Already connected via existing repeaters only?
+    // Already connected via existing repeaters only? Still worth checking:
+    // "no new repeaters needed" is the most common answer here, and it's
+    // exactly the case where a route made entirely of >=0 dB hops can be
+    // technically connected but too marginal to rely on.
     const directPath = bfsPath(pointA.id, pointB.id);
     if (directPath) {
-      post({
-        type: "results",
-        options: [{ newSites: [], chain: directPath.map((id) => toChainPoint(nodeById.get(id))) }],
-      });
+      const chain = directPath.map((id) => toChainPoint(nodeById.get(id)));
+      post({ type: "status", message: "Checking the route with the simulator…" });
+      let check;
+      try {
+        check = checkRoute(chain);
+      } catch (err) {
+        check = { error: err.message || String(err) };
+      }
+      post({ type: "results", options: [{ newSites: [], chain, check }] });
       return;
     }
 
@@ -391,6 +517,16 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
         ];
         return { newSites: bridge, chain };
       });
+      post({ type: "status", message: "Checking the route with the simulator…" });
+      for (const r of results) {
+        try {
+          r.check = checkRoute(r.chain);
+        } catch (err) {
+          // A route that can't be checked is still a usable route — the
+          // search result is the deliverable, this is added confidence.
+          r.check = { error: err.message || String(err) };
+        }
+      }
       post({ type: "results", options: results });
       return;
     }

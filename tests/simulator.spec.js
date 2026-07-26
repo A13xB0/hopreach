@@ -1665,3 +1665,63 @@ test("reconstructs a real CoreScope window as an editable episode with actual-vs
   await page.click("#sim-episode-set-baseline");
   await expect(page.locator("#sim-episode-problems-tbody tr").first()).toContainText("no change");
 });
+
+// "Add repeater" is the counterpart to "Add companion location": place a
+// hypothetical relay by clicking the map, without needing it to exist in a
+// saved plan or in CoreScope first. The two differ in exactly one way that
+// matters to the engine — a companion never relays (canRelay) — so the
+// nodes table also lets any node's type be switched, which is a what-if
+// switch and deliberately does not touch the underlying CoreScope data.
+test("places a repeater by clicking the map, and can switch a node's type", async ({ page }) => {
+  await page.click("#sim-toggle");
+  await openAccordion(page, "sim-acc-nodes");
+
+  const map = page.locator("#map");
+  const box = await map.boundingBox();
+
+  await page.click("#sim-add-repeater");
+  await expect(page.locator("#sim-add-repeater")).toHaveClass(/active/);
+  await expect(page.locator("#sim-repeater-hint")).toBeVisible();
+
+  const p1 = await findClickableMapPoint(page, map);
+  await page.mouse.click(box.x + p1.x, box.y + p1.y);
+  await expect(page.locator("#sim-node-count-badge")).toHaveText("1");
+
+  // Toggling the button off stops placing — a further map click must not
+  // add another node.
+  await page.click("#sim-add-repeater");
+  await expect(page.locator("#sim-add-repeater")).not.toHaveClass(/active/);
+  await expect(page.locator("#sim-repeater-hint")).toBeHidden();
+
+  // A placed repeater relays, so it renders as a repeater marker rather
+  // than a companion one.
+  await expect(page.locator(".sim-marker-icon")).toHaveCount(1);
+  await expect(page.locator(".sim-marker-companion")).toHaveCount(0);
+
+  // The two placement modes are mutually exclusive, not additive.
+  await page.click("#sim-add-repeater");
+  await page.click("#sim-add-companion");
+  await expect(page.locator("#sim-add-repeater")).not.toHaveClass(/active/);
+  await expect(page.locator("#sim-repeater-hint")).toBeHidden();
+  await expect(page.locator("#sim-add-companion")).toHaveClass(/active/);
+  await page.click("#sim-add-companion");
+
+  // Switch that repeater to a companion in the settings table.
+  await page.click("#sim-open-nodes-modal");
+  const typeSelect = page.locator('#sim-nodes-modal-tbody [data-field="nodeType"]').first();
+  await expect(typeSelect).toHaveValue("repeater");
+  await typeSelect.selectOption("companion");
+  await page.click("#sim-nodes-modal-apply");
+
+  // The map has to follow the switch, not just the table.
+  await expect(page.locator(".sim-marker-companion")).toHaveCount(1);
+  await expect(page.locator(".sim-marker-icon")).toHaveCount(0);
+
+  // And it must survive a reopen of the table rather than being a
+  // render-time-only flourish. (Apply deliberately leaves the modal open,
+  // so close it before reopening or its own backdrop eats the click.)
+  await page.click("#sim-nodes-modal [data-close]");
+  await expect(page.locator("#sim-nodes-modal")).toBeHidden();
+  await page.click("#sim-open-nodes-modal");
+  await expect(page.locator('#sim-nodes-modal-tbody [data-field="nodeType"]').first()).toHaveValue("companion");
+});
