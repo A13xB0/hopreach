@@ -151,7 +151,7 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
   }
 }
 
-// --- connect two repeaters with the fewest new relays --------------------
+// --- connect two repeaters: a route that works, with the fewest relays ---
 //
 // A real global-optimum placement search is intractable (it's a
 // geometric Steiner-tree-like problem); this is a heuristic that mirrors
@@ -161,6 +161,21 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
 // to bridge a genuine gap, walking the straight line between the closest
 // bridgeable pair of already-reachable repeaters and biasing each new
 // candidate toward higher local ground (real masts do better on hills).
+//
+// Fewest relays alone is the wrong objective, though, and used to be the
+// only one. The greedy step takes the farthest candidate that clears the
+// link-budget bar — that's precisely what keeps hop count down, and it's
+// also what makes every hop as weak as the bar allows. With the bar at
+// 0 dB (bare demodulation threshold) it reliably produced routes hanging
+// on ~1 dB hops: connected on paper, unusable through ordinary fading.
+//
+// So the search runs once per quality target (CONNECT_QUALITY_TARGETS_DB,
+// best first) and every route it finds — across all passes — is simulated
+// with the real meshsim engine (see checkRoute). The ranking then puts
+// working routes ahead of cheap ones: reliability tier, then fewest new
+// relays, then most headroom. The 0 dB pass still runs, so a pair is never
+// declared unbridgeable just because it can't be bridged nicely; that
+// route simply ranks below a sturdier one when a sturdier one exists.
 const CONNECT_MAX_RANGE_KM = 35; // same rationale as PREVIEW_MAX_RANGE_KM
 const CONNECT_ZOOM_CAP = 10;
 const CONNECT_DEFAULT_MAX_NEW_SITES = 6;
@@ -171,6 +186,20 @@ const CONNECT_MAX_PAIRS_TRIED = 40;
 // How many distinct route options to hand back for the user to choose
 // between, ranked fewest-new-sites-first.
 const CONNECT_MAX_PATH_OPTIONS = 3;
+// Quality passes, best first. The search takes the FARTHEST candidate that
+// clears the bar (that's what minimises hop count), so whatever bar it's
+// given is roughly the margin the resulting hops land on — a 0 dB bar
+// produces routes held together by ~1 dB hops, which are "connected" only
+// in the sense that the link budget didn't quite go negative. 12 dB is
+// comfortable through ordinary fading, 6 dB is workable, 0 dB is the old
+// behaviour and stays as a last resort so a bridgeable pair is never
+// reported unbridgeable just because it can't be done nicely.
+const CONNECT_QUALITY_TARGETS_DB = [12, 6, 0];
+// A hop below this is flagged (and demoted) even when every simulated
+// trial delivered — it has essentially no headroom for fading. Matches
+// MARGINAL_HOP_DB in planner.js, which words the same threshold for the
+// user.
+const CONNECT_GOOD_MARGIN_DB = 5;
 
 async function handleConnect({ generation, pointA, pointB, realRepeaters, config, maxNewSites }) {
   const post = (msg) => self.postMessage({ generation, kind: "connect", ...msg });
@@ -210,12 +239,11 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
     );
     const nodes = [pointA, pointB, ...candidates];
     const nodeById = new Map(nodes.map((n) => [n.id, n]));
-    const adjacency = new Map(nodes.map((n) => [n.id, []]));
 
     // Every pairwise margin computed here is also exactly what the
     // route check below needs to build a simulator scenario, and each one
     // is a full terrain walk — so keep them rather than recomputing the
-    // same corridor from scratch once per route option.
+    // same corridor from scratch once per route option or quality pass.
     const pairMargins = new Map(); // "idA|idB" (sorted) -> best-direction margin dB
     const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
@@ -232,11 +260,25 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
           marginBetween(n2.lat, n2.lon, n1.lat, n1.lon)
         );
         pairMargins.set(pairKey(n1.id, n2.id), best);
-        if (best >= 0) {
-          adjacency.get(n1.id).push(n2.id);
-          adjacency.get(n2.id).push(n1.id);
+      }
+    }
+
+    // Which existing-repeater links count as usable depends on how much
+    // headroom we're insisting on, so the graph is rebuilt per quality
+    // pass — cheap, because it's only re-thresholding margins already
+    // computed above, no further terrain work.
+    function adjacencyFor(targetDb) {
+      const adj = new Map(nodes.map((n) => [n.id, []]));
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const n1 = nodes[i], n2 = nodes[j];
+          if (pairMargins.get(pairKey(n1.id, n2.id)) >= targetDb) {
+            adj.get(n1.id).push(n2.id);
+            adj.get(n2.id).push(n1.id);
+          }
         }
       }
+      return adj;
     }
 
     // --- check a proposed route with the actual simulator ----------------
@@ -340,7 +382,7 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
       };
     }
 
-    function bfsPath(startId, targetId) {
+    function bfsPath(startId, targetId, adjacency) {
       if (startId === targetId) return [startId];
       const visited = new Set([startId]);
       const prev = new Map();
@@ -362,7 +404,7 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
       return null;
     }
 
-    function reachableSet(startId) {
+    function reachableSet(startId, adjacency) {
       const visited = new Set([startId]);
       const queue = [startId];
       while (queue.length) {
@@ -379,36 +421,23 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
 
     const toChainPoint = (n) => ({ id: n.id, lat: n.lat, lon: n.lon, label: n.label, isReal: true, isNew: false });
 
-    // Already connected via existing repeaters only? Still worth checking:
-    // "no new repeaters needed" is the most common answer here, and it's
-    // exactly the case where a route made entirely of >=0 dB hops can be
-    // technically connected but too marginal to rely on.
-    const directPath = bfsPath(pointA.id, pointB.id);
-    if (directPath) {
-      const chain = directPath.map((id) => toChainPoint(nodeById.get(id)));
-      post({ type: "status", message: "Checking the route with the simulator…" });
-      let check;
-      try {
-        check = checkRoute(chain);
-      } catch (err) {
-        check = { error: err.message || String(err) };
-      }
-      post({ type: "results", options: [{ newSites: [], chain, check }] });
-      return;
-    }
+    // Ids have to be unique across the whole search, not just within one
+    // route: checkRoute caches computed margins by node-id pair, so a
+    // second route reusing "relay-0" for a site somewhere else entirely
+    // would read back the first route's margin for it. That produced
+    // hops reported at impossible values (a -15 dB "link" the search would
+    // never have built) and, worse, fed the ranking bad numbers.
+    let relaySeq = 0;
 
-    // Bridge the gap: try the closest reachable-set pairs first.
-    const rA = [...reachableSet(pointA.id)].map((id) => nodeById.get(id));
-    const rB = [...reachableSet(pointB.id)].map((id) => nodeById.get(id));
-    const pairs = [];
-    for (const a of rA) {
-      for (const b of rB) {
-        pairs.push({ a, b, d: Propagation.haversineKm(a.lat, a.lon, b.lat, b.lon) });
-      }
+    function chainFor(bridge, a, b, adjacency) {
+      const pathA = bfsPath(pointA.id, a.id, adjacency) || [a.id];
+      const pathB = bfsPath(b.id, pointB.id, adjacency) || [b.id];
+      return [
+        ...pathA.map((id) => toChainPoint(nodeById.get(id))),
+        ...bridge.map((site) => ({ id: `relay-${relaySeq++}`, lat: site.lat, lon: site.lon, label: null, isReal: false, isNew: true })),
+        ...pathB.slice(1).map((id) => toChainPoint(nodeById.get(id))),
+      ];
     }
-    pairs.sort((p, q) => p.d - q.d);
-
-    post({ type: "status", message: "Searching for relay positions…" });
 
     // Search candidate positions along the great-circle from `from`
     // toward `to`, farthest first, each with a small local search biased
@@ -423,7 +452,7 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
     // usable site sits just a few km off the direct line (confirmed by
     // reproducing a real Highlands route that a narrower search couldn't
     // bridge at all, at any hop count, but this one does).
-    function findNextRelay(from, to) {
+    function findNextRelay(from, to, targetDb) {
       const totalKm = Propagation.haversineKm(from.lat, from.lon, to.lat, to.lon);
       const steps = 12;
       const searchRadiusKm = Math.min(15, totalKm * 0.15);
@@ -442,7 +471,7 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
             const angle = (a / ac) * 2 * Math.PI;
             const lat = baseLat + (r * Math.cos(angle)) / kmPerDegLat;
             const lon = baseLon + (r * Math.sin(angle)) / kmPerDegLon;
-            if (marginBetween(from.lat, from.lon, lat, lon) < 0) continue;
+            if (marginBetween(from.lat, from.lon, lat, lon) < targetDb) continue;
             const elev = groundAt(lat, lon);
             if (elev > bestElev) {
               bestElev = elev;
@@ -456,16 +485,16 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
     }
 
     // Try to bridge a->b in at most `cap` new sites, as few as possible.
-    function bridgeGap(a, b, cap) {
-      if (marginBetween(a.lat, a.lon, b.lat, b.lon) >= 0) return [];
+    function bridgeGap(a, b, cap, targetDb) {
+      if (marginBetween(a.lat, a.lon, b.lat, b.lon) >= targetDb) return [];
       if (cap <= 0) return null;
       const sites = [];
       let cur = a;
       for (let i = 0; i < cap; i++) {
-        const next = findNextRelay(cur, b);
+        const next = findNextRelay(cur, b, targetDb);
         if (!next) return null; // stuck — no forward progress possible from here
         sites.push(next);
-        if (marginBetween(next.lat, next.lon, b.lat, b.lon) >= 0) return sites;
+        if (marginBetween(next.lat, next.lon, b.lat, b.lon) >= targetDb) return sites;
         cur = next;
       }
       return null;
@@ -481,52 +510,104 @@ async function handleConnect({ generation, pointA, pointB, realRepeaters, config
       return true;
     }
 
-    // Multiple attempts, multiple paths: rather than committing to the
-    // first (or even just the single best) pair that bridges — terrain
-    // doesn't care about straight-line distance, so the closest reachable
-    // pair isn't always the pair needing fewest new sites — every
-    // reachable pair up to CONNECT_MAX_PAIRS_TRIED is tried, and up to
-    // CONNECT_MAX_PATH_OPTIONS distinct results are kept (ranked fewest
-    // new sites first) for the user to choose between.
-    const pairsToTry = pairs.slice(0, CONNECT_MAX_PAIRS_TRIED);
-    const options = []; // [{ bridge, a, b }], sorted, length <= CONNECT_MAX_PATH_OPTIONS
-    for (let i = 0; i < pairsToTry.length; i++) {
-      // Nothing can beat "no new sites needed" — stop once we have enough of those.
-      if (options.length >= CONNECT_MAX_PATH_OPTIONS && options[0].bridge.length === 0) break;
-      const { a, b } = pairsToTry[i];
-      post({
-        type: "status",
-        message: `Searching for relay positions… (attempt ${i + 1}/${pairsToTry.length}, ${options.length} path${options.length === 1 ? "" : "s"} found so far)`,
-      });
-      const bridge = bridgeGap(a, b, siteCap);
-      if (!bridge) continue;
-      if (options.some((opt) => opt.bridge.length === bridge.length && routesOverlap(opt.bridge, bridge))) continue;
-      options.push({ bridge, a, b });
-      options.sort((x, y) => x.bridge.length - y.bridge.length);
-      if (options.length > CONNECT_MAX_PATH_OPTIONS) options.length = CONNECT_MAX_PATH_OPTIONS;
+    // Search once per quality target, best first. The search is otherwise
+    // biased *towards* marginal links: findNextRelay deliberately takes the
+    // FARTHEST candidate that clears the bar, which is by construction the
+    // weakest one that qualifies, so a 0 dB bar reliably produces routes
+    // held together by ~1 dB hops. Insisting on real headroom instead
+    // usually costs nothing; where it does cost a relay, the lower passes
+    // still run so the fewest-relays answer is never lost — both end up in
+    // the same ranked list and the ranking decides.
+    const routeCandidates = []; // { bridge, chain, targetDb, check }
+
+    for (let t = 0; t < CONNECT_QUALITY_TARGETS_DB.length; t++) {
+      const targetDb = CONNECT_QUALITY_TARGETS_DB[t];
+      const adjacency = adjacencyFor(targetDb);
+      const label = targetDb > 0 ? `${targetDb} dB headroom` : "any usable link";
+
+      // Already connected using existing repeaters only, at this quality?
+      const directPath = bfsPath(pointA.id, pointB.id, adjacency);
+      if (directPath) {
+        const chain = directPath.map((id) => toChainPoint(nodeById.get(id)));
+        if (!routeCandidates.some((c) => c.bridge.length === 0)) routeCandidates.push({ bridge: [], chain, targetDb });
+        // Nothing beats zero new repeaters, and a lower-quality pass can
+        // only ever find the same or a worse version of it.
+        break;
+      }
+
+      const rA = [...reachableSet(pointA.id, adjacency)].map((id) => nodeById.get(id));
+      const rB = [...reachableSet(pointB.id, adjacency)].map((id) => nodeById.get(id));
+      const pairs = [];
+      for (const a of rA) {
+        for (const b of rB) {
+          pairs.push({ a, b, d: Propagation.haversineKm(a.lat, a.lon, b.lat, b.lon) });
+        }
+      }
+      pairs.sort((p, q) => p.d - q.d);
+
+      // Multiple attempts, multiple paths: rather than committing to the
+      // first (or even just the single best) pair that bridges — terrain
+      // doesn't care about straight-line distance, so the closest reachable
+      // pair isn't always the pair needing fewest new sites — every
+      // reachable pair up to CONNECT_MAX_PAIRS_TRIED is tried.
+      const pairsToTry = pairs.slice(0, CONNECT_MAX_PAIRS_TRIED);
+      let foundThisPass = 0;
+      for (let i = 0; i < pairsToTry.length; i++) {
+        if (foundThisPass >= CONNECT_MAX_PATH_OPTIONS) break;
+        const { a, b } = pairsToTry[i];
+        post({
+          type: "status",
+          message: `Searching for relay positions (${label})… attempt ${i + 1}/${pairsToTry.length}, ${routeCandidates.length} route${routeCandidates.length === 1 ? "" : "s"} so far`,
+        });
+        const bridge = bridgeGap(a, b, siteCap, targetDb);
+        if (!bridge) continue;
+        if (routeCandidates.some((c) => c.bridge.length === bridge.length && routesOverlap(c.bridge, bridge))) continue;
+        routeCandidates.push({ bridge, chain: chainFor(bridge, a, b, adjacency), targetDb });
+        foundThisPass++;
+      }
     }
 
-    if (options.length > 0) {
-      const results = options.map(({ bridge, a, b }) => {
-        const pathA = bfsPath(pointA.id, a.id) || [a.id];
-        const pathB = bfsPath(b.id, pointB.id) || [b.id];
-        const chain = [
-          ...pathA.map((id) => toChainPoint(nodeById.get(id))),
-          ...bridge.map((site, i) => ({ id: `relay-${i}`, lat: site.lat, lon: site.lon, label: null, isReal: false, isNew: true })),
-          ...pathB.slice(1).map((id) => toChainPoint(nodeById.get(id))),
-        ];
-        return { newSites: bridge, chain };
-      });
-      post({ type: "status", message: "Checking the route with the simulator…" });
-      for (const r of results) {
+    if (routeCandidates.length > 0) {
+      post({ type: "status", message: `Checking ${routeCandidates.length} route${routeCandidates.length === 1 ? "" : "s"} with the simulator…` });
+      for (const c of routeCandidates) {
         try {
-          r.check = checkRoute(r.chain);
+          c.check = checkRoute(c.chain);
         } catch (err) {
           // A route that can't be checked is still a usable route — the
           // search result is the deliverable, this is added confidence.
-          r.check = { error: err.message || String(err) };
+          c.check = { error: err.message || String(err) };
         }
       }
+
+      // Rank on what was actually asked for, in order: it has to work, then
+      // cost as few new repeaters as possible, then have the most headroom.
+      // Reliability outranks relay count deliberately — a route that only
+      // gets through 3 times in 5 isn't a cheaper answer to the same
+      // question, it's an answer to a different one. Headroom breaks ties
+      // last, so among equally-cheap routes that all deliver, the sturdiest
+      // wins.
+      const tierOf = (c) => {
+        const chk = c.check || {};
+        if (chk.error || chk.trials == null) return 2; // unknown — rank between "works" and "doesn't"
+        if (chk.delivered === 0) return 3;
+        if (chk.delivered < chk.trials) return 2;
+        const weak = chk.weakestHop && chk.weakestHop.marginDb < CONNECT_GOOD_MARGIN_DB;
+        return weak ? 1 : 0; // delivered every trial; 0 only if no hop is marginal
+      };
+      const weakestOf = (c) => (c.check && c.check.weakestHop ? c.check.weakestHop.marginDb : -Infinity);
+
+      routeCandidates.sort((x, y) => {
+        const t = tierOf(x) - tierOf(y);
+        if (t !== 0) return t;
+        if (x.bridge.length !== y.bridge.length) return x.bridge.length - y.bridge.length;
+        return weakestOf(y) - weakestOf(x);
+      });
+
+      const results = routeCandidates.slice(0, CONNECT_MAX_PATH_OPTIONS).map((c) => ({
+        newSites: c.bridge,
+        chain: c.chain,
+        check: c.check,
+      }));
       post({ type: "results", options: results });
       return;
     }

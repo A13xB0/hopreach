@@ -138,6 +138,16 @@ test("connect repeaters reports a simulated verdict for the route it found", asy
   await expect(verdict).toContainText(/Simulated/);
   await expect(verdict).toContainText(/trials/);
   await expect(verdict).toContainText(/weakest hop -?\d+(\.\d+)? dB/);
+
+  // The search never builds a hop below the lowest quality target (0 dB),
+  // so a negative weakest hop means the reported figure didn't come from
+  // the route on screen. That really happened: every route named its new
+  // sites relay-0, relay-1, … and the margin cache is keyed by node-id
+  // pair, so the second route's relay-0 read back the first route's
+  // margin for a site somewhere else entirely — surfacing impossible
+  // values like -15 dB and, worse, feeding the ranking bad numbers.
+  const weakest = parseFloat(((await verdict.textContent()) || "").match(/weakest hop (-?\d+(?:\.\d+)?) dB/)[1]);
+  expect(weakest, "a route the search built cannot contain a below-threshold hop").toBeGreaterThanOrEqual(0);
   // And it must commit to one of the three states, which is what colours it.
   const cls = (await verdict.getAttribute("class")) || "";
   expect(cls, `verdict classes were ${cls}`).toMatch(/\b(good|warn|bad)\b/);
