@@ -229,9 +229,15 @@ test("map controls move into the Map options sheet on a phone and back on deskto
 
   await page.setViewportSize({ width: 1500, height: 900 });
   await page.goto("/");
-  // Wait for the async-mounting controls (the region filter waits on a
-  // live CoreScope call) so the counts below aren't racing the last one in.
-  await expect(page.locator(".scope-filter-control")).toBeVisible({ timeout: 60_000 });
+  // The basemap picker is the one control in this corner that always
+  // exists. Several others are conditional on data this instance may not
+  // have yet — "Map detail" needs more than one computed coverage tier and
+  // the region filter needs a live CoreScope scope-stats call — so the
+  // assertions below are written against whatever is actually present
+  // rather than a fixed inventory (a fresh CI container legitimately has
+  // neither; see the coverage-tier test above, which skips for the same
+  // reason).
+  await expect(page.locator(".leaflet-control-layers")).toBeVisible({ timeout: 60_000 });
 
   const desktopOnMap = await onMap();
   expect(desktopOnMap).toBeGreaterThan(0);
@@ -239,30 +245,58 @@ test("map controls move into the Map options sheet on a phone and back on deskto
   await expect(page.locator("#map-options-sheet")).toBeHidden();
 
   await page.setViewportSize({ width: 390, height: 844 });
+  // Polled, not read once: a control that mounts late (the region filter
+  // again) has to end up in the sheet too, and the corner has to end up
+  // completely empty rather than merely emptier.
   await expect.poll(inSheet).toBeGreaterThan(0);
-  expect(await onMap()).toBe(0);
+  await expect.poll(onMap).toBe(0);
 
-  // Exactly one of each — a clone would silently double them up, and the
-  // copy without listeners is the one you'd end up tapping.
-  for (const sel of [".map-display-control", ".position-mode-control", ".scope-filter-control", ".legend"]) {
-    expect(await page.locator(sel).count(), `${sel} should exist exactly once`).toBe(1);
+  // Moved, not cloned — a clone would silently double a control up, and
+  // the copy without listeners is the one you'd end up tapping. Checked
+  // only for the controls this instance actually has.
+  for (const sel of [
+    ".leaflet-control-layers",
+    ".map-display-control",
+    ".neighbor-window-control",
+    ".position-mode-control",
+    ".scope-filter-control",
+    ".legend",
+  ]) {
+    const n = await page.locator(sel).count();
+    expect(n, `${sel} should exist zero or one times, never duplicated`).toBeLessThanOrEqual(1);
+    if (n === 1) {
+      await expect(page.locator(`#map-options-body > ${sel}`), `${sel} should have moved into the sheet`).toHaveCount(1);
+    }
   }
 
-  // The sheet opens from the tab bar and the moved controls still work —
-  // toggling a real checkbox proves the listeners came with the element.
+  // The sheet opens from the tab bar, and the moved controls still DO
+  // something — the whole reason these are moved rather than cloned. A
+  // clone would look identical and quietly do nothing, so this drives a
+  // real checkbox and checks the map actually reacted.
   await page.click("#map-options-toggle");
   await expect(page.locator("#map-options-sheet")).toBeVisible();
-  const clustering = page.locator("#map-options-body #toggle-clustering");
-  if (await clustering.count()) {
+
+  const clustering = page.locator("#map-options-body #disable-clustering-toggle");
+  await expect(clustering).toHaveCount(1);
+  // "Map display" defaults collapsed; open it to reach the checkbox.
+  const displayBody = page.locator("#map-options-body .map-display-control .map-control-body");
+  if (await displayBody.evaluate((el) => el.classList.contains("hidden"))) {
     await page.click("#map-options-body .map-display-control .map-control-header");
-    await clustering.check();
-    await expect(clustering).toBeChecked();
   }
+  await clustering.check();
+  await expect(clustering).toBeChecked();
+  // Un-clustering replaces the cluster group with plain markers, so the
+  // cluster bubbles the map was drawing must go away.
+  await expect.poll(() => page.locator(".marker-cluster").count()).toBe(0);
+
   await page.click("#map-options-close");
   await expect(page.locator("#map-options-sheet")).toBeHidden();
 
-  // Back to desktop: everything returns to the map, nothing stranded.
+  // Back to desktop: everything returns to the map, nothing stranded in a
+  // sheet that's now display:none. Greater-or-equal rather than exact —
+  // a control that mounted during the phone phase legitimately makes the
+  // corner busier than it was at the first measurement.
   await page.setViewportSize({ width: 1500, height: 900 });
-  await expect.poll(onMap).toBe(desktopOnMap);
-  expect(await inSheet()).toBe(0);
+  await expect.poll(onMap).toBeGreaterThanOrEqual(desktopOnMap);
+  await expect.poll(inSheet).toBe(0);
 });
