@@ -11,6 +11,7 @@ import (
 
 	"hopreach/internal/demgrid"
 	"hopreach/internal/gpujob"
+	"hopreach/internal/progress"
 	"hopreach/internal/propagation"
 )
 
@@ -86,5 +87,61 @@ func TestMarginsRemotePollsProgress(t *testing.T) {
 	}
 	if !sawIncremental {
 		t.Errorf("expected at least one incremental (0 < done < total) call between open/close, got %v", calls)
+	}
+}
+
+// TestComputeTileReportsRemoteBackend pins the fix for a real production
+// bug: the chunked path (MarginsChunked -> computeTile, which serves the
+// Precision and Calibrated Precision tiers) dispatches to the remote worker
+// directly instead of going through Margins, and Margins is where every
+// reportBackend call lived. So the two longest tiers of a run — precisely
+// the ones a remote worker exists to serve — left progress.json with no
+// "backend" field at all. The map showed no GPU label for most of a run
+// that was in fact entirely remote-GPU (the symptom that made it look like
+// the GPU wasn't being used), and recordTier wrote an empty backend into
+// the analytics run history.
+func TestComputeTileReportsRemoteBackend(t *testing.T) {
+	const cols, rows = 8, 8
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gpu/submit", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(gpujob.Float32ToBytesLE(make([]float32, cols*rows)))
+	})
+	mux.HandleFunc("/gpu/progress", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]int{"done": rows, "total": rows})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	prog := progress.New(t.TempDir())
+	// A stage has to be current for the writer to hold a backend at all —
+	// Update clears it on any stage change.
+	prog.Update("computing_coverage_precision", 0, 1, "starting")
+	if got := prog.LastBackend(); got != "" {
+		t.Fatalf("precondition: LastBackend() = %q, want empty before any dispatch", got)
+	}
+
+	e := New()
+	e.SetProgress(prog)
+	e.SetRemote(strings.TrimPrefix(srv.URL, "http://"), "")
+
+	tl := tile{
+		outputBounds: propagation.Bounds{South: 56.3, North: 56.7, West: -3.7, East: -3.3},
+		loadBounds:   propagation.Bounds{South: 56.2, North: 56.8, West: -3.8, East: -3.2},
+		colCount:     cols,
+		rowCount:     rows,
+	}
+	p := propagation.Params{FrequencyMHz: 868, TxPowerDBm: 22, RxSensitivityDB: -124, FadeMarginDB: 20, MaxRangeKm: 50}
+	sites := []propagation.Site{{Lat: 56.5, Lon: -3.5, GroundM: 0, TxHeightM: 1}}
+
+	// No cacheDir/tileURLBase and no local backend: if this ever stopped
+	// being served remotely it would fall through to a real DEM load and
+	// fail, so a passing test also confirms the remote path was taken.
+	if _, _, _, err := e.computeTile(tl, sites, 11, "", "", http.DefaultClient, 40, p, 1, 1<<30, nil); err != nil {
+		t.Fatalf("computeTile: %v", err)
+	}
+
+	if got := prog.LastBackend(); got != "remote_gpu" {
+		t.Errorf("LastBackend() after a remotely-served chunked tile = %q, want %q", got, "remote_gpu")
 	}
 }

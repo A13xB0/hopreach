@@ -543,6 +543,15 @@ func DownsampleMargins(src []float32, srcWidth, srcHeight, factor int) (dst []fl
 // acceptable simplification — see computeTileLocal).
 func (e *Engine) computeTile(tl tile, tileSites []propagation.Site, zoom int, cacheDir, tileURLBase string, client *http.Client, rangeKm float64, p propagation.Params, supersample int, localBudgetBytes float64, progressFn func(done, total int)) ([]float32, int, int, error) {
 	if e.localBE == nil && e.remoteConfigured() {
+		// This path dispatches to the remote worker directly rather than
+		// through Margins, so it has to report the backend itself —
+		// Margins' own reportBackend calls never run for a chunked tier.
+		// Without this the Precision and Calibrated Precision tiers (the
+		// two longest, and the ones a remote worker exists to serve) left
+		// progress.json with no backend at all: the UI showed no GPU label
+		// for most of a run that was in fact entirely remote-GPU, and
+		// recordTier logged an empty backend into the analytics history.
+		e.reportBackend("remote_gpu")
 		margins, err := e.marginsRemote(stubGrid(zoom), tileSites, tl.outputBounds, tl.colCount, tl.rowCount, rangeKm, p, progressFn)
 		if err == nil {
 			out, w, h := DownsampleMargins(margins, tl.colCount, tl.rowCount, supersample)
