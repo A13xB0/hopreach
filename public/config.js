@@ -14,6 +14,7 @@ window.HOPREACH_CONFIG = {
   // No nginx proxy in local dev (python -m http.server) — go straight to
   // the upstream tile host. In the container this is always "/dem-tiles".
   demTileURLBase: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium",
+  corescopeUrl: "https://scotmesh-corescope.mm7roq.compute.oarc.uk",
   propagation: {
     frequencyMhz: 868,
     txPowerDbm: 22,

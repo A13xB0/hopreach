@@ -425,6 +425,18 @@ header .subtitle {
      the corner, leaving the other one (the "Map key") sitting under the
      buttons. */
 }
+/* A smaller sim-stat-strip for the map-docked corner — the modal's own
+   full-size version (min-width: 4.5rem, larger padding) is comfortable in
+   a 560px modal but cramped in a 240px map card; same shared component
+   (renderStatStrip), just denser. */
+.sim-stat-strip-compact { gap: 0.4rem; margin-bottom: 0; }
+.sim-stat-strip-compact .sim-stat { min-width: 3.6rem; padding: 0.25rem 0.5rem; }
+.sim-stat-strip-compact .sim-stat-value { font-size: 0.95rem; }
+
+/* Still used by the real-packet replay's own map-docked transport controls
+   (ensureBottleneckLegendControl) — NOT dead, unlike the simulated-flood
+   playback buttons that used to share this class (see
+   ensureSimPlaybackControl, now a live-stats card instead). */
 .sim-playback-buttons { margin-bottom: 0.4rem; }
 .sim-playback-buttons button {
   flex: 1;
@@ -437,10 +449,6 @@ header .subtitle {
   cursor: pointer;
 }
 .sim-playback-buttons button:hover { border-color: var(--accent); }
-.sim-map-results-log {
-  max-height: 220px;
-  overflow-y: auto;
-}
 
 /* The real-packet replay's map-docked control (see
    ensureBottleneckLegendControl): transport buttons, live status, and the
@@ -570,6 +578,21 @@ header .subtitle {
      own bottom edge when there isn't one. */
   bottom: calc(0.75rem + var(--transport-clearance, 0px));
   left: 0.75rem;
+  /* An absolutely-positioned element that overflows its own width doesn't
+     just clip visually — it enlarges its containing block's SCROLLABLE
+     area, which on a narrow phone forced the whole page into a wider
+     layout viewport than the device actually has (~515px computed from a
+     412px screen, confirmed live), and the browser then zoomed the entire
+     page out to fit — not a rendering quirk, an actual horizontal-scroll
+     bug affecting every control on the page, not just this one. `right`
+     caps the box at the viewport edge same as `left` already did, and
+     flex-wrap lets a fourth button drop to a second row instead of
+     pushing the box past that cap. --map-tools-clearance (set in app.js)
+     already measures the row's real rendered height via ResizeObserver, so
+     a wrapped two-row layout pushes bottom-docked controls up correctly
+     without any change there. */
+  right: 0.75rem;
+  flex-wrap: wrap;
   /* Leaflet's own control corners sit at z-index:1000, and the layers
      control (top-right, expanded) can overlap the panel's top edge since
      the panel spans the full right side — this must stay above that. */
@@ -745,7 +768,14 @@ header .subtitle {
 #sim-open-results-modal.hidden,
 #sim-open-predictions-modal.hidden,
 #sim-open-bottleneck-modal.hidden,
-#sim-rankings-expand.hidden {
+#sim-rankings-expand.hidden,
+/* These two were never added when the optimizer and episode-analysis
+   modals were introduced — found while reviewing the redesigned panel:
+   both sat visible-but-empty from the moment Simulate mode opened,
+   exactly the bug this comment already warns about. Pre-existing, not
+   introduced by the panel restructure (confirmed against git history). */
+#sim-open-optimize-modal.hidden,
+#sim-open-episode-modal.hidden {
   display: none;
 }
 
@@ -844,6 +874,28 @@ header .subtitle {
   color: #fff;
 }
 
+/* The one action that gets full-weight primary treatment on Plan's own
+   file-operations row — see PLAN-05 in the UX review. Export/Import/KML
+   sit underneath, deliberately quieter (.plan-secondary-row), since
+   they're aimed at round-tripping through another tool rather than at
+   the everyday "send this to someone" case. */
+.plan-promoted-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  padding: 0.55rem 0.6rem;
+}
+.plan-promoted-btn:hover { filter: brightness(1.08); border-color: var(--accent); }
+.plan-secondary-row button {
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.45rem;
+  border-color: transparent;
+}
+.plan-secondary-row button:hover { color: var(--text); border-color: var(--border); }
+
 .plan-checkbox-row {
   display: flex;
   align-items: center;
@@ -857,6 +909,13 @@ header .subtitle {
   width: auto;
   cursor: pointer;
 }
+/* Nothing to preview until at least one repeater is planned — greyed
+   rather than silently inert when clicked. */
+.plan-checkbox-row-disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.plan-checkbox-row-disabled input[type="checkbox"] { cursor: default; }
 
 .plan-hint {
   font-size: 0.72rem;
@@ -867,6 +926,141 @@ header .subtitle {
   margin-bottom: 0.6rem;
 }
 .plan-hint.hidden { display: none; }
+
+/* --- Simulate panel: workflow rail, Basic/Advanced tiering, accordions -
+   The panel used to be one long scroll through ~9 workflows at equal
+   visual weight. This groups them into named, collapsible sections; a
+   rail above tracks real progress through the four that make a run
+   possible; a tier toggle defers the rest (policy search, the optimizer,
+   stress test) until asked for. Nothing here removes a control or
+   changes what it does — see simulator.js's updateWorkflowState/setSimTier. */
+
+.sim-acc {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+  background: rgba(255,255,255,0.02);
+}
+.sim-acc-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: none;
+  border: none;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+}
+.sim-acc-title { flex: 1; font-size: 0.85rem; font-weight: 600; }
+.sim-acc-head:hover .sim-acc-title { color: var(--accent); }
+.sim-acc-badge { font-size: 0.68rem; color: var(--text-muted); white-space: nowrap; }
+.sim-acc-chevron { font-size: 0.65rem; color: var(--text-muted); transition: transform 0.15s; flex-shrink: 0; }
+.sim-acc.open .sim-acc-chevron { transform: rotate(90deg); }
+.sim-acc-body { padding: 0 0.7rem 0.65rem; display: none; }
+.sim-acc.open .sim-acc-body { display: block; }
+/* An accordion body's own contents (plan-row/plan-field-row/buttons)
+   inherit the existing #sim-panel-scoped rules further up this file —
+   nothing about being inside .sim-acc-body changes their own styling. */
+
+.sim-rail {
+  display: flex;
+  align-items: center;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+}
+.sim-rail-step {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 0.1rem 0.15rem;
+}
+.sim-rail-step:hover { color: var(--text); }
+.sim-rail-dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--text-muted); flex-shrink: 0; }
+.sim-rail-step.done { color: var(--status-active); }
+.sim-rail-step.done .sim-rail-dot { background: var(--status-active); border-color: var(--status-active); }
+.sim-rail-step.now { color: var(--text); font-weight: 700; }
+.sim-rail-step.now .sim-rail-dot { background: var(--accent); border-color: var(--accent); }
+.sim-rail-link { width: 0.9rem; height: 1px; background: var(--border); margin: 0 0.3rem; flex-shrink: 0; }
+
+.sim-tier-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+.sim-tier-label { font-size: 0.72rem; color: var(--text-muted); }
+.sim-tier-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem;
+  background: rgba(255,255,255,0.03);
+}
+.sim-tier-seg button {
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sim-tier-seg button.on { background: var(--accent); color: #fff; }
+
+/* Hidden, not removed — see setSimTier in simulator.js. */
+.sim-advanced-only { display: none; }
+.sim-workspace.tier-advanced .sim-advanced-only { display: block; }
+
+/* The tool's own strongest credibility signal (replaying its model
+   against real production traffic) gets a visually distinct treatment at
+   every tier, rather than a plain section heading at the very bottom of
+   the panel — cyan, the same colour the replay's own "observed" traffic
+   already uses on the map, not a new accent. */
+.sim-promoted {
+  border: 1px solid #22d3ee;
+  background: linear-gradient(180deg, rgba(34,211,238,0.08), rgba(34,211,238,0) 60%);
+  border-radius: 8px;
+  padding: 0.75rem 0.8rem;
+  margin: 1rem 0;
+}
+.sim-promoted-eyebrow {
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #22d3ee;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+}
+.sim-promoted-title { margin: 0 0 0.35rem; font-size: 0.95rem; color: var(--text); }
+.sim-promoted-body { margin: 0 0 0.6rem; font-size: 0.76rem; color: var(--text-muted); line-height: 1.5; }
+/* Default link blue barely read against this card's own dark background —
+   white/bold/underlined stands out the way an inline link inside a muted
+   paragraph needs to, without competing with the cyan eyebrow/border. */
+.sim-promoted-body a {
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sim-promoted-body a:hover { color: #22d3ee; }
 
 /* Phase 6 Tier 2/3 — the "Advanced (experimental)" optimizer toggles are a
    plain native <details>, deliberately: it's a genuinely optional, rarely-

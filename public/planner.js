@@ -840,7 +840,10 @@
     plannedNeighborsById = msg.neighbors || {};
     renderAllPlannedNeighbors();
     renderRepeaterList();
-    if (msg.empty) return;
+    if (msg.empty) {
+      syncCoverageToggles(); // no preview to show — reflect that in the panel's own checkbox
+      return;
+    }
 
     const { bounds, imageWidth, imageHeight, marginGreenDb } = msg;
     const margins = new Float32Array(msg.margins);
@@ -874,7 +877,46 @@
     const llBounds = [[bounds.south, bounds.west], [bounds.north, bounds.east]];
     previewOverlay = L.imageOverlay(canvas.toDataURL("image/png"), llBounds, { interactive: false }).addTo(map);
     layersControl.addOverlay(previewOverlay, "Planned coverage (preview)");
+    syncCoverageToggles();
   }
+
+  // --- coverage toggles, moved into the Plan panel itself (PLAN-01) ------
+  //
+  // Both checkboxes act on the SAME layer objects the floating Leaflet
+  // layers control already manages (window.MCCoverageMap's own
+  // coverageLayer, and this file's own previewOverlay) via plain
+  // map.addLayer/removeLayer — never a second, parallel visibility flag.
+  // Leaflet's own control listens for "add"/"remove" events on each
+  // registered layer to keep its own checkbox in sync, so driving the
+  // layer this way keeps both checkboxes for the same layer honest
+  // whichever one was actually clicked.
+  function setPreviewVisible(visible) {
+    if (!previewOverlay) return;
+    if (visible) previewOverlay.addTo(map);
+    else map.removeLayer(previewOverlay);
+  }
+
+  // Reflects current layer state into the panel's own checkboxes — called
+  // after a preview recomputes and whenever the panel opens, since neither
+  // moment is a click on these checkboxes themselves.
+  function syncCoverageToggles() {
+    const coverageBox = document.getElementById("plan-toggle-coverage");
+    const previewBox = document.getElementById("plan-toggle-preview");
+    const previewRow = document.getElementById("plan-toggle-preview-row");
+    if (coverageBox && window.MCCoverageMap) coverageBox.checked = window.MCCoverageMap.isCoverageVisible();
+    if (previewBox) previewBox.checked = !!(previewOverlay && map.hasLayer(previewOverlay));
+    // Nothing to preview until at least one repeater is planned — grey the
+    // row out rather than let it silently do nothing when clicked.
+    if (previewRow) previewRow.classList.toggle("plan-checkbox-row-disabled", !previewOverlay);
+    if (previewBox) previewBox.disabled = !previewOverlay;
+  }
+
+  document.getElementById("plan-toggle-coverage").addEventListener("change", (e) => {
+    if (window.MCCoverageMap) window.MCCoverageMap.setCoverageVisible(e.target.checked);
+  });
+  document.getElementById("plan-toggle-preview").addEventListener("change", (e) => {
+    setPreviewVisible(e.target.checked);
+  });
 
   // --- line of sight ----------------------------------------------------
 
@@ -1552,6 +1594,7 @@
       areaLayer.addTo(map);
       if (showAllNeighborsEnabled) allNeighborsLayer.addTo(map);
       if (previewOverlay) previewOverlay.addTo(map);
+      syncCoverageToggles(); // panel-open re-adds these layers unconditionally, so the checkboxes need to catch back up
     }
     map.invalidateSize();
   }

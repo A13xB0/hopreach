@@ -13,6 +13,17 @@
   const cfg = window.HOPREACH_CONFIG;
   const { map } = window.MCCoverageMap;
 
+  // The "Replay a real CoreScope packet" card's own description links out
+  // to the actual CoreScope instance this deployment reads from — set from
+  // config rather than hardcoded, since a different deployment can point
+  // at a different CoreScope instance entirely (see prepare.go's own
+  // corescopeUrl). Left pointing at the project repo in the static HTML as
+  // a safe fallback if config is ever missing this field.
+  if (cfg.corescopeUrl) {
+    const link = document.getElementById("sim-corescope-link");
+    if (link) link.href = cfg.corescopeUrl;
+  }
+
   const SIM_MAX_RANGE_KM = 35; // same rationale as planner.js's PREVIEW_MAX_RANGE_KM
   const SIM_ZOOM_CAP = 11;
   const CORESCOPE_REACH_DAYS = 7; // fixed window — simulator.js has no window-selector UI of its own (see planner.js's for the map's own hover tooltips)
@@ -431,6 +442,7 @@
     cachedGrid = null;
     linksGeneration++;
     setStatus("sim-links-status", "Connectivity not built yet for the current node set — click \"Build links\".");
+    updateWorkflowState();
   }
 
   // --- saved setups -------------------------------------------------------
@@ -669,6 +681,7 @@
   function renderNodeList() {
     document.getElementById("sim-node-count-badge").textContent = String(simNodes.length);
     if (!document.getElementById("sim-nodes-modal").classList.contains("hidden")) renderNodesModalTable();
+    updateWorkflowState();
   }
 
   // Sorted by label for display only — simNodes' own array order (and
@@ -700,6 +713,7 @@
 
   function renderMessageList() {
     document.getElementById("sim-message-count-badge").textContent = String(simMessageGenerators.length);
+    updateWorkflowState(); // ahead of the early return below — 0 senders is itself real state the rail needs
     const list = document.getElementById("sim-message-list");
     list.innerHTML = "";
     if (simMessageGenerators.length === 0) {
@@ -754,6 +768,84 @@
       };
       list.appendChild(row);
     }
+  }
+
+  // --- workflow rail, Basic/Advanced tier ---------------------------------
+  //
+  // Load nodes → build connectivity → add senders → run is the real
+  // required sequence (nothing runs without links, links need nodes
+  // first), previously expressed only by vertical position in one long
+  // scroll. This reads the same state every render already depends on —
+  // simNodes/simLinks/simMessageGenerators/lastReport — so it can never
+  // drift from what the panel actually shows; there is no separate
+  // "workflow progress" variable to keep in sync by hand.
+  //
+  // Called from a small, deliberately chosen set of hook points rather
+  // than after every individual mutation: renderNodeList/renderMessageList
+  // (already the single place each of those arrays' own UI refreshes),
+  // buildLinks/invalidateLinks (the two places simLinks actually changes),
+  // and the three lastReport assignment sites. A composite action like
+  // clearNodes() already calls several of these in turn, so it updates
+  // correctly without needing its own explicit call.
+  const WORKFLOW_STEPS = [
+    { id: "sim-acc-nodes", done: () => simNodes.length > 0 },
+    { id: "sim-acc-links", done: () => simLinks.length > 0 },
+    { id: "sim-acc-senders", done: () => simMessageGenerators.length > 0 },
+    { id: "sim-acc-run", done: () => !!lastReport },
+  ];
+
+  function updateWorkflowState() {
+    const rail = document.getElementById("sim-rail");
+    if (!rail) return; // guards test/import contexts that don't mount the panel
+    let currentAssigned = false;
+    WORKFLOW_STEPS.forEach((step, i) => {
+      const done = step.done();
+      const isCurrent = !currentAssigned && !done;
+      if (isCurrent) currentAssigned = true;
+      const el = rail.querySelector(`[data-rail-target="${step.id}"]`);
+      if (el) {
+        el.classList.toggle("done", done);
+        el.classList.toggle("now", isCurrent);
+      }
+    });
+
+    const badgeNodes = document.getElementById("sim-acc-badge-nodes");
+    if (badgeNodes) badgeNodes.textContent = simNodes.length === 0 ? "None loaded" : `${simNodes.length} loaded`;
+    const badgeLinks = document.getElementById("sim-acc-badge-links");
+    if (badgeLinks) badgeLinks.textContent = simLinks.length === 0 ? "Not built" : `${simLinks.length} link${simLinks.length === 1 ? "" : "s"}`;
+    const badgeSenders = document.getElementById("sim-acc-badge-senders");
+    if (badgeSenders) badgeSenders.textContent = String(simMessageGenerators.length);
+    const badgeRun = document.getElementById("sim-acc-badge-run");
+    if (badgeRun) badgeRun.textContent = lastReport ? "Done" : "Not run yet";
+  }
+
+  // Clicking a rail step opens (without closing any sibling — several are
+  // often meaningfully open together, e.g. checking Connectivity while
+  // Senders is still being set up) and scrolls to its accordion. Doesn't
+  // force a tier switch: a step that lives under Advanced isn't one of
+  // these four, so this never needs to.
+  function jumpToAccordion(id) {
+    const acc = document.getElementById(id);
+    if (!acc) return;
+    acc.classList.add("open");
+    const head = acc.querySelector(".sim-acc-head");
+    if (head) head.setAttribute("aria-expanded", "true");
+    acc.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  const SIM_TIER_STORAGE_KEY = "hopreach.simTier";
+
+  // Basic/Advanced is a shared primitive, not a per-section setting — one
+  // flag, persisted per browser (same pattern as the saved basemap choice
+  // in app.js), so a technical user who switches to Advanced once doesn't
+  // have to repeat that every session, while a first-time basic visitor
+  // never sees it unless they ask.
+  function setSimTier(tier) {
+    const advanced = tier === "advanced";
+    document.getElementById("sim-tier-basic").classList.toggle("on", !advanced);
+    document.getElementById("sim-tier-advanced").classList.toggle("on", advanced);
+    document.querySelector(".sim-workspace").classList.toggle("tier-advanced", advanced);
+    localStorage.setItem(SIM_TIER_STORAGE_KEY, tier);
   }
 
   // Loads an existing sender's own values back into the form and switches
@@ -1433,6 +1525,7 @@
         "sim-links-status",
         `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(nodesSnapshot, simLinks)}`
       );
+      updateWorkflowState();
     } catch (err) {
       if (generation !== linksGeneration) return;
       setStatus("sim-links-status", `Failed to build links: ${err.message || err}`);
@@ -1723,13 +1816,14 @@
       renderRankings(report);
       if (lastEpisode) renderEpisodeAnalysis(); // refresh actual-vs-predicted / before-after against this run
       startReplay();
+      updateWorkflowState();
       setStatus("sim-status", "Done.");
       // Deliberately doesn't open the Results modal automatically — its
       // backdrop covers the whole map (see #sim-modal-backdrop), which
-      // would block the map-docked playback control this same run just
-      // revealed (see ensureSimPlaybackControl). The "📊 Results" button
-      // is there if the bigger modal view is wanted; the map controls
-      // handle live replay + the log on their own now.
+      // would block watching the flood propagate. The shared transport bar
+      // plays it live either way; the "📊 Results" button is there
+      // whenever the bigger modal view (full reception log, sent-messages
+      // list) is actually wanted.
     } catch (err) {
       setStatus("sim-status", `Simulation failed: ${err.message || err}`);
     }
@@ -1751,10 +1845,10 @@
     container.appendChild(btn);
   }
 
-  // Renders report's reception log into container — used for both the
-  // Results modal's own log and the map-docked playback control's live
-  // copy (see ensureSimPlaybackControl), so the two never drift out of
-  // sync with each other.
+  // Renders report's reception log into container — used for the Results
+  // modal's own log (the map-docked control used to carry a live copy of
+  // this too; it shows running stats instead now, see
+  // ensureSimPlaybackControl).
   function renderReceptionLogInto(container, report, showAll) {
     container.innerHTML = "";
     const all = report.receptions;
@@ -1813,8 +1907,6 @@
     ]);
 
     renderReceptionLogInto(document.getElementById("sim-results-log"), report);
-    const mapLog = document.getElementById("sim-map-results-log");
-    if (mapLog) renderReceptionLogInto(mapLog, report);
   }
 
   // --- sent messages: list + per-message path/collision view ------------
@@ -2884,6 +2976,7 @@
     nodeGrowthCounts = [];
     currentWaveLines = [];
     clearSentMessageSelection();
+    updateWorkflowState();
   }
 
   // --- animated flood replay ---------------------------------------------
@@ -3378,6 +3471,7 @@
           for (let i = prevK; i < k; i++) playWave(replayWaves[i]);
           replayIndex = k;
           setReplayStatus(k >= replayWaves.length ? "Replay finished — showing final state." : `Playing… t=${replayWaves[k - 1].atMs}ms (${k}/${replayWaves.length})`);
+          updateMapLiveStats(k);
           return;
         }
         // Seek (or first render): rebuild from scratch. redrawPathsForKeep-
@@ -3396,6 +3490,7 @@
         setReplayStatus(
           replayWaves.length === 0 ? "" : k >= replayWaves.length ? "Showing final state." : `t=${Math.round(srcMs)}ms (${k}/${replayWaves.length})`
         );
+        updateMapLiveStats(k);
       },
     };
   }
@@ -5935,6 +6030,7 @@
         "sim-links-status",
         `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(simNodes, simLinks)}`
       );
+      updateWorkflowState();
       replayObservations = buildReplayObservations(observedTransmissions);
 
       await MeshSim.ready;
@@ -6009,6 +6105,7 @@
       rebuildLinkIndexes(predictedReport);
       renderResults(predictedReport);
       renderSentMessagesList();
+      updateWorkflowState();
 
       // Flood route types are TRANSPORT_FLOOD (0) and FLOOD (1); direct are
       // DIRECT (2) and TRANSPORT_DIRECT (3). Our model only predicts flood
@@ -6214,14 +6311,13 @@
     el.classList.toggle("hidden", !text);
   }
 
-  // Replay status is shown in two places at once — the Results modal and
-  // the map-docked playback control (see ensureSimPlaybackControl, only
-  // present once a report exists) — kept in sync by always going through
-  // this rather than setStatus directly.
+  // The map-docked control shows live stats now, not a mirrored status
+  // string (see ensureSimPlaybackControl) — this only writes the Results
+  // modal's own copy, but keeps its name/call sites unchanged since every
+  // caller just wants "tell the user what the replay is doing" regardless
+  // of where that ends up landing.
   function setReplayStatus(text) {
     setStatus("sim-replay-status", text);
-    const mapStatus = document.getElementById("sim-map-replay-status");
-    if (mapStatus) mapStatus.textContent = text;
   }
 
   // --- modal system --------------------------------------------------
@@ -6374,13 +6470,22 @@
     }
   }
 
-  // --- map-docked playback + live reception log --------------------------
+  // --- map-docked live run stats -------------------------------------
   //
-  // Watching a replay used to mean either staring at the map with no
-  // controls in view (they're all in the Results modal, which sits over
-  // the map) or opening/closing the modal to check the log — this puts
-  // Replay/Skip-to-end and a live-updating log right on the map itself,
-  // bottom-right, appearing only once there's an actual report to show.
+  // Used to be Replay/Skip-to-end buttons plus a full reception-log copy —
+  // both fully superseded once the shared scrub/play/pause transport
+  // (setTransportSource) landed: that bar already plays, pauses and seeks
+  // (dragging to the end IS "skip to end"), the Results modal has its own
+  // Replay/Skip-to-end buttons for driving it from there, and the modal's
+  // own reception log already shows the same rows this used to duplicate.
+  // Found still sitting on the map doing nothing anyone was using — see
+  // the git history for this comment.
+  //
+  // Repurposed into something the transport bar doesn't cover: a live
+  // running tally (received/collided/delivery so far) that advances in
+  // step with the scrubber, so watching a replay answers "is this actually
+  // going well" without opening the modal that would cover the map you're
+  // watching it play out on.
   let simPlaybackControl = null;
 
   function ensureSimPlaybackControl() {
@@ -6388,22 +6493,15 @@
     simPlaybackControl = L.control({ position: "bottomleft" });
     simPlaybackControl.onAdd = function () {
       const div = L.DomUtil.create("div", "sim-playback-control");
-      const logBody = `<div id="sim-map-results-log" class="plan-list sim-map-results-log"></div>`;
       div.innerHTML = `
-        <div class="plan-row sim-playback-buttons">
-          <button id="sim-map-replay" title="Watch the flood propagate again from the start">▶ Replay</button>
-          <button id="sim-map-skip-to-end" title="Jump straight to the final state">⏭ Skip to end</button>
-        </div>
-        <div class="plan-hint" id="sim-map-replay-status"></div>
-        ${window.HopReachMapControls.collapsibleHtml("Reception log", logBody, "sim-reception-log")}
+        <div class="map-control-header-static">Run so far</div>
+        <div id="sim-map-live-stats" class="sim-stat-strip sim-stat-strip-compact"></div>
       `;
       L.DomEvent.disableClickPropagation(div);
-      window.HopReachMapControls.wireCollapsible(div);
-      div.querySelector("#sim-map-replay").addEventListener("click", startReplay);
-      div.querySelector("#sim-map-skip-to-end").addEventListener("click", skipToEnd);
       return div;
     };
     simPlaybackControl.addTo(map);
+    updateMapLiveStats(0);
   }
 
   function removeSimPlaybackControl() {
@@ -6411,6 +6509,28 @@
       map.removeControl(simPlaybackControl);
       simPlaybackControl = null;
     }
+  }
+
+  // wavesPlayed is how many waves the transport has revealed so far (see
+  // simTransportSource's own countWavesUpTo) — flattening exactly those
+  // waves' own receptions, rather than reading the full report, is what
+  // makes this track the scrubber instead of jumping straight to the final
+  // tally the instant a run finishes.
+  function updateMapLiveStats(wavesPlayed) {
+    const el = document.getElementById("sim-map-live-stats");
+    if (!el) return;
+    const receptions = replayWaves.slice(0, wavesPlayed).flatMap((w) => w.receptions);
+    const collided = receptions.filter((r) => r.collided).length;
+    const total = receptions.length;
+    const rate = total > 0 ? (collided / total) * 100 : 0;
+    renderStatStrip(el, [
+      // "receptions" (not "received") — same word the Results modal's own
+      // stat strip uses for this exact total-including-collided count, see
+      // renderResults, so the two never imply different things for the
+      // same number.
+      { label: "receptions", value: total },
+      { label: "collided", value: collided, tone: rate >= 30 ? "bad" : "" },
+    ]);
   }
 
   function setSimPanelOpen(open) {
@@ -6443,6 +6563,7 @@
         ensureBottleneckLegendControl();
         syncRealReplayControls();
       }
+      updateWorkflowState(); // state can change while the panel is closed (e.g. loading a saved setup)
     } else {
       setPlacementMode("off");
       stopReplay();
@@ -6470,6 +6591,27 @@
   // HopReachPlanner.closePanel's own comment for why this is one-directional
   // rather than a shared toggle-coordinator module.
   document.getElementById("plan-toggle").addEventListener("click", () => setSimPanelOpen(false));
+
+  // Every accordion (Saved setups, the four workflow sections, and the
+  // three Advanced-only ones) shares one open/close handler — each toggles
+  // independently, several are often meaningfully open together.
+  document.querySelectorAll(".sim-acc-head").forEach((head) => {
+    head.addEventListener("click", () => {
+      const acc = head.closest(".sim-acc");
+      const open = acc.classList.toggle("open");
+      head.setAttribute("aria-expanded", String(open));
+    });
+  });
+  document.querySelectorAll(".sim-rail-step").forEach((step) => {
+    step.addEventListener("click", () => jumpToAccordion(step.dataset.railTarget));
+  });
+  document.getElementById("sim-tier-basic").addEventListener("click", () => setSimTier("basic"));
+  document.getElementById("sim-tier-advanced").addEventListener("click", () => setSimTier("advanced"));
+  // Restored per browser, same pattern as the saved basemap choice —
+  // falls back to Basic (the safer, less overwhelming default) for
+  // anyone who's never chosen.
+  setSimTier(localStorage.getItem(SIM_TIER_STORAGE_KEY) === "advanced" ? "advanced" : "basic");
+  updateWorkflowState();
 
   document.getElementById("sim-packet-filter-outcome").addEventListener("change", applyPacketModalFilters);
   document.getElementById("sim-packet-filter-search").addEventListener("input", applyPacketModalFilters);

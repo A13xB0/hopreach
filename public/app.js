@@ -875,5 +875,10 @@
     currentCoverageMeta,
     setClusteringDisabled,
     applySimulateDeclutter,
+    setCoverageVisible,
+    // coverageLayer is reassigned on every recompute, so a live check
+    // rather than a cached reference — a stale boolean here would leave
+    // the Plan panel's own checkbox out of sync after a background refresh.
+    isCoverageVisible: () => !!(coverageLayer && map.hasLayer(coverageLayer)),
   };
 })();

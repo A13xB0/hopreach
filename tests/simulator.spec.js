@@ -46,6 +46,27 @@ async function addMessageSenderViaModal(page) {
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
 }
 
+// Every accordion in the redesigned Simulate panel starts collapsed
+// except the four core workflow sections (Nodes/Connectivity/Senders/Run)
+// — Saved setups and, under Advanced, Policy search/Adaptive
+// optimizer/Stress test all need an explicit open before their own
+// controls are clickable.
+async function openAccordion(page, accordionId) {
+  const acc = page.locator(`#${accordionId}`);
+  if (!(await acc.evaluate((el) => el.classList.contains("open")))) {
+    await page.click(`#${accordionId} .sim-acc-head`);
+  }
+  await expect(acc).toHaveClass(/open/);
+}
+
+// Policy search, the adaptive optimizer, and the stress test also sit
+// behind the Advanced tier itself (see setSimTier in simulator.js) —
+// genuinely advanced tools, hidden from Basic by design rather than a bug.
+async function openAdvancedAccordion(page, accordionId) {
+  await page.click("#sim-tier-advanced");
+  await openAccordion(page, accordionId);
+}
+
 // Finds a point on the map that a click will actually reach the map with.
 // Anything sitting on top — a repeater marker, a cluster bubble, a docked
 // control — consumes the click itself, and Leaflet never fires its own map
@@ -126,20 +147,44 @@ test("simulate panel opens and is mutually exclusive with the plan panel", async
   // it, model everywhere else) rather than the propagation model alone —
   // a deliberate product default, not a CoreScope-availability fallback.
   await expect(page.locator("#sim-connectivity-source")).toHaveValue("blend");
+
+  // The "Replay a real CoreScope packet" card links out to the actual
+  // CoreScope instance this deployment reads from (set from config —
+  // window.HOPREACH_CONFIG.corescopeUrl — not hardcoded, since a different
+  // deployment can point at a different instance), opening in a new tab
+  // rather than navigating away from the app.
+  const corescopeLink = page.locator("#sim-corescope-link");
+  await expect(corescopeLink).toHaveText("CoreScope");
+  await expect(corescopeLink).toHaveAttribute("target", "_blank");
+  const expectedUrl = await page.evaluate(() => window.HOPREACH_CONFIG.corescopeUrl);
+  expect(expectedUrl).toMatch(/^https?:\/\//);
+  await expect(corescopeLink).toHaveAttribute("href", expectedUrl);
 });
 
-// Regression test: the four toolbar buttons that open a results modal
-// start with class="hidden" in the HTML and are only revealed once a real
-// run actually produces something to show (see
-// renderResults/renderSuggestions/renderBottleneckAnalysis/renderRankings)
-// — but class="hidden" alone does nothing without a matching CSS rule, and
-// this project has already hit that exact bug once (the docked sections
-// these buttons replaced). Also checks the modal backdrop itself starts
-// closed — opening Simulate mode must not pop any modal open on its own.
+// Regression test: the six toolbar buttons that open a results modal start
+// with class="hidden" in the HTML and are only revealed once a real run
+// actually produces something to show (see renderResults/renderSuggestions/
+// renderBottleneckAnalysis/renderRankings/renderOptimizeModal/
+// renderEpisodeAnalysis) — but class="hidden" alone does nothing without a
+// matching CSS rule, and this project has already hit that exact bug
+// twice: the docked sections these buttons replaced, and — found while
+// reviewing the redesigned panel — sim-open-optimize-modal/
+// sim-open-episode-modal themselves, silently missing from the shared
+// selector since the day each was introduced (this very test's own list
+// didn't cover them either, which is exactly how it went unnoticed). Also
+// checks the modal backdrop itself starts closed — opening Simulate mode
+// must not pop any modal open on its own.
 test("results/analysis buttons and modals stay hidden until a simulation actually produces something", async ({ page }) => {
   await page.click("#sim-toggle");
   await expect(page.locator("#sim-panel")).toBeVisible();
-  for (const id of ["sim-open-results-modal", "sim-open-predictions-modal", "sim-open-bottleneck-modal", "sim-rankings-expand"]) {
+  for (const id of [
+    "sim-open-results-modal",
+    "sim-open-predictions-modal",
+    "sim-open-bottleneck-modal",
+    "sim-rankings-expand",
+    "sim-open-optimize-modal",
+    "sim-open-episode-modal",
+  ]) {
     await expect(page.locator(`#${id}`), `#${id} should stay hidden before any simulation has run`).toBeHidden();
   }
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
@@ -189,13 +234,13 @@ test("loads planned repeaters, builds links, adds a message sender, runs a simul
   await page.click("#sim-run");
   await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 30_000 });
   // The Results modal does NOT open automatically — its backdrop would
-  // cover the map-docked playback control this same run reveals (see
-  // ensureSimPlaybackControl) — but the toolbar button appears, and the
-  // map's own playback control is immediately usable without opening it.
+  // cover the flood propagating on the map — but the toolbar button
+  // appears, and the map's own live-stats card (see
+  // ensureSimPlaybackControl) is immediately visible without opening it.
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
   await expect(page.locator("#sim-open-results-modal")).toBeVisible();
   await expect(page.locator(".sim-playback-control")).toBeVisible();
-  await expect(page.locator("#sim-map-results-log .plan-list-item").first()).toBeVisible();
+  await expect(page.locator("#sim-map-live-stats .sim-stat").first()).toBeVisible();
 
   await page.click("#sim-open-results-modal");
   await expect(page.locator("#sim-results-modal")).toBeVisible();
@@ -299,6 +344,7 @@ test("search policies finds a composite policy and shows an action list", async 
   await addMessageSenderViaModal(page);
 
   await page.fill("#sim-trials", "3"); // keep the search fast for a CI run
+  await openAdvancedAccordion(page, "sim-acc-policy");
   await page.click("#sim-suggest-policy");
   await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
   await expect(page.locator("#sim-predictions-modal")).toBeVisible();
@@ -347,6 +393,7 @@ test("adaptive optimizer refuses to run before a policy search", async ({ page }
   await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
   await addMessageSenderViaModal(page);
 
+  await openAdvancedAccordion(page, "sim-acc-optimizer");
   await page.click("#sim-optimize-adaptive");
   await expect(page.locator("#sim-status")).toContainText("Search policies");
   await expect(page.locator("#sim-optimize-section")).toBeHidden();
@@ -374,11 +421,13 @@ test("adaptive optimizer runs after a policy search and shows a result with hold
   await addMessageSenderViaModal(page);
 
   await page.fill("#sim-trials", "3"); // keep both the search and the optimizer fast for a CI run
+  await openAdvancedAccordion(page, "sim-acc-policy");
   await page.click("#sim-suggest-policy");
   await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
   await page.locator("#sim-predictions-modal [data-close]").first().click();
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
 
+  await openAdvancedAccordion(page, "sim-acc-optimizer");
   await page.click("#sim-optimize-adaptive");
   // Deliberately not asserting the progress indicator is visible at some
   // intermediate point — on this tiny 2-node fixture the whole
@@ -454,11 +503,13 @@ test("adaptive optimizer can be cancelled mid-run", async ({ page }) => {
   // fixture is otherwise so small/fast that a normal run can complete
   // before a click even lands (confirmed while writing this test).
   await page.fill("#sim-trials", "100");
+  await openAdvancedAccordion(page, "sim-acc-policy");
   await page.click("#sim-suggest-policy");
   await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 60_000 });
   await page.locator("#sim-predictions-modal [data-close]").first().click();
   await expect(page.locator("#sim-modal-backdrop")).toBeHidden();
 
+  await openAdvancedAccordion(page, "sim-acc-optimizer");
   await page.click("#sim-optimize-adaptive");
   // Best-effort: attempt the cancel click, but don't fail the test if the
   // run already finished and hid the button first — completing normally
@@ -490,6 +541,7 @@ test("stress test sweeps load levels and shows a capacity curve", async ({ page 
   await page.click("#sim-build-links");
   await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
 
+  await openAdvancedAccordion(page, "sim-acc-stress");
   await page.fill("#sim-stress-levels", "5, 20");
   await page.fill("#sim-trials", "3"); // keep the sweep fast for a CI run
   await page.click("#sim-stress-run");
@@ -899,6 +951,7 @@ test("saved setups: save, reload without rebuilding links, and delete", async ({
   await page.fill("#sim-max-time", "12345");
   await page.fill("#sim-trials", "7");
 
+  await openAccordion(page, "sim-acc-setups");
   await page.fill("#sim-setup-name", "My Setup");
   await page.click("#sim-setup-save");
   await expect(page.locator("#sim-status")).toContainText('Saved setup "My Setup"');
@@ -945,6 +998,7 @@ test("saved setups: export downloads a self-contained .json, importing it restor
   await page.click("#sim-build-links");
   await expect(page.locator("#sim-links-status")).not.toContainText("Building", { timeout: 60_000 });
   await addMessageSenderViaModal(page);
+  await openAccordion(page, "sim-acc-setups");
   await page.fill("#sim-setup-name", "Export Test Setup");
 
   const [download] = await Promise.all([page.waitForEvent("download"), page.click("#sim-setup-export")]);
@@ -1078,12 +1132,18 @@ test("runs a replay after a simulation and can skip to the final state", async (
   await expect(page.locator("#sim-status")).toHaveText("Done.", { timeout: 30_000 });
 
   expect(await page.evaluate(() => window.__hopreachSimulatorDebug.getWaveCount())).toBeGreaterThan(0);
-  // Replay/skip-to-end work straight from the map-docked playback control,
-  // without needing to open the Results modal at all.
-  await expect(page.locator("#sim-map-replay-status")).toBeVisible();
+  // The shared transport bar drives replay straight from the map, without
+  // needing to open the Results modal at all — and the map-docked card
+  // shows a live running tally (see ensureSimPlaybackControl) that tracks
+  // the scrubber rather than jumping straight to the final count.
+  await expect(page.locator("#sim-transport")).toBeVisible();
+  await expect(page.locator("#sim-map-live-stats .sim-stat").first()).toBeVisible();
 
-  await page.click("#sim-map-skip-to-end");
-  await expect(page.locator("#sim-map-replay-status")).toContainText("final state");
+  const seek = page.locator("#sim-transport-seek");
+  const max = await seek.getAttribute("max");
+  await seek.fill(max); // skip to the end
+  const report = await page.evaluate(() => window.__hopreachSimulatorDebug.getLastReport());
+  await expect(page.locator("#sim-map-live-stats")).toContainText(String(report.receptions.length));
 
   // The same controls, mirrored, also work from inside the modal.
   await page.click("#sim-open-results-modal");
@@ -1173,8 +1233,8 @@ test("keep-all-paths toggles the map view live, after a run has already finished
 
   // Settle into the finished/static state, where the old code did nothing
   // on toggle.
-  await page.click("#sim-map-skip-to-end");
-  await expect(page.locator("#sim-map-replay-status")).toContainText("final state");
+  const seek = page.locator("#sim-transport-seek");
+  await seek.fill(await seek.getAttribute("max"));
 
   const allPathsCount = await page.evaluate(() => window.__hopreachSimulatorDebug.getResultLineCount());
   expect(allPathsCount).toBeGreaterThan(0);
@@ -1297,9 +1357,10 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   await expect(page.locator(".sim-bottleneck-legend")).toBeVisible();
   await expect(page.locator(".sim-bottleneck-legend")).toContainText("Proven & modeled");
 
-  // The predicted run is a real report and fills the reception log like any
-  // other run, rather than being computed, diffed, and thrown away.
-  await expect(page.locator("#sim-map-results-log")).toBeVisible();
+  // The predicted run is a real report and drives the map-docked live-stats
+  // card like any other run, rather than being computed, diffed, and
+  // thrown away.
+  await expect(page.locator("#sim-map-live-stats")).toBeVisible();
 
   await page.click("#sim-map-open-bottleneck");
   await expect(page.locator("#sim-bottleneck-modal")).toBeVisible();

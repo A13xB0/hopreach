@@ -52,7 +52,13 @@ type jsConfig struct {
 	MetaURL        string    `json:"metaUrl"`
 	DemZoom        int       `json:"demZoom"`
 	DemTileURLBase string    `json:"demTileURLBase"`
-	Propagation    struct {
+	// The real CoreScope instance this deployment pulls repeater/reach data
+	// from — exposed so the frontend can link out to it (e.g. "Replay a
+	// real CoreScope packet"'s own description) rather than hardcoding one
+	// specific installation's URL into the client, which would be wrong
+	// for anyone else's deployment pointed at a different instance.
+	CorescopeURL string `json:"corescopeUrl"`
+	Propagation  struct {
 		FrequencyMhz     float64 `json:"frequencyMhz"`
 		TxPowerDbm       float64 `json:"txPowerDbm"`
 		TxAntennaGainDbi float64 `json:"txAntennaGainDbi"`
@@ -79,6 +85,7 @@ func writeConfigJS(yc yconfig.Config) error {
 	// never the upstream tile host directly — see terrain.js for why
 	// (CORS/canvas).
 	c.DemTileURLBase = "/dem-tiles"
+	c.CorescopeURL = yc.CoreScope.APIURL
 	c.Propagation.FrequencyMhz = yc.Propagation.FrequencyMHz
 	c.Propagation.TxPowerDbm = yc.Propagation.TxPowerDBm
 	c.Propagation.TxAntennaGainDbi = yc.Propagation.TxAntennaGainDB
