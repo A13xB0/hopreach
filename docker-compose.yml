@@ -7,6 +7,15 @@ services:
       - "${HTTP_PORT:-8080}:80"
     volumes:
       - hopreach-data:/usr/share/nginx/html/data
+      # The run history, memory samples and hardware records behind the
+      # /analytics page. Its own volume rather than part of hopreach-data
+      # because it's the one directory here that accumulates across runs
+      # instead of being rewritten by each one — without this it lives in
+      # the container's writable layer and every `docker compose up -d`
+      # (i.e. every upgrade) silently resets the history to empty. Both
+      # binaries derive this path as output_dir/../analytics, so it moves
+      # with output_dir if you change that.
+      - hopreach-analytics:/usr/share/nginx/html/analytics
       # Elevation tiles are large (~100MB+) and terrain never changes, so
       # they're cached separately from the daily-refreshed map data.
       - hopreach-dem-cache:/data/dem-cache
@@ -40,5 +49,6 @@ services:
 
 volumes:
   hopreach-data:
+  hopreach-analytics:
   hopreach-dem-cache:
   hopreach-shared-plans:

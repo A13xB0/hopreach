@@ -377,6 +377,16 @@ next to `data/`. Deliberately excludes anything that could identify a
 visitor: no IP addresses, no user agents, nothing beyond this deployment's
 own infrastructure and anonymous counts.
 
+Both binaries derive that directory as `output_dir/../analytics`
+(`/usr/share/nginx/html/analytics` in the image), and it gets its **own**
+Docker volume, `hopreach-analytics`. That's deliberate: it's the one
+directory here that accumulates *across* runs rather than being rewritten
+by each one, so it can't just ride along in `hopreach-data`. Without a
+volume of its own it sits in the container's writable layer, where every
+`docker compose up -d` — i.e. every upgrade — silently resets the history
+to empty. If you change `output_dir`, move that volume's mount point with
+it.
+
 ## WASM shared core
 
 `internal/propagation` (the link-budget/knife-edge-diffraction physics) and

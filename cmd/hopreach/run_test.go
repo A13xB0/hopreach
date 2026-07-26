@@ -168,3 +168,30 @@ func TestScopeSlug(t *testing.T) {
 		}
 	}
 }
+
+// TestAnalyticsPathIsOutsideOutputDir pins the property that made a real
+// persistence bug silent in production: analytics accumulate ACROSS runs,
+// while everything in output_dir is rewritten by each run. They therefore
+// have to be separately persisted, and docker-compose.yml gives the
+// analytics directory its own volume for exactly that reason.
+//
+// The bug: only output_dir had a volume, so the analytics directory sat in
+// the container's writable layer and every `docker compose up -d` reset
+// the run history to empty — invisible unless you happened to look at the
+// /analytics page right after an upgrade.
+//
+// If this ever moves inside output_dir, that volume stops covering it and
+// the history silently starts disappearing again, so assert the shape the
+// deployment depends on rather than trusting the string concatenation.
+func TestAnalyticsPathIsOutsideOutputDir(t *testing.T) {
+	const outputDir = "/usr/share/nginx/html/data" // the image's own output_dir
+	got := filepath.Clean(analyticsPath(outputDir, "runs.jsonl"))
+
+	if want := "/usr/share/nginx/html/analytics/runs.jsonl"; got != want {
+		t.Errorf("analyticsPath = %q, want %q", got, want)
+	}
+	// The load-bearing part: not under output_dir, which each run rewrites.
+	if strings.HasPrefix(got, filepath.Clean(outputDir)+string(filepath.Separator)) {
+		t.Errorf("analyticsPath %q is inside output_dir %q — it would be rewritten by each run, and the deployment's separate analytics volume would no longer cover it", got, outputDir)
+	}
+}
