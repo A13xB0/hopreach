@@ -53,6 +53,16 @@ var broker = &gpuBroker{
 	progress: make(map[string]jobProgress),
 }
 
+// workerReadTimeout is how long the broker will wait for ANY frame from a
+// connected worker before treating the connection as dead. Comfortably
+// more than the worker's own 2-minute Hello heartbeat (see
+// cmd/hopreach-gpuworker's helloInterval) so an idle-but-healthy worker is
+// never dropped, while still noticing a genuinely dead socket in minutes
+// rather than however long the OS takes to give up on a half-open TCP
+// connection. The worker reconnects on its own, so a false positive here
+// costs one reconnect, not a lost worker.
+const workerReadTimeout = 6 * time.Minute
+
 // Default is generous (30 min), not a few seconds' safety margin: a large
 // Precision-tier job on a worker with a cold DEM tile cache can spend
 // several minutes just fetching tiles from the upstream source before GPU
@@ -72,6 +82,31 @@ func (b *gpuBroker) connected() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.conn != nil
+}
+
+// clearConnIf drops the registered connection only if it's still c, and
+// reports whether it did.
+//
+// This has to be compare-and-clear, not a plain clear: a read loop finds
+// out its socket is dead whenever the OS finally gives up, which for a
+// half-open TCP connection can be long after the worker noticed, gave up
+// and reconnected. The reconnect registers the new connection; then the
+// old loop wakes up and tears down — and an unconditional clear wipes the
+// live registration on its way out. The broker then reports no worker
+// connected for as long as that new connection lasts, while the worker
+// sits idle believing it's connected, and every coverage job silently
+// falls back to CPU. Seen in production: a worker reconnected at 03:25 and
+// was still being reported disconnected five hours later, with a whole
+// Precision tier running on CPU at roughly 13x the wall-clock cost.
+func (b *gpuBroker) clearConnIf(c *websocket.Conn) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conn != c {
+		return false // a newer connection already took over — leave it alone
+	}
+	b.conn = nil
+	b.hello = gpujob.Hello{}
+	return true
 }
 
 func (b *gpuBroker) setConn(c *websocket.Conn) (old *websocket.Conn) {
@@ -213,15 +248,31 @@ func (b *gpuBroker) submit(job gpujob.Job, timeout time.Duration) ([]byte, error
 // one job is ever in flight at a time (see the package comment).
 func (b *gpuBroker) readLoop(conn *websocket.Conn) {
 	defer conn.Close()
+	// The worker sends a Hello heartbeat every helloInterval (2 min) for
+	// the life of the connection, plus progress frames while a job is
+	// running — so silence for well past that means this connection is
+	// dead even if the OS hasn't worked that out yet. Without a deadline a
+	// half-open socket can sit here for hours, which is what let the
+	// clobber described on clearConnIf go unnoticed for so long. Refreshed
+	// after every frame below.
+	_ = conn.SetReadDeadline(time.Now().Add(workerReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(workerReadTimeout))
+	})
 	for {
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
-			if old := b.setConn(nil); old == conn {
+			// Only tear down the shared state if this connection is still
+			// the registered one — see clearConnIf.
+			if b.clearConnIf(conn) {
 				log.Printf("gpubroker: worker disconnected: %v", err)
+				b.failAllPending(fmt.Sprintf("worker disconnected: %v", err))
+			} else {
+				log.Printf("gpubroker: stale worker connection closed (%v) — a newer one is already registered, leaving it alone", err)
 			}
-			b.failAllPending(fmt.Sprintf("worker disconnected: %v", err))
 			return
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(workerReadTimeout))
 		if msgType != websocket.TextMessage {
 			continue
 		}

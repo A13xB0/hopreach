@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/gorilla/websocket"
+
 	"hopreach/internal/gpujob"
 )
 
@@ -85,5 +87,87 @@ func TestBrokerAvailableBytesResetsOnNewConnection(t *testing.T) {
 	b.setConn(nil)
 	if got := b.getAvailableBytes(); got != 0 {
 		t.Errorf("getAvailableBytes() after setConn = %d, want reset to 0 (unknown)", got)
+	}
+}
+
+// TestStaleConnectionTeardownLeavesNewerConnectionRegistered is the
+// regression test for a real production incident: a whole Precision tier
+// ran on CPU for hours at roughly 13x the wall-clock cost, because the
+// broker reported no worker connected while the worker's own log showed it
+// connected and idle.
+//
+// The sequence: the worker's socket half-opens, the worker notices, gives
+// up and reconnects, and the new connection registers. Some time later —
+// whenever the OS finally gives up on the old socket — the OLD read loop
+// wakes up and tears down. It used to clear the registration
+// unconditionally (`if old := b.setConn(nil); old == conn` cleared first
+// and only *logged* conditionally), so the stale loop wiped the live
+// connection on its way out. Nothing ever re-registered it, because from
+// the worker's point of view it was already connected.
+func TestStaleConnectionTeardownLeavesNewerConnectionRegistered(t *testing.T) {
+	b := &gpuBroker{
+		pending:  make(map[string]chan gpuJobResult),
+		progress: make(map[string]jobProgress),
+	}
+
+	// Two distinct connections. Real *websocket.Conn values aren't needed —
+	// the broker only ever compares them by identity.
+	first := &websocket.Conn{}
+	second := &websocket.Conn{}
+
+	if old := b.setConn(first); old != nil {
+		t.Fatalf("setConn on a fresh broker returned old = %v, want nil", old)
+	}
+	// The worker reconnects; the new connection takes over.
+	if old := b.setConn(second); old != first {
+		t.Fatalf("setConn returned old = %v, want the first connection", old)
+	}
+	if !b.connected() {
+		t.Fatal("precondition: broker should report connected after the reconnect")
+	}
+
+	// Now the stale first connection's read loop finally errors out.
+	if cleared := b.clearConnIf(first); cleared {
+		t.Error("clearConnIf(first) reported that it cleared the registration — the stale connection must not touch the newer one")
+	}
+	if !b.connected() {
+		t.Fatal("the live (second) connection was torn down by the stale first one's cleanup — this is the production bug")
+	}
+
+	// And the live connection must still be able to tear itself down.
+	if cleared := b.clearConnIf(second); !cleared {
+		t.Error("clearConnIf(second) should clear its own registration")
+	}
+	if b.connected() {
+		t.Error("broker still reports connected after the live connection cleared itself")
+	}
+}
+
+// A stale teardown must not fail the CURRENT connection's in-flight jobs
+// either — those belong to the worker that's still connected and still
+// working on them.
+func TestStaleConnectionTeardownDoesNotFailLiveJobs(t *testing.T) {
+	b := &gpuBroker{
+		pending:  make(map[string]chan gpuJobResult),
+		progress: make(map[string]jobProgress),
+	}
+	first := &websocket.Conn{}
+	second := &websocket.Conn{}
+	b.setConn(first)
+	b.setConn(second)
+
+	ch := make(chan gpuJobResult, 1)
+	b.pending["job-live"] = ch
+
+	// Mirrors readLoop's error path for the stale connection: failAllPending
+	// is only reached when clearConnIf reports it actually cleared.
+	if b.clearConnIf(first) {
+		b.failAllPending("worker disconnected")
+	}
+
+	select {
+	case got := <-ch:
+		t.Fatalf("in-flight job was failed by a stale connection's teardown: %+v", got)
+	default:
 	}
 }
