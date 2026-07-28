@@ -1,7 +1,11 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -170,4 +174,72 @@ func TestStaleConnectionTeardownDoesNotFailLiveJobs(t *testing.T) {
 		t.Fatalf("in-flight job was failed by a stale connection's teardown: %+v", got)
 	default:
 	}
+}
+
+// End-to-end version of the two tests above, driving the real HTTP handler
+// and real websocket connections rather than calling clearConnIf directly —
+// so it covers handleGPUWorkerConnect and readLoop as actually wired, which
+// is where the production bug lived.
+//
+// Reproduces the exact production sequence: a worker's socket half-opens,
+// the worker gives up and reconnects (registering a second connection),
+// and only afterwards does the first connection's read loop notice and
+// tear down. The broker must still report a worker connected.
+func TestBrokerStaysConnectedWhenAStaleSocketClosesAfterAReconnect(t *testing.T) {
+	const token = "test-token"
+
+	// handleGPUWorkerConnect operates on the package-level broker.
+	saved := broker
+	broker = &gpuBroker{
+		pending:  make(map[string]chan gpuJobResult),
+		progress: make(map[string]jobProgress),
+	}
+	t.Cleanup(func() { broker = saved })
+
+	srv := httptest.NewServer(http.HandlerFunc(handleGPUWorkerConnect(token)))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	hdr := http.Header{"Authorization": []string{"Bearer " + token}}
+
+	dial := func() *websocket.Conn {
+		t.Helper()
+		c, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		return c
+	}
+
+	waitConnected := func(want bool) {
+		t.Helper()
+		for i := 0; i < 200; i++ {
+			if broker.connected() == want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("broker.connected() = %v, want %v", broker.connected(), want)
+	}
+
+	first := dial()
+	waitConnected(true)
+
+	// The worker reconnects while the broker still holds the first socket.
+	second := dial()
+	waitConnected(true)
+
+	// Now the stale first socket finally closes. Its read loop wakes up and
+	// tears down — which must not disturb the live second connection.
+	first.Close()
+	// Give the stale loop time to run its teardown, then confirm the
+	// registration survived it.
+	time.Sleep(200 * time.Millisecond)
+	if !broker.connected() {
+		t.Fatal("broker reported no worker after a STALE connection's teardown — the live one was unregistered (the production bug)")
+	}
+
+	// The live connection closing does unregister, so a genuinely gone
+	// worker is still reported gone.
+	second.Close()
+	waitConnected(false)
 }
