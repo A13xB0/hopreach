@@ -106,6 +106,42 @@ test("checking a region with real coverage tiles renders that region's own overl
   await expect(page.locator('.leaflet-image-layer[src*="coverage-scope-"]')).toHaveCount(0);
 });
 
+// Ticking any scope filter auto-hides the main "Estimated coverage" layer
+// (it's the union of EVERY repeater, so it drowns out what a filtered view
+// is showing) and unticking the last one brings it back — see the scope
+// filter's change handler in app.js. Also checks the Plan panel's own
+// "Estimated coverage" checkbox follows, since it only re-syncs itself on
+// panel open (see planner.js syncCoverageToggles).
+test("scope filtering swaps the main estimated coverage layer out and back", async ({ page }) => {
+  test.slow(); // needs both the real CoreScope region list and a computed coverage tier
+  await page.goto("/");
+  const control = page.locator(".scope-filter-control");
+  await expect(control).toBeVisible({ timeout: 60_000 });
+
+  // No coverage layer means setCoverageVisible has nothing to act on — a
+  // fresh instance with no completed run legitimately has none. Skip, same
+  // as the Map detail test above.
+  try {
+    await page.waitForFunction(() => window.MCCoverageMap && window.MCCoverageMap.isCoverageVisible(), null, { timeout: 60_000 });
+  } catch {
+    test.skip(true, "this instance has no computed coverage layer to swap");
+  }
+
+  const firstBox = control.locator('input[type="checkbox"]').first();
+  await firstBox.check();
+  await expect
+    .poll(() => page.evaluate(() => window.MCCoverageMap.isCoverageVisible()))
+    .toBe(false);
+  // The Plan panel's checkbox followed, even though the panel never opened.
+  expect(await page.locator("#plan-toggle-coverage").isChecked()).toBe(false);
+
+  await firstBox.uncheck();
+  await expect
+    .poll(() => page.evaluate(() => window.MCCoverageMap.isCoverageVisible()))
+    .toBe(true);
+  expect(await page.locator("#plan-toggle-coverage").isChecked()).toBe(true);
+});
+
 // "Map detail" defaults to Calibrated Precision when it's available (see
 // app.js's POSITION_MODE_MIGRATION_KEY), including a one-time reset for a
 // visitor with an older saved preference from before that was the default

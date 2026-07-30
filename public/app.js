@@ -556,6 +556,10 @@
     return checked.some((code) => (code === "unscoped" ? scopes.length === 0 : scopes.includes(code)));
   }
 
+  function scopeFilterActive() {
+    return Object.values(scopeFilterState).some(Boolean);
+  }
+
   // --- per-scope coverage overlays ----------------------------------
   //
   // Beyond filtering which markers show, each *checked* scope also gets
@@ -644,11 +648,24 @@
       div.querySelectorAll("input[type=checkbox]").forEach((input) => {
         input.addEventListener("change", (e) => {
           const name = e.target.dataset.scope;
+          const wasFiltering = scopeFilterActive();
           scopeFilterState[name] = e.target.checked;
           renderFilteredRepeaters();
           if (name !== "unscoped") {
             if (e.target.checked) renderScopeOverlay(name);
             else clearScopeOverlay(name);
+          }
+          // The main "Estimated coverage" raster is the union of EVERY
+          // repeater, so it drowns out the per-scope overlays the moment a
+          // filter is on — swap it out while any scope box is ticked and
+          // back in once the last one is unticked. Only on the on/off
+          // transition (not every click), so a coverage choice the user
+          // makes mid-filter isn't fought over; and never during Simulate
+          // mode, which force-hides coverage behind its own snapshot (see
+          // applySimulateDeclutter) that this would corrupt.
+          const nowFiltering = scopeFilterActive();
+          if (nowFiltering !== wasFiltering && !simDeclutterSnapshot) {
+            setCoverageVisible(!nowFiltering);
           }
         });
       });
@@ -901,7 +918,17 @@
   function applyCoverageLayer() {
     const cm = currentCoverageMeta();
     if (!cm || !cm.tiles || cm.tiles.length === 0) return;
+    // Rebuilding must not resurrect a layer that's currently meant to be
+    // hidden (Simulate mode's declutter, an active scope filter, or a plain
+    // manual untick) — a background meta refresh lands whenever a run
+    // finishes, and the rebuilt layer has to come back in the state the old
+    // one was in, not blanket-on. The very first build (a fresh instance
+    // finishing its first-ever tier mid-visit) has no old layer to read, so
+    // it defaults visible unless a state that hides coverage is already
+    // active at that moment.
+    let coverageWasVisible = !scopeFilterActive() && !simDeclutterSnapshot;
     if (coverageLayer) {
+      coverageWasVisible = map.hasLayer(coverageLayer);
       layersControl.removeLayer(coverageLayer);
       map.removeLayer(coverageLayer);
     }
@@ -930,7 +957,8 @@
       });
       return overlay;
     });
-    coverageLayer = L.layerGroup(coverageTileOverlays).addTo(map);
+    coverageLayer = L.layerGroup(coverageTileOverlays);
+    if (coverageWasVisible) coverageLayer.addTo(map);
     layersControl.addOverlay(coverageLayer, "Estimated coverage");
     addCoverageLegend(cm.frequency_mhz);
   }
@@ -1090,6 +1118,14 @@
     if (!coverageLayer) return;
     if (visible) coverageLayer.addTo(map);
     else map.removeLayer(coverageLayer);
+    // The Plan panel's own "Estimated coverage" checkbox only re-syncs on
+    // panel open / preview recompute (see planner.js syncCoverageToggles),
+    // so an external toggle — the scope filter's auto-swap above — has to
+    // reflect into it here or it goes stale while the panel is open. (The
+    // floating layers control needs nothing: it tracks the layer's own
+    // add/remove events.)
+    const planBox = document.getElementById("plan-toggle-coverage");
+    if (planBox) planBox.checked = visible;
   }
 
   function applySimulateDeclutter(on) {
@@ -1105,7 +1141,11 @@
       if (!simDeclutterSnapshot) return;
       const snap = simDeclutterSnapshot;
       simDeclutterSnapshot = null;
-      setCoverageVisible(snap.coverageVisible);
+      // If a scope filter was ticked while simulating, leaving Simulate
+      // mode must land in the same place ticking it outside would have:
+      // main coverage swapped out for the per-scope overlays, whatever the
+      // pre-Simulate snapshot says.
+      setCoverageVisible(snap.coverageVisible && !scopeFilterActive());
       if (clusteringDisabled !== snap.clusteringDisabled) setClusteringDisabled(snap.clusteringDisabled);
     }
     // The "Disable marker clustering" checkbox lives in its own map control
