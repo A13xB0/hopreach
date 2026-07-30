@@ -466,6 +466,15 @@ func run(cfg appConfig) (err error) {
 		Coverage:      previousCoverage(cfg.outputDir),
 		ScopeCoverage: previousScopeCoverage(cfg.outputDir),
 	}
+	// previousCoverage is nil on a genuine first run (or when the last
+	// meta.json never got a coverage tier — e.g. an earlier run died before
+	// its first writeTier). Every shouldComputeTier gate below dereferences
+	// m.Coverage.<Tier>, so nil here was a guaranteed startup panic on
+	// exactly the fresh-instance case (confirmed live: SIGSEGV at the
+	// standard tier's gate, crash-looping the container's initial fetch).
+	if m.Coverage == nil {
+		m.Coverage = &coverageOutputs{}
+	}
 	metaPath := filepath.Join(cfg.outputDir, "meta.json")
 	writeMeta := func() error {
 		return writeJSONFile(metaPath, m)
