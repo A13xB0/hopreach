@@ -644,6 +644,11 @@
       realRepeatersById[pubkey] = {
         id: pubkey,
         label: f.properties.name,
+        // ISO timestamp of the last time CoreScope heard this repeater at
+        // all — lets the simulator offer "only recently-heard repeaters"
+        // (a mesh where 2/3 of known repeaters are long dead makes the
+        // model predict hops through corpses).
+        lastHeard: f.properties.last_heard || null,
         lat: useCalibrated ? f.properties.calibrated_lat : f.geometry.coordinates[1],
         lon: useCalibrated ? f.properties.calibrated_lon : f.geometry.coordinates[0],
         // Every region this repeater is believed to be in (observed_scopes

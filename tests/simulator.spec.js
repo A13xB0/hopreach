@@ -1658,8 +1658,9 @@ test("reconstructs a real CoreScope window as an editable episode with actual-vs
   await expect(page.locator("#sim-episode-modal")).toBeVisible();
   await expect(page.locator("#sim-episode-provenance")).toContainText(candidateHash);
   await expect(page.locator("#sim-episode-recall")).toContainText(/delivered this packet to/);
-  // The before/after problem table always has its three rows.
-  await expect(page.locator("#sim-episode-problems-tbody tr")).toHaveCount(3);
+  // The before/after problem table always has its four rows (incl. the
+  // evidence-contradicted deliveries count).
+  await expect(page.locator("#sim-episode-problems-tbody tr")).toHaveCount(4);
 
   // Pin a baseline, and the delta column becomes populated.
   await page.click("#sim-episode-set-baseline");

@@ -363,8 +363,22 @@
     const scope = document.getElementById("sim-scope-filter").value;
     let real = Object.values(planner.getRealRepeaters());
     if (scope) real = real.filter((r) => (r.scopes || []).includes(scope));
+    // "Heard ≤25h only": a repeater CoreScope hasn't heard in over a day is
+    // very likely off-air (on the network this was built for, 448 of 660
+    // were) — leaving it on the map has the model predicting hops through a
+    // corpse, which is a big source of over-predicted reach.
+    let staleSkipped = 0;
+    if (document.getElementById("sim-load-real-active").checked) {
+      const cutoffMs = Date.now() - 25 * 60 * 60 * 1000;
+      const before = real.length;
+      real = real.filter((r) => {
+        const t = r.lastHeard ? Date.parse(r.lastHeard) : NaN;
+        return !Number.isNaN(t) && t >= cutoffMs;
+      });
+      staleSkipped = before - real.length;
+    }
     if (real.length === 0) {
-      setStatus("sim-status", scope ? `No real repeaters found for ${scope}.` : "No real repeater data loaded yet.");
+      setStatus("sim-status", scope ? `No real repeaters found for ${scope}.` : staleSkipped ? `All ${staleSkipped} matching repeaters are stale (nothing heard in 25h) — untick "heard ≤25h only" to load them anyway.` : "No real repeater data loaded yet.");
       return;
     }
     const existing = new Set(simNodes.map((n) => nodeKey(n.source, n.refId)));
@@ -391,7 +405,7 @@
     renderNodeList();
     renderMessageNodeOptions();
     redrawNodeMarkers();
-    setStatus("sim-status", `Loaded ${added} real repeater${added === 1 ? "" : "s"}${added < real.length ? " (some already loaded)" : ""}.`);
+    setStatus("sim-status", `Loaded ${added} real repeater${added === 1 ? "" : "s"}${added < real.length ? " (some already loaded)" : ""}${staleSkipped ? ` — ${staleSkipped} skipped as stale (nothing heard in 25h)` : ""}.`);
   }
 
   function addCompanionAt(lat, lon) {
@@ -4893,6 +4907,49 @@
   // mesh can hit this, and the caller should surface that as partial
   // coverage rather than silently presenting it as the whole window (item
   // 8's own requirement).
+  // Shared by both replay entry points ("🔗 Replay" onto the current
+  // workspace and "🏗️ Reconstruct window"): classifies every observer's
+  // state at the target's transit from the ±liveness activity span.
+  // See public/evidence.js and docs/REPLAY_NEGATIVE_EVIDENCE_PLAN.md.
+  function buildObserverEvidence({ detail, targetMs, hash, liveness }) {
+    const radioDefaults = self.HopReachMeshModel.defaultPrefs().radio;
+    const airOf = (rawHex, fallbackBytes) =>
+      HopReachEvidence.loraAirtimeMs(rawHex ? Math.floor(rawHex.length / 2) : fallbackBytes || 24, radioDefaults.sf, radioDefaults.bwKhz, radioDefaults.cr);
+    const observerNames = new Map();
+    for (const lp of liveness) {
+      const oid = (lp.observer_id || "").toLowerCase();
+      if (oid && !observerNames.has(oid)) observerNames.set(oid, lp.observer_name || oid.slice(0, 8));
+    }
+    for (const o of detail.observations || []) {
+      const oid = (o.observer_id || "").toLowerCase();
+      if (oid && !observerNames.has(oid)) observerNames.set(oid, o.observer_name || oid.slice(0, 8));
+    }
+    const evidenceEvents = [];
+    for (const lp of liveness) {
+      const tMs = Date.parse(lp.timestamp);
+      if (Number.isNaN(tMs)) continue;
+      const air = airOf(lp.raw_hex);
+      const oid = (lp.observer_id || "").toLowerCase();
+      if (oid) evidenceEvents.push({ observerId: oid, tMs, airtimeMs: air, hash: lp.hash, kind: "rx" });
+      for (const relay of lp.resolved_path || []) {
+        const rk = (relay || "").toLowerCase();
+        if (rk && observerNames.has(rk)) evidenceEvents.push({ observerId: rk, tMs, airtimeMs: air, hash: lp.hash, kind: "relay" });
+      }
+    }
+    const heardIds = new Set((detail.observations || []).map((o) => (o.observer_id || "").toLowerCase()).filter(Boolean));
+    const evidenceMap = HopReachEvidence.classifyObservers({
+      targetMs,
+      targetAirtimeMs: airOf(detail.packet && detail.packet.raw_hex, 105),
+      targetHash: hash,
+      heardObserverIds: heardIds,
+      events: evidenceEvents,
+    });
+    return {
+      observerNames,
+      observerEvidence: [...evidenceMap.entries()].map(([pubkey, v]) => ({ pubkey, name: observerNames.get(pubkey) || pubkey.slice(0, 8), state: v.state, reason: v.reason })),
+    };
+  }
+
   // Locates any historical time window with an offset binary search over the
   // timestamp-sorted list (about twenty 1-row probes), then pages the window
   // out — bounded cost for ANY packet age, unlike the old newest-first
@@ -5418,39 +5475,7 @@
       // (possibly offline). Liveness comes from the wider ±5min fetch, and
       // "observer" here means every observer id seen in that span — an
       // observer needn't be a positioned repeater to bear witness.
-      const radioDefaults = self.HopReachMeshModel.defaultPrefs().radio;
-      const airOf = (rawHex, fallbackBytes) =>
-        HopReachEvidence.loraAirtimeMs(rawHex ? Math.floor(rawHex.length / 2) : fallbackBytes || 24, radioDefaults.sf, radioDefaults.bwKhz, radioDefaults.cr);
-      const observerNames = new Map(); // id -> display name (positioned or not)
-      for (const lp of liveness) {
-        const oid = (lp.observer_id || "").toLowerCase();
-        if (oid && !observerNames.has(oid)) observerNames.set(oid, lp.observer_name || oid.slice(0, 8));
-      }
-      for (const o of detail.observations || []) {
-        const oid = (o.observer_id || "").toLowerCase();
-        if (oid && !observerNames.has(oid)) observerNames.set(oid, o.observer_name || oid.slice(0, 8));
-      }
-      const evidenceEvents = [];
-      for (const lp of liveness) {
-        const tMs = Date.parse(lp.timestamp);
-        if (Number.isNaN(tMs)) continue;
-        const air = airOf(lp.raw_hex);
-        const oid = (lp.observer_id || "").toLowerCase();
-        if (oid) evidenceEvents.push({ observerId: oid, tMs, airtimeMs: air, hash: lp.hash, kind: "rx" });
-        for (const relay of lp.resolved_path || []) {
-          const rk = (relay || "").toLowerCase();
-          if (rk && observerNames.has(rk)) evidenceEvents.push({ observerId: rk, tMs, airtimeMs: air, hash: lp.hash, kind: "relay" });
-        }
-      }
-      const heardIds = new Set((detail.observations || []).map((o) => (o.observer_id || "").toLowerCase()).filter(Boolean));
-      const evidenceMap = HopReachEvidence.classifyObservers({
-        targetMs,
-        targetAirtimeMs: airOf(detail.packet && detail.packet.raw_hex, 105),
-        targetHash: hash,
-        heardObserverIds: heardIds,
-        events: evidenceEvents,
-      });
-      const observerEvidence = [...evidenceMap.entries()].map(([pubkey, v]) => ({ pubkey, name: observerNames.get(pubkey) || pubkey.slice(0, 8), state: v.state, reason: v.reason }));
+      const { observerEvidence } = buildObserverEvidence({ detail, targetMs, hash, liveness });
 
       // If the target itself couldn't be placed as a flood sender, say why —
       // the surrounding traffic is still reconstructed and tunable, but there's
@@ -5939,10 +5964,15 @@
   // no hop count, no collision, no relay decision. These are engine
   // receptions, so the replay can show a predicted flood exactly as the
   // simulator shows its own — including where it collides.
-  function buildReplayTimeline(observedTransmissions, report, windowStartMs) {
+  function buildReplayTimeline(observedTransmissions, report, windowStartMs, constraint) {
     const items = observedTransmissions.map((e) => ({ kind: "observed", ...e }));
     const groups = new Map();
     for (const r of (report && report.receptions) || []) {
+      // Evidence-constrained: don't animate target deliveries that reality
+      // contradicts (healthy silent observers on that path) as if they
+      // happened — that's exactly the "left Fife and gone for a runner"
+      // artefact. Other packets' receptions at those nodes still play.
+      if (constraint && r.packetId === constraint.targetPid && constraint.prunedNodes && constraint.prunedNodes.has(r.node)) continue;
       const key = `${r.fromNode}:${r.packetId}:${r.atMs}`;
       let g = groups.get(key);
       if (!g) {
@@ -6298,8 +6328,8 @@
       const windowSecs = Math.min(120, Math.max(1, parseInt(document.getElementById("sim-replay-window-secs").value, 10) || 30));
       lastRealTimelineWindowSecs = windowSecs;
       const REAL_TIMELINE_WINDOW_MS = windowSecs * 1000;
-      setStatus("sim-replay-hash-status", `Fetching surrounding real activity (±${windowSecs}s)…`);
-      const { packets: windowPackets, hitCap } = await fetchPacketsAroundTime(targetMs, REAL_TIMELINE_WINDOW_MS);
+      setStatus("sim-replay-hash-status", `Fetching surrounding real activity (±${windowSecs}s, ±5min for observer liveness)…`);
+      const { packets: windowPackets, liveness, hitCap } = await fetchPacketsAroundTime(targetMs, REAL_TIMELINE_WINDOW_MS, 5 * 60 * 1000);
       for (const p of windowPackets) {
         for (const k of p.resolved_path || []) if (k) allPubkeys.add(k.toLowerCase());
         if (p.observer_id) allPubkeys.add(p.observer_id.toLowerCase());
@@ -6432,11 +6462,65 @@
       // that packet's own receptions — feeding it the whole window would
       // credit hops from unrelated floods as if they were this one's.
       const targetPid = predictedMessages.findIndex((m) => m.sourceHash === hash);
-      renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport, targetPid });
+
+      // Observer evidence: what was every observer doing at the target's
+      // transit? Silent-active observers (provably alive, idle, heard
+      // nothing) contradict any predicted delivery at — or routed through —
+      // them: reality says the packet never got there this time.
+      const { observerEvidence } = buildObserverEvidence({ detail: packetData, targetMs, hash, liveness });
+      const evidenceByPubkey = new Map(observerEvidence.map((o) => [o.pubkey, o]));
+      const contradictedNodes = new Set();
+      for (const o of observerEvidence) {
+        if (o.state !== "silent-active") continue;
+        const idx = pubkeyToIndex.get(o.pubkey);
+        if (idx != null) contradictedNodes.add(idx);
+      }
+      const targetReceptions = (predictedReport.receptions || []).filter((r) => r.packetId === targetPid);
+      const constrained = HopReachEvidence.constrainDeliveries({
+        receptions: targetReceptions,
+        targetPid,
+        contradictedNodes,
+        isDelivery: isCanonicalDelivery,
+      });
+      renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport, targetPid, contradictedNodes, constrained });
+
+      // Register the run as an episode too, so the episode analysis modal,
+      // the ✕-ring overlay, and the 10× probability button all work from
+      // this flow — not just from "Reconstruct window".
+      const obsSeen = new Map();
+      for (const o of packetData.observations || []) {
+        const k = (o.observer_id || "").toLowerCase();
+        if (k && pubkeyToIndex.has(k) && !obsSeen.has(k)) obsSeen.set(k, { pubkey: k, name: o.observer_name || k.slice(0, 8), index: pubkeyToIndex.get(k) });
+      }
+      const allObsSeen = new Map(obsSeen);
+      for (const wp of windowPackets) {
+        const k = (wp.observer_id || "").toLowerCase();
+        if (k && pubkeyToIndex.has(k) && !allObsSeen.has(k)) allObsSeen.set(k, { pubkey: k, name: wp.observer_name || k.slice(0, 8), index: pubkeyToIndex.get(k) });
+      }
+      for (const o of observerEvidence) {
+        if (pubkeyToIndex.has(o.pubkey) && !allObsSeen.has(o.pubkey)) allObsSeen.set(o.pubkey, { pubkey: o.pubkey, name: o.name, index: pubkeyToIndex.get(o.pubkey) });
+      }
+      const targetMsg = targetPid >= 0 ? predictedMessages[targetPid] : null;
+      lastEpisode = {
+        hash,
+        windowSecs,
+        fetchedAt: new Date().toISOString(),
+        target: targetMsg ? { nodeIndex: targetMsg.origin, atMs: targetMsg.sendAtMs } : null,
+        targetNote: targetMsg ? "" : "The target packet couldn't be placed as a flood sender in this window.",
+        targetObservers: [...obsSeen.values()],
+        allObservers: [...allObsSeen.values()],
+        observerEvidence,
+        originInferred: !!(targetMsg && !(JSON.parse((packetData.packet || {}).decoded_json || "{}").pubKey)),
+        deafObservers: observerEvidence.filter((o) => o.state === "busy").map((o) => o.pubkey),
+      };
+      episodeBaseline = null;
+      document.getElementById("sim-open-episode-modal").classList.remove("hidden");
 
       // Now the engine has run, the replay timeline can carry both halves —
-      // what was observed and what was predicted — on the one clock.
-      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, replayWindowStartMs);
+      // what was observed and what was predicted — on the one clock. The
+      // predicted half is evidence-constrained: target deliveries reality
+      // contradicts don't animate as if they happened.
+      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, replayWindowStartMs, { targetPid, prunedNodes: new Set(constrained.prunedNodes) });
       ensureBottleneckLegendControl();
       syncRealReplayControls();
 
@@ -6456,6 +6540,7 @@
       rebuildLinkIndexes(predictedReport);
       renderResults(predictedReport);
       renderSentMessagesList();
+      renderEpisodeAnalysis(); // evidence text, ✕-rings, actual-vs-predicted
       updateWorkflowState();
 
       // Flood route types are TRANSPORT_FLOOD (0) and FLOOD (1); direct are
@@ -6498,7 +6583,7 @@
     }
   }
 
-  function renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport, targetPid }) {
+  function renderBottleneckAnalysis({ pubkeyToIndex, provenEdges, predictedReport, targetPid, contradictedNodes, constrained }) {
     const provenPairIndices = new Set();
     for (const e of provenEdges.values()) {
       const f = pubkeyToIndex.get(e.from);
@@ -6541,8 +6626,15 @@
       .filter(([key]) => !provenPairIndices.has(key))
       .map(([, r]) => r)
       .sort((a, b) => a.atMs - b.atMs);
-    const unconfirmed = allUnconfirmed.filter((r) => observedNodeIndices.has(r.node));
-    const unconfirmable = allUnconfirmed.filter((r) => !observedNodeIndices.has(r.node));
+    // Refuted beats unconfirmable: "this packet's observations say nothing
+    // about that repeater" was treated as no-evidence-either-way, but a
+    // predicted hop INTO an observer that was provably alive, idle, and
+    // silent at the target's transit IS refuted — a healthy observer's
+    // silence is evidence of absence (see public/evidence.js).
+    const contradicted = contradictedNodes || new Set();
+    const refuted = allUnconfirmed.filter((r) => contradicted.has(r.node));
+    const unconfirmed = allUnconfirmed.filter((r) => !contradicted.has(r.node) && observedNodeIndices.has(r.node));
+    const unconfirmable = allUnconfirmed.filter((r) => !contradicted.has(r.node) && !observedNodeIndices.has(r.node));
 
     // Direction 2: CoreScope proved this hop happened, but our model
     // doesn't even consider it a possible link at all (never appears in
@@ -6561,11 +6653,16 @@
       .sort((a, b) => a.firstMs - b.firstMs);
 
     document.getElementById("sim-open-bottleneck-modal").classList.remove("hidden");
+    const constrainedNote = constrained
+      ? ` Evidence-constrained reach: ${constrained.keptNodes.size} node${constrained.keptNodes.size === 1 ? "" : "s"} (raw model claimed ${constrained.keptNodes.size + constrained.prunedNodes.size}; ${constrained.prunedNodes.size} contradicted by healthy silent observers).`
+      : "";
     document.getElementById("sim-bottleneck-summary").textContent =
       `${provenEdges.size} proven hop${provenEdges.size === 1 ? "" : "s"} from real CoreScope observations, ` +
       `${predictedPairs.size} predicted by our model — ${unconfirmed.length} predicted but never confirmed, ` +
+      `${refuted.length} REFUTED (predicted into observers that were alive, idle and silent — the packet demonstrably never got there), ` +
       `${unconfirmable.length} predicted into repeaters this packet's observations say nothing about (can't be judged either way), ` +
-      `${unmodeled.length} proven but not even predicted possible.`;
+      `${unmodeled.length} proven but not even predicted possible.` +
+      constrainedNote;
     document.getElementById("sim-bottleneck-unconfirmable-note").textContent = unconfirmable.length
       ? `${unconfirmable.length} further predicted hop${unconfirmable.length === 1 ? "" : "s"} went into repeaters that never appear in this packet's real path data at all — CoreScope only learns a hop happened when one of its observers reports a path through it, so it has no evidence either way about those. They're excluded from the list below rather than counted as misses.`
       : "";
