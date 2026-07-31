@@ -156,3 +156,87 @@ lookback cheaply. Kills the silent truncation cap entirely.
 
 Phase 1+2 are the user-visible fix; 3+4 are follow-on accuracy work that can
 land independently.
+
+---
+
+# Round 3: collided-at-observers vs died-near-origin — failure localization
+
+New symptom (full 61-node alive-at-time network): the sim now spreads the
+target far and shows it **colliding at the distant observers**. Ground
+truth from the user: real people outside Fife never received it, and few
+observers heard it — so the killing collision was **local to the sender's
+area**, not out at the observers. The sim found a *different wrong story*
+that also produces silent observers.
+
+## The core subtlety the current algorithm misses
+
+**A collided arrival and a never-arrival are indistinguishable in a
+CoreScope log.** An observer that receives only overlapping copies decodes
+nothing and logs nothing. So `silent-active` refutes *clean delivery* only
+— and the sim's "reached them all but every copy collided" story is
+technically consistent with every observer log. The two stories differ
+enormously in what they claim about the mesh (wave crossed Scotland vs
+wave died in Fife), and the current display picks whichever one the seed
+happened to produce. That must become an explicit, evidence-scored
+discrimination instead.
+
+## How to discriminate: parsimony, made quantitative
+
+- *Died near origin*: ONE event (a relay's rebroadcast lost to a local
+  collision) explains every silent observer at once.
+- *Collided at the ring*: requires an independent unlucky collision at
+  EVERY distant receiver simultaneously — despite capture effect,
+  different geometries, and timing jitter. Across an ensemble of jittered
+  runs, some timelines deliver cleanly to some of them.
+
+So: run the existing 10× jittered ensemble and compute, per silent-active
+observer, `p_i = P(clean delivery under the model)`. Then
+`P(all silent | model spread) = Π(1 − p_i)`. If that's tiny (it will be,
+with 4–5 healthy silent observers), report plainly: *"if the flood had
+really spread as modelled, the chance of every healthy observer staying
+silent is X% — the flood almost certainly died earlier."*
+
+## Failure-frontier inference ("where did it die")
+
+Evidence pins a **proven core** that certainly transmitted: the origin,
+plus every relay in the observed paths (bb03d26: origin → `04f1fe…` →
+`50480d…` → Cadham). The wave therefore died **at or after the proven
+relays' rebroadcasts**. Hypothesis space = cuts in the flood expansion:
+
+- H0: no cut (model spread is right) — scored by the ensemble likelihood
+  above;
+- H_k: transmission k's rebroadcast was lost (one per proven relay and
+  per first-ring model neighbour of the origin);
+- boundary hypothesis: everything beyond the proven core failed.
+
+Score each cut with the link-graph BFS (fast, no sim runs): reach under
+the cut must still cover every `heard` observer, and is penalized per
+silent-active observer it cleanly reaches. Prefer minimal cuts. Report
+the winner on the map (highlight the frontier ring + the lost
+transmission) and in text: *"most consistent story: [relay]'s rebroadcast
+was lost — a single local loss near the sender explains all N silent
+observers"* — the user's manual conclusion, derived automatically. Cause
+attribution stays honest: a collision at a relay is unobservable in
+CoreScope (nothing decodes), so name overlapping window transmissions if
+any exist, else say "cause unobservable — consistent with a local
+collision or interference".
+
+## Display honesty fixes that ride along
+
+1. Target receptions at silent-active observers that the sim marks
+   COLLIDED currently still animate/read as "it got there (and collided)"
+   — reclassify as **ambiguous** ("a collision would explain the silence —
+   see likelihood analysis"), count them separately in the bottleneck
+   summary, and stop animating them into contradicted territory (prune
+   target receptions at contradicted nodes regardless of collided flag —
+   their presence there is exactly the disputed claim).
+2. Episode headline gains the ensemble verdict: constrained reach,
+   model reach, and `P(all silent | model)` with the plain-language
+   conclusion.
+
+## Phases
+
+1. Pruning + ambiguity relabel (display honesty; small).
+2. Ensemble likelihood in the 10× runs + headline verdict.
+3. Failure-frontier inference (BFS cut scoring) + map highlight + text
+   conclusion.
