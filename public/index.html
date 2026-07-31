@@ -294,7 +294,10 @@
               </select>
               <button id="sim-load-planned">+ Load planned repeaters</button>
               <button id="sim-load-real">+ Load real repeaters</button>
-              <label class="plan-hint" title="Skip repeaters CoreScope hasn't heard at all in the last 25 hours — a dead repeater on the map makes the model predict hops through it"><input type="checkbox" id="sim-load-real-active" checked> heard ≤25h only</label>
+              <select id="sim-load-real-freshness" title="Which real repeaters count as loadable: only ones CoreScope heard in the last 25 hours (a repeater silent longer is very likely off-air, and a dead repeater on the map makes the model predict hops through it), or every repeater ever known">
+                <option value="25h" selected>Heard ≤25h</option>
+                <option value="all">All known</option>
+              </select>
             </div>
             <div class="plan-row">
               <button id="sim-add-repeater" title="Click the map to place a hypothetical repeater">📡 Add repeater</button>

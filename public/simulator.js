@@ -357,28 +357,41 @@
     }
   }
 
+  // Repeaters plausibly ALIVE at refMs: first heard before it (small slop
+  // for clock skew) and last heard no more than 25h before it. Works for
+  // "now" and equally for a historical packet's own timestamp — replaying
+  // last month's packet over today's survivors would be just as wrong as
+  // replaying it over the long-dead.
+  function filterRepeatersAliveAt(repeaters, refMs) {
+    const AGE_MS = 25 * 60 * 60 * 1000;
+    const SLOP_MS = 60 * 60 * 1000;
+    return repeaters.filter((r) => {
+      const last = r.lastHeard ? Date.parse(r.lastHeard) : NaN;
+      if (Number.isNaN(last) || last < refMs - AGE_MS) return false;
+      const first = r.firstSeen ? Date.parse(r.firstSeen) : NaN;
+      if (!Number.isNaN(first) && first > refMs + SLOP_MS) return false; // didn't exist yet
+      return true;
+    });
+  }
+
   function loadRealRepeaters() {
     const planner = window.HopReachPlanner;
     if (!planner) return;
     const scope = document.getElementById("sim-scope-filter").value;
     let real = Object.values(planner.getRealRepeaters());
     if (scope) real = real.filter((r) => (r.scopes || []).includes(scope));
-    // "Heard ≤25h only": a repeater CoreScope hasn't heard in over a day is
-    // very likely off-air (on the network this was built for, 448 of 660
-    // were) — leaving it on the map has the model predicting hops through a
-    // corpse, which is a big source of over-predicted reach.
+    // "Heard ≤25h": a repeater CoreScope hasn't heard in over a day is very
+    // likely off-air (on the network this was built for, 448 of 660 were) —
+    // leaving it on the map has the model predicting hops through a corpse,
+    // which is a big source of over-predicted reach.
     let staleSkipped = 0;
-    if (document.getElementById("sim-load-real-active").checked) {
-      const cutoffMs = Date.now() - 25 * 60 * 60 * 1000;
+    if (document.getElementById("sim-load-real-freshness").value !== "all") {
       const before = real.length;
-      real = real.filter((r) => {
-        const t = r.lastHeard ? Date.parse(r.lastHeard) : NaN;
-        return !Number.isNaN(t) && t >= cutoffMs;
-      });
+      real = filterRepeatersAliveAt(real, Date.now());
       staleSkipped = before - real.length;
     }
     if (real.length === 0) {
-      setStatus("sim-status", scope ? `No real repeaters found for ${scope}.` : staleSkipped ? `All ${staleSkipped} matching repeaters are stale (nothing heard in 25h) — untick "heard ≤25h only" to load them anyway.` : "No real repeater data loaded yet.");
+      setStatus("sim-status", scope ? `No real repeaters found for ${scope}.` : staleSkipped ? `All ${staleSkipped} matching repeaters are stale (nothing heard in 25h) — switch the freshness selector to "All known" to load them anyway.` : "No real repeater data loaded yet.");
       return;
     }
     const existing = new Set(simNodes.map((n) => nodeKey(n.source, n.refId)));
@@ -6355,6 +6368,34 @@
         if (n.source === "real" && n.refId) pubkeyToIndex.set(String(n.refId).toLowerCase(), i);
       });
       const alreadyLoaded = pubkeyToIndex.size;
+
+      // Load the real network AS IT WAS at this packet's moment: every
+      // repeater CoreScope had heard within the 25h before the packet (and
+      // that already existed by then). Predicting over just the handful of
+      // nodes the packet's own observations mention rigs the comparison the
+      // other way — the flood has almost nowhere to go — while predicting
+      // over TODAY'S map would include repeaters that were dead or unbuilt
+      // at the time. Anything already on the map stays.
+      let aliveAdded = 0;
+      let aliveSkippedDead = 0;
+      const planner = window.HopReachPlanner;
+      if (planner) {
+        const allReal = Object.values(planner.getRealRepeaters());
+        const aliveThen = filterRepeatersAliveAt(allReal, targetMs);
+        aliveSkippedDead = allReal.length - aliveThen.length;
+        for (const r of aliveThen) {
+          const pk = String(r.id).toLowerCase();
+          if (pubkeyToIndex.has(pk)) continue;
+          pubkeyToIndex.set(pk, simNodes.length);
+          simNodes.push({
+            id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
+            antennaHeightM: r.antennaHeightM ?? null,
+            regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: !r.observedUnscoped,
+            address: shortAddressFromPubkey(r.id),
+          });
+          aliveAdded++;
+        }
+      }
       let placedForReplay = 0;
       for (const pk of allPubkeys) {
         if (pubkeyToIndex.has(pk)) continue; // already on the map
@@ -6571,7 +6612,7 @@
       setStatus(
         "sim-replay-hash-status",
         `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}. ` +
-          `Predicting over ${simNodes.length} repeaters (${alreadyLoaded} already loaded, ${placedForReplay} added from this packet's observations)` +
+          `Predicting over ${simNodes.length} repeaters (${alreadyLoaded} already loaded, ${aliveAdded} alive at the packet's time, ${placedForReplay} added from this packet's observations${aliveSkippedDead ? `; ${aliveSkippedDead} known repeaters skipped — dead or not yet seen back then` : ""})` +
           `${scopedCount ? `, ${scopedCount} scoped flood(s) decoded` : ""}.${regionNote} ` +
           `Press "▶ Play real ±${windowSecs}s" on the map to watch it, or open the bottleneck analysis for the full breakdown.` +
           (isDirect ? " Note: our model only predicts flood relaying, but this packet used direct (addressed) routing — the prediction side won't be meaningful." : "")
