@@ -5511,6 +5511,10 @@
         targetObservers,
         allObservers,
         observerEvidence,
+        // The target's observed relay chains (lowercased pubkeys) — every
+        // node in them CERTAINLY transmitted (the next hop decoded it), so
+        // they anchor the failure-frontier analysis.
+        targetPaths: (detail.observations || []).map((o) => (o.resolved_path || []).map((x) => (x || "").toLowerCase()).filter(Boolean)),
         originInferred: !!(targetGen && !(JSON.parse((detail.packet || {}).decoded_json || "{}").pubKey)),
         deafObservers: observerEvidence.filter((o) => o.state === "busy").map((o) => o.pubkey), // legacy field for old saved setups
       };
@@ -5681,6 +5685,7 @@
     obsBody.innerHTML = "";
     probBody.innerHTML = "";
 
+    renderFrontierAnalysis(null);
     if (!stats) {
       recallEl.textContent = lastEpisode.target
         ? "Run the simulation to compare it against what really happened."
@@ -5762,6 +5767,55 @@
       `;
       probBody.appendChild(tr);
     }
+  }
+
+  // "Where did the flood die?" — the failure-frontier inference
+  // (docs/REPLAY_NEGATIVE_EVIDENCE_PLAN.md round 3). The proven core
+  // (origin + observed relays) certainly transmitted; compares the two
+  // competing explanations for the silent observers: one local loss at the
+  // proven frontier vs an independent collision at every distant receiver.
+  function renderFrontierAnalysis(ensembleVerdict) {
+    const el = document.getElementById("sim-episode-frontier");
+    if (!el) return;
+    if (!lastEpisode || !lastEpisode.target || !(lastEpisode.targetPaths || []).length) {
+      el.textContent = "No observed relay chains to anchor a frontier analysis.";
+      return;
+    }
+    const indexByRefId = new Map(simNodes.map((n, i) => [String(n.refId || "").toLowerCase(), i]));
+    const proven = new Set([lastEpisode.target.nodeIndex]);
+    for (const path of lastEpisode.targetPaths) {
+      for (const pk of path) {
+        const idx = indexByRefId.get(pk);
+        if (idx != null) proven.add(idx);
+      }
+    }
+    const stateByIndex = new Map();
+    for (const o of lastEpisode.observerEvidence || []) {
+      const idx = indexByRefId.get(o.pubkey);
+      if (idx != null) stateByIndex.set(idx, o.state);
+    }
+    const fa = HopReachEvidence.frontierAnalysis({
+      provenTransmitters: [...proven],
+      links: simLinks,
+      stateOf: (n) => stateByIndex.get(n) || null,
+    });
+    const silentActiveTotal = (lastEpisode.observerEvidence || []).filter((o) => o.state === "silent-active" && indexByRefId.has(o.pubkey)).length;
+    const nameOf = (i) => (simNodes[i] ? simNodes[i].label : `#${i}`);
+    const rows = fa.frontier
+      .map((f) => {
+        const bits = [];
+        if (f.neighbors.heard.length) bits.push(`heard by ${f.neighbors.heard.map(nameOf).join(", ")}`);
+        if (f.neighbors.silentActive.length) bits.push(`<span class="sim-episode-worse">copy lost at ${f.neighbors.silentActive.map(nameOf).join(", ")}</span>`);
+        if (f.neighbors.other.length) bits.push(`${f.neighbors.other.length} neighbour(s) with no observer feed`);
+        return `<li><strong>${escapeHtml(nameOf(f.node))}</strong> transmitted (proven)${bits.length ? " — " + bits.join(" · ") : ""}</li>`;
+      })
+      .join("");
+    el.innerHTML =
+      `<p>The packet demonstrably existed at <strong>${fa.frontier.length}</strong> transmitter(s) (origin + observed relays). ` +
+      `For the flood to have <strong>died at that frontier</strong>, ${fa.lossesIfDiedLocal || "0"} copy/copies had to be lost — all in the sender's local area, plausibly one collision window. ` +
+      `For the model's full spread to be true instead, <strong>${silentActiveTotal}</strong> healthy observer(s) across the wider mesh must EACH have independently lost their copy.</p>` +
+      `<ul>${rows}</ul>` +
+      `<p id="sim-episode-frontier-verdict">${ensembleVerdict ? ensembleVerdict : "Run the 🎲 probability analysis below to quantify which story is more likely."}</p>`;
   }
 
   function setEpisodeBaseline() {
@@ -5860,6 +5914,32 @@
       }
       const meanModel = [...deliveredCount.values()].reduce((a, b) => a + b, 0) / RUNS;
       const meanKept = [...keptCount.values()].reduce((a, b) => a + b, 0) / RUNS;
+
+      // Likelihood verdict (plan round 3): under the model's spread, what's
+      // the chance EVERY healthy-silent observer stayed silent? Clean
+      // delivery rates only — a collided arrival logs nothing, so it
+      // doesn't contradict silence.
+      const silentRates = [];
+      const silentNames = [];
+      for (const info of lastEpisode.allObservers || []) {
+        const ev = evidenceByPubkey.get(info.pubkey);
+        const idx = indexByRefId.has(info.pubkey) ? indexByRefId.get(info.pubkey) : -1;
+        if (!ev || ev.state !== "silent-active" || idx < 0) continue;
+        silentRates.push((deliveredCount.get(idx) || 0) / RUNS);
+        silentNames.push(info.name);
+      }
+      let verdict = "";
+      if (silentRates.length) {
+        const pAllSilent = HopReachEvidence.allSilentProbability(silentRates);
+        const pct = pAllSilent >= 0.01 ? `${Math.round(pAllSilent * 100)}%` : pAllSilent >= 0.0001 ? `${(pAllSilent * 100).toFixed(2)}%` : "<0.01%";
+        verdict =
+          pAllSilent < 0.15
+            ? `<strong>Verdict: the flood almost certainly died near the sender.</strong> If it had spread as modelled, the chance of all ${silentRates.length} healthy observer(s) (${silentNames.map(escapeHtml).join(", ")}) staying silent is ${pct} — one local loss at the proven frontier explains everything that ${silentRates.length} independent distant collisions would have to.`
+            : `<strong>Verdict: inconclusive.</strong> Under the model, all ${silentRates.length} healthy observer(s) staying silent has probability ${pct} — the modelled spread with unlucky collisions is a plausible story here.`;
+        const verdictEl = document.getElementById("sim-episode-frontier-verdict");
+        if (verdictEl) verdictEl.innerHTML = verdict;
+      }
+
       document.getElementById("sim-episode-probability-result").innerHTML =
         `<p>Across ${RUNS} jittered runs: mean model reach <strong>${meanModel.toFixed(1)}</strong> nodes; ` +
         `mean evidence-constrained reach <strong>${meanKept.toFixed(1)}</strong>. ` +
@@ -5867,7 +5947,9 @@
         (escapedRuns > RUNS / 2
           ? "the model consistently over-reaches versus reality here; treat the constrained figure as the real footprint."
           : "timing luck decides it; the real packet plausibly lost such a coin toss.") +
-        `</p><div class="sim-config-table-scroll"><table class="sim-config-table"><thead><tr><th class="sim-col-sticky">Observer</th><th>Reality</th><th>Sim delivery rate</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+        `</p>` +
+        (verdict ? `<p>${verdict}</p>` : "") +
+        `<div class="sim-config-table-scroll"><table class="sim-config-table"><thead><tr><th class="sim-col-sticky">Observer</th><th>Reality</th><th>Sim delivery rate</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
       setStatus("sim-episode-probability-status", "Done.");
     } catch (err) {
       setStatus("sim-episode-probability-status", `Failed: ${err.message || err}`);
@@ -5981,11 +6063,17 @@
     const items = observedTransmissions.map((e) => ({ kind: "observed", ...e }));
     const groups = new Map();
     for (const r of (report && report.receptions) || []) {
-      // Evidence-constrained: don't animate target deliveries that reality
-      // contradicts (healthy silent observers on that path) as if they
-      // happened — that's exactly the "left Fife and gone for a runner"
-      // artefact. Other packets' receptions at those nodes still play.
-      if (constraint && r.packetId === constraint.targetPid && constraint.prunedNodes && constraint.prunedNodes.has(r.node)) continue;
+      // Evidence-constrained: don't animate target receptions that reality
+      // contradicts (healthy silent observers) as if they happened — that's
+      // exactly the "left Fife and gone for a runner" artefact. Collided
+      // arrivals there are excluded too: "it reached them and collided" is
+      // precisely the disputed claim (see the episode likelihood analysis).
+      // Other packets' receptions at those nodes still play.
+      if (constraint && r.packetId === constraint.targetPid) {
+        const excluded = constraint.excludedNodes || constraint.prunedNodes;
+        if (excluded && excluded.has(r.node)) continue;
+        if (excluded && Array.isArray(r.path) && r.path.some((n) => excluded.has(n))) continue;
+      }
       const key = `${r.fromNode}:${r.packetId}:${r.atMs}`;
       let g = groups.get(key);
       if (!g) {
@@ -6551,6 +6639,7 @@
         targetObservers: [...obsSeen.values()],
         allObservers: [...allObsSeen.values()],
         observerEvidence,
+        targetPaths: (packetData.observations || []).map((o) => (o.resolved_path || []).map((x) => (x || "").toLowerCase()).filter(Boolean)),
         originInferred: !!(targetMsg && !(JSON.parse((packetData.packet || {}).decoded_json || "{}").pubKey)),
         deafObservers: observerEvidence.filter((o) => o.state === "busy").map((o) => o.pubkey),
       };
@@ -6561,7 +6650,11 @@
       // what was observed and what was predicted — on the one clock. The
       // predicted half is evidence-constrained: target deliveries reality
       // contradicts don't animate as if they happened.
-      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, replayWindowStartMs, { targetPid, prunedNodes: new Set(constrained.prunedNodes) });
+      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, replayWindowStartMs, {
+        targetPid,
+        prunedNodes: new Set(constrained.prunedNodes),
+        excludedNodes: new Set([...constrained.prunedNodes, ...contradictedNodes]),
+      });
       ensureBottleneckLegendControl();
       syncRealReplayControls();
 
@@ -6694,8 +6787,11 @@
       .sort((a, b) => a.firstMs - b.firstMs);
 
     document.getElementById("sim-open-bottleneck-modal").classList.remove("hidden");
+    const ambiguousCollided = contradictedNodes
+      ? (predictedReport.receptions || []).filter((r) => (targetPid == null || r.packetId === targetPid) && r.collided && contradictedNodes.has(r.node)).length
+      : 0;
     const constrainedNote = constrained
-      ? ` Evidence-constrained reach: ${constrained.keptNodes.size} node${constrained.keptNodes.size === 1 ? "" : "s"} (raw model claimed ${constrained.keptNodes.size + constrained.prunedNodes.size}; ${constrained.prunedNodes.size} contradicted by healthy silent observers).`
+      ? ` Evidence-constrained reach: ${constrained.keptNodes.size} node${constrained.keptNodes.size === 1 ? "" : "s"} (raw model claimed ${constrained.keptNodes.size + constrained.prunedNodes.size}; ${constrained.prunedNodes.size} contradicted by healthy silent observers${ambiguousCollided ? `; ${ambiguousCollided} collided-at-silent-observer arrival(s) are AMBIGUOUS — a collision logs nothing, see the episode likelihood analysis` : ""}).`
       : "";
     document.getElementById("sim-bottleneck-summary").textContent =
       `${provenEdges.size} proven hop${provenEdges.size === 1 ? "" : "s"} from real CoreScope observations, ` +

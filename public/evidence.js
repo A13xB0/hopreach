@@ -155,10 +155,68 @@
     return { keptNodes, prunedNodes };
   }
 
+  // frontierAnalysis({
+  //   provenTransmitters: node indices that CERTAINLY transmitted (origin +
+  //     every relay in the target's observed paths — each one's TX was
+  //     decoded by the next hop, so it demonstrably happened),
+  //   links: [{from, to}] directed model links,
+  //   stateOf: (nodeIndex) => "heard"|"busy"|"silent-active"|... or null,
+  // })
+  // → per-transmitter neighbour breakdown plus the two competing stories'
+  //   costs: if the wave DIED at the proven core, every non-proven copy of
+  //   a proven transmission must have been lost — all in the sender's local
+  //   area (lossesIfDiedLocal, one ring). If instead the wave SPREAD as
+  //   modelled, every silent-active observer anywhere must have
+  //   independently lost its copy (silentActiveTotal, distributed).
+  function frontierAnalysis(opts) {
+    const proven = new Set(opts.provenTransmitters || []);
+    const stateOf = opts.stateOf || (() => null);
+    const adj = new Map();
+    for (const l of opts.links || []) {
+      if (!adj.has(l.from)) adj.set(l.from, []);
+      adj.get(l.from).push(l.to);
+    }
+    const frontier = [];
+    let lossesIfDiedLocal = 0;
+    for (const t of proven) {
+      const neighbors = { proven: [], heard: [], silentActive: [], other: [] };
+      for (const n of adj.get(t) || []) {
+        if (proven.has(n)) neighbors.proven.push(n);
+        else if (stateOf(n) === HEARD) neighbors.heard.push(n);
+        else if (stateOf(n) === SILENT_ACTIVE) neighbors.silentActive.push(n);
+        else neighbors.other.push(n);
+      }
+      // Copies that must have been lost for the wave to have died here:
+      // every model-reachable neighbour that isn't proven and didn't hear
+      // it. ("other" nodes have no observer feed — their copy may or may
+      // not have decoded, but if any relayed, the wave would have grown, so
+      // died-local requires their REBROADCASTS to have gone nowhere too;
+      // counted as potential losses, reported separately.)
+      lossesIfDiedLocal += neighbors.silentActive.length;
+      frontier.push({ node: t, neighbors });
+    }
+    return { frontier, lossesIfDiedLocal };
+  }
+
+  // Combines the ensemble's per-silent-observer clean-delivery rates into
+  // P(every one of them stays silent if the model's spread were real):
+  // Π(1 − p_i). Rates of exactly 1 clamp to 0.999 so one saturated
+  // estimate from a small ensemble doesn't collapse the product to a
+  // false hard zero.
+  function allSilentProbability(cleanRates) {
+    let p = 1;
+    for (const r of cleanRates || []) {
+      p *= 1 - Math.min(0.999, Math.max(0, r));
+    }
+    return p;
+  }
+
   return {
     loraAirtimeMs,
     classifyObservers,
     constrainDeliveries,
+    frontierAnalysis,
+    allSilentProbability,
     STATES: { HEARD, BUSY, SILENT_ACTIVE, SILENT_UNKNOWN },
   };
 });

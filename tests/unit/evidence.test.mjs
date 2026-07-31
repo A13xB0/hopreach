@@ -120,3 +120,32 @@ test("constrainDeliveries: honours the caller's delivery filter", () => {
   });
   assert.deepEqual([...keptNodes], [8]);
 });
+
+test("frontierAnalysis: classifies each proven transmitter's neighbours", () => {
+  // origin 0 → relays 1,2 proven; 1 also links to silent-active 3 and
+  // unknown 4; 2 links to heard 5.
+  const states = new Map([[3, "silent-active"], [5, "heard"]]);
+  const { frontier, lossesIfDiedLocal } = E.frontierAnalysis({
+    provenTransmitters: [0, 1, 2],
+    links: [
+      { from: 0, to: 1 }, { from: 0, to: 2 },
+      { from: 1, to: 3 }, { from: 1, to: 4 },
+      { from: 2, to: 5 },
+    ],
+    stateOf: (n) => states.get(n) || null,
+  });
+  const f1 = frontier.find((f) => f.node === 1);
+  assert.deepEqual(f1.neighbors.silentActive, [3]);
+  assert.deepEqual(f1.neighbors.other, [4]);
+  const f2 = frontier.find((f) => f.node === 2);
+  assert.deepEqual(f2.neighbors.heard, [5]);
+  assert.equal(lossesIfDiedLocal, 1);
+});
+
+test("allSilentProbability: product of misses, saturated rates clamped", () => {
+  assert.ok(Math.abs(E.allSilentProbability([0.5, 0.5]) - 0.25) < 1e-9);
+  assert.equal(E.allSilentProbability([]), 1);
+  // A rate of 1.0 clamps rather than zeroing the product outright.
+  assert.ok(E.allSilentProbability([1]) > 0);
+  assert.ok(E.allSilentProbability([1]) < 0.01);
+});
