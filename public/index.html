@@ -669,12 +669,21 @@
 
         <div class="sim-subsection-title">This packet: did our simulation deliver where reality did?</div>
         <div id="sim-episode-recall" class="plan-hint"></div>
+        <div id="sim-episode-evidence" class="plan-hint"></div>
         <div class="sim-config-table-scroll">
           <table class="sim-config-table">
             <thead><tr><th class="sim-col-sticky">Observer</th><th>Heard it (real)</th><th>Our sim delivered</th><th>Verdict</th></tr></thead>
             <tbody id="sim-episode-observers-tbody"></tbody>
           </table>
         </div>
+
+        <div class="sim-subsection-title">Delivery probability (timing-jittered runs)</div>
+        <div class="plan-hint">CoreScope stamps whole seconds, so within-second ordering — and therefore collision outcomes — is partly arbitrary. This replays the same episode 10× with ±1&nbsp;s timing jitter and fresh seeds, reporting how often the target actually got through.</div>
+        <div class="plan-row">
+          <button id="sim-episode-probability" title="Run the episode 10 times with jittered timings and different seeds">🎲 Run 10× probability analysis</button>
+          <span id="sim-episode-probability-status" class="plan-hint"></span>
+        </div>
+        <div id="sim-episode-probability-result" class="plan-hint"></div>
 
         <div class="sim-subsection-title">Problems — before vs after your changes</div>
         <div class="plan-hint">Run once to see the baseline, then change settings (or run the optimizer) and run again. "Set current as baseline" pins a reference so the delta always compares against the state you chose.</div>
@@ -864,6 +873,7 @@
 <script src="meshsim-bridge.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>
+<script src="evidence.js"></script>
 <script src="simulator.js"></script>
 </body>
 </html>
