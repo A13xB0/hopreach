@@ -20,14 +20,18 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  // LoRa time-on-air (SX127x formula, explicit header, CRC on, MeshCore's
-  // 16-symbol preamble). crDenom is MeshCore's 5–8 coding-rate field.
+  // LoRa time-on-air (SX127x formula, explicit header, CRC on). crDenom is
+  // MeshCore's 5–8 coding-rate field. Preamble length mirrors MeshCore's
+  // RadioLibWrapper::preambleLengthForSF (and internal/meshsim/airtime.go):
+  // 32 symbols at SF ≤ 8, 16 above — a fixed 16 here undercounted every
+  // SF8-and-below frame by half its preamble (SIMULATION_REVIEW.md C7).
   function loraAirtimeMs(payloadBytes, sf, bwKhz, crDenom) {
     if (!(payloadBytes > 0) || !(sf >= 5 && sf <= 12) || !(bwKhz > 0)) return 0;
     const cr = Math.min(8, Math.max(5, crDenom || 5)) - 4; // 1..4
     const tSymMs = Math.pow(2, sf) / (bwKhz * 1000) * 1000;
-    const de = tSymMs > 16 ? 1 : 0; // low data-rate optimization
-    const preambleMs = (16 + 4.25) * tSymMs;
+    const de = tSymMs >= 16 ? 1 : 0; // low data-rate optimization (RadioLib: >= 16ms)
+    const preambleSymbols = sf <= 8 ? 32 : 16;
+    const preambleMs = (preambleSymbols + 4.25) * tSymMs;
     const numerator = 8 * payloadBytes - 4 * sf + 28 + 16;
     const payloadSymbols = 8 + Math.max(Math.ceil(numerator / (4 * (sf - 2 * de))) * (cr + 4), 0);
     return preambleMs + payloadSymbols * tSymMs;
@@ -177,7 +181,7 @@
       adj.get(l.from).push(l.to);
     }
     const frontier = [];
-    let lossesIfDiedLocal = 0;
+    const lostAt = new Set(); // union — a node adjacent to two proven TXs is ONE loss
     for (const t of proven) {
       const neighbors = { proven: [], heard: [], silentActive: [], other: [] };
       for (const n of adj.get(t) || []) {
@@ -192,10 +196,10 @@
       // not have decoded, but if any relayed, the wave would have grown, so
       // died-local requires their REBROADCASTS to have gone nowhere too;
       // counted as potential losses, reported separately.)
-      lossesIfDiedLocal += neighbors.silentActive.length;
+      for (const n of neighbors.silentActive) lostAt.add(n);
       frontier.push({ node: t, neighbors });
     }
-    return { frontier, lossesIfDiedLocal };
+    return { frontier, lossesIfDiedLocal: lostAt.size };
   }
 
   // Combines the ensemble's per-silent-observer clean-delivery rates into

@@ -676,6 +676,14 @@
         // corescope.ObservedUnscoped's doc comment for why absence isn't
         // proof of denial, just the best signal available.
         observedUnscoped: f.properties.observed_unscoped === true,
+        // Whether the feed carried the observation at all: with
+        // corescope.scope_observation disabled (the default) the property
+        // is absent for EVERY repeater — "no data", not "observed denying".
+        // Consumers deriving denyUnscoped must treat unknown as the
+        // firmware default (relaying allowed), or a stock deployment loads
+        // a mesh where nothing forwards unscoped traffic
+        // (SIMULATION_REVIEW.md D1).
+        observedUnscopedKnown: f.properties.observed_unscoped !== undefined && f.properties.observed_unscoped !== null,
       };
     }
     renderAllRealNeighbors(); // keep the "show all real neighbours" overlay in sync with whatever's now loaded/filtered

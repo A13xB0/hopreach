@@ -410,7 +410,7 @@ func TestRunCADDefersSendWhenSenderCanHearOngoingTransmission(t *testing.T) {
 			t.Errorf("node 1's packet should have been deferred by CAD until the channel cleared, not collided: %+v", r)
 		}
 		if r.AtMs < 50+airtime {
-			t.Errorf("node 1's packet arrived at %dms — too early to have actually been deferred by CAD (expected it pushed back by at least one %dms retry)", r.AtMs, cadFailRetryDelayMs)
+			t.Errorf("node 1's packet arrived at %dms — too early to have actually been deferred by CAD (expected it pushed back by at least one 120ms minimum retry)", r.AtMs)
 		}
 	}
 	if !found {
@@ -1258,13 +1258,21 @@ func TestRunDutyCycleBudgetThrottlesHeavySender(t *testing.T) {
 		Links: []Link{{From: 0, To: 1, SNRdB: 20}},
 	}
 
-	airtime := AirtimeMs(DefaultNodePrefs().Radio, maxTransUnitBytes)
-	// Enough near-max-size messages, 1ms apart, to exhaust a full
-	// dutyCycleWindowMs*dutyCycleFactor budget with room to spare.
-	n := int(dutyCycleWindowMs*dutyCycleFactor/float64(airtime)) + 200
+	// With firmware-accurate TX serialization a single radio airs these
+	// back-to-back, so the budget drains at (spend − refill) per frame.
+	// Max-size frames sit EXACTLY on the gate's knife edge (refill per
+	// frame = airtime·factor = est/minTxBudgetAirtimeDiv = the threshold,
+	// for factor 0.5 and div 2) and never defer — matching firmware's own
+	// arithmetic for gapless max-size sends. Half-size frames refill less
+	// than the max-size-est threshold and throttle properly; the old
+	// fixture only "worked" via the physically impossible
+	// everything-at-once burst.
+	payload := maxTransUnitBytes / 2
+	frameAirtime := AirtimeMs(DefaultNodePrefs().Radio, payload)
+	n := int(dutyCycleWindowMs*dutyCycleFactor/((1-dutyCycleFactor)*float64(frameAirtime))) + 400
 	messages := make([]Message, n)
 	for i := range messages {
-		messages[i] = Message{Origin: 0, SendAtMs: uint32(i), PayloadLen: maxTransUnitBytes}
+		messages[i] = Message{Origin: 0, SendAtMs: uint32(i), PayloadLen: payload}
 	}
 
 	report := Run(scenario, messages, zeroRNG{}, dutyCycleWindowMs*2)
@@ -1912,5 +1920,78 @@ func TestRunLoopDetectUsesPacketHashSizeNotListeners(t *testing.T) {
 	}
 	if atD.DropReason != "loop_detect" {
 		t.Errorf("DropReason = %q, want %q — the packet's own 3-byte hash size gives a minimal threshold of 1 (loopDetectThreshold(\"minimal\", 3) == 1), which node d's single colliding hop should trip regardless of d's own configured HashSize of 1", atD.DropReason, "loop_detect")
+	}
+}
+
+// SIMULATION_REVIEW.md A1: a single radio strictly serializes its own
+// sends — two messages scheduled to overlap from one node must air
+// back-to-back, never concurrently.
+func TestRunOwnTransmissionsAreSerialized(t *testing.T) {
+	scenario := Scenario{
+		Nodes: []SimNode{testNode(false), testNode(false)},
+		Links: []Link{{From: 0, To: 1, SNRdB: 20}},
+	}
+	// Two sends 10ms apart, each frame far longer than 10ms of airtime.
+	messages := []Message{
+		{Origin: 0, SendAtMs: 0, PayloadLen: 200},
+		{Origin: 0, SendAtMs: 10, PayloadLen: 200},
+	}
+	report := Run(scenario, messages, zeroRNG{}, 60000)
+	if len(report.Transmissions) < 2 {
+		t.Fatalf("expected both messages transmitted, got %d transmissions", len(report.Transmissions))
+	}
+	var spans [][2]uint32
+	for _, tx := range report.Transmissions {
+		if tx.Node == 0 {
+			spans = append(spans, [2]uint32{tx.AtMs, tx.AtMs + tx.AirtimeMs})
+		}
+	}
+	if len(spans) != 2 {
+		t.Fatalf("expected exactly 2 transmissions from node 0, got %d", len(spans))
+	}
+	for i := 0; i < len(spans); i++ {
+		for j := i + 1; j < len(spans); j++ {
+			a, b := spans[i], spans[j]
+			if a[0] < b[1] && b[0] < a[1] {
+				t.Errorf("node 0 aired two packets concurrently: %v overlaps %v — a single radio cannot do that", a, b)
+			}
+		}
+	}
+}
+
+// SIMULATION_REVIEW.md A2: firmware refuses to relay once the accumulated
+// path would exceed MAX_PATH_SIZE (64 bytes) — 21 hops at 3-byte hashes.
+// A long chain must show path_full drops instead of relaying forever.
+func TestRunPathFullGateStopsDeepFloods(t *testing.T) {
+	const chain = 30 // > 64/3 = 21 hops
+	nodes := make([]SimNode, chain)
+	links := make([]Link, 0, chain-1)
+	for i := range nodes {
+		nodes[i] = testNode(true)
+		if i > 0 {
+			links = append(links, Link{From: i - 1, To: i, SNRdB: 20})
+		}
+	}
+	scenario := Scenario{Nodes: nodes, Links: links}
+	messages := []Message{{Origin: 0, SendAtMs: 0, PayloadLen: 20, HashSize: 3}}
+	report := Run(scenario, messages, zeroRNG{}, 10_000_000)
+
+	maxHop := 0
+	sawPathFull := false
+	for _, r := range report.Receptions {
+		if r.HopCount > maxHop {
+			maxHop = r.HopCount
+		}
+		if r.DropReason == "path_full" {
+			sawPathFull = true
+		}
+	}
+	// The last APPENDER is hop index 20 (21 hashes incl. its own); the
+	// packet it airs arrives with hopCount 21 and must NOT be relayed on.
+	if maxHop > 21 {
+		t.Errorf("flood reached hop %d — firmware's MAX_PATH_SIZE gate caps a 3-byte-hash flood at 21 accumulated hashes", maxHop)
+	}
+	if !sawPathFull {
+		t.Error("expected at least one path_full drop on a 30-node chain")
 	}
 }

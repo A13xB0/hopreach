@@ -65,6 +65,11 @@
   // provenance plus the real observations needed to compare our simulation
   // against what actually happened. null unless an episode is loaded.
   let lastEpisode = null;
+  // The exact engine messages (and target pid) the episode's own run used —
+  // set by replayFromHash, which builds messages ad hoc rather than from
+  // simMessageGenerators; the 10× probability analysis re-runs THESE.
+  let lastEpisodeMessages = null;
+  let lastEpisodeTargetPid = -1;
   // A pinned baseline run's problem counts, for the before/after delta (see
   // renderEpisodeAnalysis / setEpisodeBaseline). null until pinned.
   let episodeBaseline = null;
@@ -409,7 +414,7 @@
       simNodes.push({
         id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
         antennaHeightM: r.antennaHeightM ?? null, // a repositioned real repeater may carry an override mast height; otherwise the default applies
-        regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: !r.observedUnscoped,
+        regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: r.observedUnscopedKnown ? !r.observedUnscoped : false,
         address: shortAddressFromPubkey(r.id),
       });
       added++;
@@ -488,8 +493,31 @@
 
   function removeNode(id) {
     delete simNodePrefsOverrides[id];
+    // Deleting a mid-list node shifts every later index — remap generators
+    // and the episode target, and drop anything pointing at the removed
+    // node. The old filter only dropped generators falling off the END of
+    // the array, silently moving every later sender onto the wrong node
+    // (SIMULATION_REVIEW.md B1).
+    const removedIdx = simNodes.findIndex((n) => n.id === id);
     simNodes = simNodes.filter((n) => n.id !== id);
-    simMessageGenerators = simMessageGenerators.filter((g) => simNodes[g.nodeIndex] !== undefined);
+    if (removedIdx >= 0) {
+      const remap = (i) => (i === removedIdx ? -1 : i > removedIdx ? i - 1 : i);
+      simMessageGenerators = simMessageGenerators
+        .map((g) => ({ ...g, nodeIndex: remap(g.nodeIndex) }))
+        .filter((g) => g.nodeIndex >= 0);
+      if (lastEpisode && lastEpisode.target) {
+        const t = remap(lastEpisode.target.nodeIndex);
+        if (t < 0) lastEpisode = null; // target removed — episode meaningless
+        else lastEpisode.target.nodeIndex = t;
+        document.getElementById("sim-open-episode-modal").classList.toggle("hidden", !lastEpisode);
+      }
+      // The last report indexes the OLD node list — every downstream reader
+      // (rankings, episode stats, replay) would mislabel rows.
+      lastReport = null;
+      lastMessages = null;
+      lastEpisodeMessages = null;
+      hideResults();
+    }
     invalidateLinks();
     renderNodeList();
     renderMessageNodeOptions();
@@ -1062,7 +1090,7 @@
       let predictedTitle = "";
       if (lastTuneResult && lastTuneResult.suggestions.length && lastAttrsList && lastAttrsList[nodeIndex]) {
         const best = lastTuneResult.suggestions[0];
-        if (ruleMatchesAttrs(best.rule, lastAttrsList[nodeIndex])) {
+        if (ruleMatchesAttrs(best.rule, lastAttrsList[nodeIndex], nodeIndex)) {
           const predicted = applyRule(defaultPrefs(), best.rule, lastAttrsList[nodeIndex]);
           predictedTitle = `Predicted (${best.rule.name}): txdelay ${predicted.txDelayFactor.toFixed(2)} · rxdelay ${predicted.rxDelayBase.toFixed(1)}`;
         }
@@ -1872,6 +1900,10 @@
           hashSize: g.hashSize || DEFAULT_MESSAGE_HASH_SIZE,
           background: !!g.background,
           frameBytes: g.frameBytes || 0,
+          // Identity for episode analysis: matching the target by
+          // (origin, sendAtMs) confuses same-second re-sends
+          // (SIMULATION_REVIEW.md M5). The engine ignores unknown fields.
+          sourceHash: g.sourceHash || undefined,
         });
         return;
       }
@@ -1884,6 +1916,10 @@
     });
     return messages;
   }
+
+  // The sim duration the CURRENT lastReport was produced with — rankings
+  // duty% must divide by this, not by whatever the input now says.
+  let lastRunMaxTimeMs = 60000;
 
   async function runSimulation() {
     if (simNodes.length === 0) {
@@ -1906,6 +1942,7 @@
       const messages = messagesFromState(seed);
       const report = MeshSim.run(scenarioFromState(), messages, seed, maxSimTimeMs);
       lastReport = report;
+      lastRunMaxTimeMs = maxSimTimeMs;
       lastMessages = messages;
       rebuildLinkIndexes(report);
       renderResults(report);
@@ -2882,6 +2919,11 @@
 
     if (lastMessages) {
       lastMessages.forEach((m) => {
+        // Go parity (report.go PerNodeStats): background transmissions are
+        // fixed interference, not delivery targets — counting their
+        // reachable sets in the denominator collapsed every percentage on
+        // reconstructed episodes (SIMULATION_REVIEW.md B2).
+        if (m.background) return;
         const reachable = computeReachableSet(m.origin, m.region || "");
         reachable.delete(m.origin);
         for (const nodeIndex of reachable) {
@@ -2890,7 +2932,10 @@
       });
     }
 
-    const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
+    // The duration THIS report actually ran for — reading the input field
+    // here meant editing it after a run silently rescaled every duty%
+    // (SIMULATION_REVIEW.md B6).
+    const maxSimTimeMs = lastRunMaxTimeMs;
     return simNodes.map((n, i) => {
       const p = perNode[i];
       const total = p.successCount + p.collisionCount;
@@ -3658,7 +3703,7 @@
   // last three cases (item 15c) are additive — the older single-rule
   // "Predict settings" feature never produces a rule using them, so this
   // extension doesn't change its own existing behaviour at all.
-  function ruleMatchesAttrs(rule, attrs) {
+  function ruleMatchesAttrs(rule, attrs, nodeIndex) {
     const c = rule.condition;
     switch (c.kind) {
       case "":
@@ -3675,6 +3720,13 @@
         return !!attrs.isArticulation;
       case "marginal_coverage_at_least":
         return attrs.marginalCoverage >= c.threshold;
+      case "node_index_in":
+        // Optimizer policies target explicit node lists (rules.go
+        // ConditionNodeIndexIn, JSON field `nodes`; the index is matched
+        // separately from attrs, mirroring matchesNode) — without this
+        // case every optimizer rule rendered through the mirror silently
+        // matched nothing.
+        return Array.isArray(c.nodes) && nodeIndex != null && c.nodes.includes(nodeIndex);
       default:
         return false;
     }
@@ -3801,11 +3853,11 @@
   // Applies every rule in a ConfigPolicy (item 15c) to one node's baseline
   // prefs/floodMax, in order — later rules override earlier ones per-field,
   // mirroring internal/meshsim.applyPolicyToScenario exactly.
-  function applyPolicyToNodeState(basePrefs, baseFloodMax, policy, attrs) {
+  function applyPolicyToNodeState(basePrefs, baseFloodMax, policy, attrs, nodeIndex) {
     let prefs = basePrefs;
     let floodMax = baseFloodMax;
     for (const rule of policy) {
-      if (!ruleMatchesAttrs(rule, attrs)) continue;
+      if (!ruleMatchesAttrs(rule, attrs, nodeIndex)) continue;
       prefs = applyRule(prefs, rule, attrs);
       if (rule.floodMax != null) floodMax = rule.floodMax;
     }
@@ -3845,6 +3897,13 @@
     function onMessage(e) {
       const msg = e.data;
       if (msg.generation !== generation) return;
+      if (generation !== predictGeneration) {
+        // A newer search superseded this one — detach silently instead of
+        // re-enabling buttons / popping stale results over the live search
+        // (SIMULATION_REVIEW.md B5).
+        worker.removeEventListener("message", onMessage);
+        return;
+      }
       if (msg.type === "suggest-progress") {
         setPredictProgress(msg.done, msg.total);
       } else if (msg.type === "suggest-result") {
@@ -3917,6 +3976,13 @@
     function onMessage(e) {
       const msg = e.data;
       if (msg.generation !== generation) return;
+      if (generation !== predictGeneration) {
+        // A newer search superseded this one — detach silently instead of
+        // re-enabling buttons / popping stale results over the live search
+        // (SIMULATION_REVIEW.md B5).
+        worker.removeEventListener("message", onMessage);
+        return;
+      }
       if (msg.type === "stress-progress") {
         setStressProgress(msg.done, msg.total);
       } else if (msg.type === "stress-result") {
@@ -4002,7 +4068,7 @@
     if (!result.suggestions.length) return;
     const best = result.suggestions[0];
     nodesSortedByLabel().forEach(({ n, i }) => {
-      const matches = ruleMatchesAttrs(best.rule, attrsList[i]);
+      const matches = ruleMatchesAttrs(best.rule, attrsList[i], i);
       const prefs = matches ? applyRule(defaultPrefs(), best.rule, attrsList[i]) : defaultPrefs();
       const row = document.createElement("div");
       row.className = "plan-list-item";
@@ -4051,6 +4117,13 @@
     function onMessage(e) {
       const msg = e.data;
       if (msg.generation !== generation) return;
+      if (generation !== predictGeneration) {
+        // A newer search superseded this one — detach silently instead of
+        // re-enabling buttons / popping stale results over the live search
+        // (SIMULATION_REVIEW.md B5).
+        worker.removeEventListener("message", onMessage);
+        return;
+      }
       if (msg.type === "suggest-policy-progress") {
         setPredictProgress(msg.done, msg.total);
       } else if (msg.type === "suggest-policy-result") {
@@ -4226,7 +4299,7 @@
     orderedLabels.forEach((label) => {
       const nodes = groups.get(label);
       const sampleAttrs = attrsArray[nodes[0].nodeIndex];
-      const { prefs } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, sampleAttrs);
+      const { prefs } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, sampleAttrs, nodes[0].nodeIndex);
       const row = document.createElement("div");
       row.className = "plan-list-item sim-policy-profile-row";
       const settingsLabel = label === "No profile" ? "kept at baseline settings" : `txdelay ${prefs.txDelayFactor}`;
@@ -4302,7 +4375,7 @@
     const actions = [];
     simNodes.forEach((n, i) => {
       const attrs = attrsArray[i];
-      const { prefs: recPrefs, floodMax: recFloodMax } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, attrs);
+      const { prefs: recPrefs, floodMax: recFloodMax } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, attrs, i);
       const curPrefs = effectivePrefsFor(n);
       const curFloodMax = effectiveFloodMax(n);
 
@@ -5007,7 +5080,7 @@
       // span's oldest edge.
       const oldestEdge = targetMs - liveHalf;
       const all = [];
-      let offset = Math.max(0, lo - 2);
+      let offset = Math.max(0, lo - 8); // covers same-second timestamp ties and small concurrent-insert shifts at the edge
       let pages = 0;
       let coveredOldest = false;
       while (pages < 40) {
@@ -5229,8 +5302,8 @@
   // Only route types 0/1 — our model relays floods, not addressed traffic
   // (see the isDirect note in replayFromHash).
   async function buildWindowFloodMessages(windowPackets, pubkeyToIndex, windowStartMs) {
-    // One row per observation, so the same packet appears once per observer
-    // — dedupe by hash or the same flood gets sent several times over.
+    // The live API returns one row per packet (verified); dedupe by hash
+    // anyway so a per-observation-row instance can't multiply sends.
     const byHash = new Map();
     for (const p of windowPackets) {
       if (p.route_type !== 0 && p.route_type !== 1) continue;
@@ -5403,7 +5476,18 @@
       let floodCount = 0;
       let bgCount = 0;
       let skipped = 0;
+      // Verified against the live CoreScope API: /api/packets returns ONE
+      // row per packet (400 rows / 400 unique hashes sampled), not one per
+      // observation. The dedupe below is a cheap invariant guard so an
+      // instance that ever returns per-observation rows can't turn one
+      // flood into several same-second senders colliding with themselves
+      // (SIMULATION_REVIEW.md C4).
+      const seenGenHashes = new Set();
       for (const p of packets) {
+        if (p.hash && seenGenHashes.has(p.hash)) {
+          continue;
+        }
+        if (p.hash) seenGenHashes.add(p.hash);
         const tMs = Date.parse(p.timestamp);
         if (Number.isNaN(tMs)) {
           skipped++;
@@ -5502,6 +5586,8 @@
             : "The target packet couldn't be placed as a flood sender (its origin isn't a positioned repeater, or it fell just outside the fetched window). The surrounding traffic is still reconstructed and tunable.";
       }
 
+      lastEpisodeMessages = null; // this flow runs from simMessageGenerators
+      lastEpisodeTargetPid = -1;
       lastEpisode = {
         hash,
         windowSecs,
@@ -5586,7 +5672,7 @@
     // episode restored from a saved setup), which would otherwise silently
     // compare against the wrong node. An observer whose node no longer exists
     // is dropped from the comparison.
-    const indexByRefId = new Map(simNodes.map((n, i) => [n.refId, i]));
+    const indexByRefId = episodeIndexByRefId();
     const curIdx = (o) => (indexByRefId.has(o.pubkey) ? indexByRefId.get(o.pubkey) : -1);
 
     const realObservers = (lastEpisode.targetObservers || []).filter((o) => curIdx(o) >= 0);
@@ -5616,12 +5702,7 @@
     // Evidence-constrained reach: reality says the packet never arrived at
     // silent-active observers, so their deliveries — and every delivery whose
     // only chains pass through them — are contradicted, not predicted.
-    const contradictedNodes = new Set();
-    for (const info of lastEpisode.allObservers || []) {
-      const ev = evidenceByPubkey.get(info.pubkey);
-      const idx = curIdx(info);
-      if (ev && ev.state === "silent-active" && idx >= 0) contradictedNodes.add(idx);
-    }
+    const contradictedNodes = episodeContradictedNodes(indexByRefId);
     const targetReceptions = (report.receptions || []).filter((r) => r.packetId === targetPid);
     const constrained = HopReachEvidence.constrainDeliveries({
       receptions: targetReceptions,
@@ -5634,6 +5715,13 @@
     for (const o of lastEpisode.observerEvidence || []) if (evidenceCounts[o.state] != null) evidenceCounts[o.state]++;
 
     const collisions = (report.receptions || []).filter((r) => r.collided).length;
+    // Ring overlay set: pruned deliveries PLUS contradicted nodes the sim
+    // reached only with collided arrivals ("it got there and collided" is
+    // the disputed claim too — SIMULATION_REVIEW.md L5).
+    const ringNodes = new Set(constrained.prunedNodes);
+    for (const r of targetReceptions) {
+      if (contradictedNodes.has(r.node)) ringNodes.add(r.node);
+    }
     return {
       observerRows,
       overPredicted,
@@ -5643,6 +5731,7 @@
       modelReach: delivered.size,
       constrainedReach: constrained.keptNodes.size,
       prunedNodes: [...constrained.prunedNodes],
+      ringNodes: [...ringNodes],
       contradictedNodes: [...contradictedNodes],
       evidenceCounts,
       targetPid,
@@ -5663,8 +5752,8 @@
 
     const stats = lastReport ? computeEpisodeStats(lastReport, lastMessages || []) : null;
     episodeEvidenceLayer.clearLayers();
-    if (stats && stats.prunedNodes.length) {
-      for (const idx of stats.prunedNodes) {
+    if (stats && (stats.ringNodes || stats.prunedNodes).length) {
+      for (const idx of stats.ringNodes || stats.prunedNodes) {
         const n = simNodes[idx];
         if (!n) continue;
         L.circleMarker([n.lat, n.lon], {
@@ -5695,7 +5784,9 @@
 
     const contradictedCount = stats.prunedNodes.length;
     recallEl.innerHTML =
-      `Our simulation delivered this packet to <strong>${stats.reached} of ${stats.realCount}</strong> repeaters that really heard it (${Math.round(stats.recall * 100)}% recall). ` +
+      (stats.realCount === 0
+        ? `None of this packet's real observers are in the current node set — recall can't be judged. `
+        : `Our simulation delivered this packet to <strong>${stats.reached} of ${stats.realCount}</strong> repeaters that really heard it (${Math.round(stats.recall * 100)}% recall). `) +
       `Raw model spread: <strong>${stats.modelReach}</strong> nodes — evidence-constrained: <strong>${stats.constrainedReach}</strong>` +
       (contradictedCount
         ? ` (<span class="sim-episode-worse">${contradictedCount} contradicted</span> — healthy observers on those paths heard nothing, so reality says the packet did not spread there this time; contradicted nodes are ✕-ringed on the map).`
@@ -5769,6 +5860,32 @@
     }
   }
 
+  // Case-normalized refId → node index. Planner-loaded repeaters keep
+  // their original casing while CoreScope data is lowercased — a
+  // case-sensitive map silently dropped observers from recall AND from
+  // the contradicted set (SIMULATION_REVIEW.md C5).
+  function episodeIndexByRefId() {
+    return new Map(simNodes.map((n, i) => [String(n.refId || "").toLowerCase(), i]));
+  }
+
+  // Node indices reality contradicts, from the FULL observer evidence
+  // (both entry points used to disagree — the reconstruct flow only
+  // contradicted window-observers, C3), minus any node in the target's
+  // own observed relay chains: those provably HAD the packet, so their
+  // missing upload never contradicts delivery (C6).
+  function episodeContradictedNodes(indexByRefId) {
+    const out = new Set();
+    if (!lastEpisode) return out;
+    const provenPk = new Set();
+    for (const path of lastEpisode.targetPaths || []) for (const pk of path) provenPk.add(pk);
+    for (const o of lastEpisode.observerEvidence || []) {
+      if (o.state !== "silent-active" || provenPk.has(o.pubkey)) continue;
+      const idx = indexByRefId.get(o.pubkey);
+      if (idx != null) out.add(idx);
+    }
+    return out;
+  }
+
   // "Where did the flood die?" — the failure-frontier inference
   // (docs/REPLAY_NEGATIVE_EVIDENCE_PLAN.md round 3). The proven core
   // (origin + observed relays) certainly transmitted; compares the two
@@ -5838,7 +5955,8 @@
       setStatus("sim-episode-probability-status", "Load an episode with a flood target first.");
       return;
     }
-    if (simMessageGenerators.length === 0 || simLinks.length === 0) {
+    const usingEpisodeMessages = !!(lastEpisodeMessages && lastEpisodeTargetPid >= 0);
+    if (!usingEpisodeMessages && (simMessageGenerators.length === 0 || simLinks.length === 0)) {
       setStatus("sim-episode-probability-status", "Reconstruct the episode (nodes/links/senders) first.");
       return;
     }
@@ -5848,7 +5966,7 @@
     btn.disabled = true;
     try {
       await MeshSim.ready;
-      const baseSeed = parseInt(document.getElementById("sim-seed").value, 10) || 1;
+      const baseSeed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
       const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
       const t = lastEpisode.target;
       const scenario = scenarioFromState();
@@ -5856,26 +5974,41 @@
       const keptCount = new Map(); // node -> runs delivered after evidence pruning
       let escapedRuns = 0; // runs where any contradicted-region delivery survived jitter
 
-      // Contradicted node set is timing-independent (it's reality's verdict).
+      // Contradicted node set is timing-independent (it's reality's verdict)
+      // — same source of truth as every other consumer (C3/C5/C6).
       const evidenceByPubkey = new Map((lastEpisode.observerEvidence || []).map((o) => [o.pubkey, o]));
-      const indexByRefId = new Map(simNodes.map((n, i) => [n.refId, i]));
-      const contradictedNodes = new Set();
-      for (const info of lastEpisode.allObservers || []) {
-        const ev = evidenceByPubkey.get(info.pubkey);
-        const idx = indexByRefId.has(info.pubkey) ? indexByRefId.get(info.pubkey) : -1;
-        if (ev && ev.state === "silent-active" && idx >= 0) contradictedNodes.add(idx);
-      }
+      const indexByRefId = episodeIndexByRefId();
+      const contradictedNodes = episodeContradictedNodes(indexByRefId);
+      // Joint-silence counting (C2): the per-run outcome we actually need.
+      let validRuns = 0;
+      let jointSilentRuns = 0;
 
       for (let run = 0; run < RUNS; run++) {
         setStatus("sim-episode-probability-status", `Run ${run + 1}/${RUNS}…`);
         const seed = baseSeed + 1000 * (run + 1);
-        const messages = messagesFromState(seed);
-        // Find the target message BEFORE jittering (its pid = array index).
-        let targetPid = -1;
-        for (let i = 0; i < messages.length; i++) {
-          if (!messages[i].background && messages[i].origin === t.nodeIndex && messages[i].sendAtMs === t.atMs) {
-            targetPid = i;
-            break;
+        // Replay flow: re-run the episode's OWN messages (generators are
+        // never populated there). Reconstruct flow: expand the generators.
+        const messages = usingEpisodeMessages
+          ? lastEpisodeMessages.map((m) => ({ ...m }))
+          : messagesFromState(seed);
+        // Find the target BEFORE jittering — by identity (sourceHash) when
+        // available; (origin, sendAtMs) confuses same-second re-sends (M5).
+        let targetPid = usingEpisodeMessages ? lastEpisodeTargetPid : -1;
+        if (targetPid < 0) {
+          for (let i = 0; i < messages.length; i++) {
+            if (messages[i].background) continue;
+            if (messages[i].sourceHash === lastEpisode.hash) {
+              targetPid = i;
+              break;
+            }
+          }
+        }
+        if (targetPid < 0) {
+          for (let i = 0; i < messages.length; i++) {
+            if (!messages[i].background && messages[i].origin === t.nodeIndex && messages[i].sendAtMs === t.atMs) {
+              targetPid = i;
+              break;
+            }
           }
         }
         // Jitter every reconstructed transmission's second-resolution time.
@@ -5884,11 +6017,25 @@
           m.sendAtMs = Math.max(0, m.sendAtMs + Math.round((jrng() * 2 - 1) * JITTER_MS));
         }
         if (targetPid < 0) continue;
+        validRuns++;
         const report = MeshSim.run(scenario, messages, seed, maxSimTimeMs);
         const targetReceptions = (report.receptions || []).filter((r) => r.packetId === targetPid);
         const deliveredNodes = new Set();
         for (const r of targetReceptions) if (isCanonicalDelivery(r)) deliveredNodes.add(r.node);
         for (const n of deliveredNodes) deliveredCount.set(n, (deliveredCount.get(n) || 0) + 1);
+        // Joint outcome: did EVERY contradicted (healthy-silent) observer
+        // stay clean-undelivered in this run? Deliveries share relay
+        // chains, so this joint count is the honest estimator — the
+        // independence product over marginals overstated "died near
+        // sender" by up to ~an order of magnitude (C2).
+        let allSilentThisRun = true;
+        for (const idx of contradictedNodes) {
+          if (deliveredNodes.has(idx)) {
+            allSilentThisRun = false;
+            break;
+          }
+        }
+        if (contradictedNodes.size > 0 && allSilentThisRun) jointSilentRuns++;
         const constrained = HopReachEvidence.constrainDeliveries({
           receptions: targetReceptions,
           targetPid,
@@ -5900,42 +6047,52 @@
         await new Promise((r) => setTimeout(r, 0)); // keep the UI alive
       }
 
-      // Render: per-observer probability plus the reach distribution.
+      if (validRuns === 0) {
+        // Never fabricate a verdict from nothing (C1's failure mode).
+        document.getElementById("sim-episode-probability-result").innerHTML = "";
+        setStatus(
+          "sim-episode-probability-status",
+          "No run contained this episode's target packet — reload the episode (🔗 Replay or 🏗️ Reconstruct) and try again."
+        );
+        return;
+      }
+
+      // Render: per-observer delivery frequency plus the reach distribution.
       const rows = [];
       for (const info of lastEpisode.allObservers || []) {
         const idx = indexByRefId.has(info.pubkey) ? indexByRefId.get(info.pubkey) : -1;
         if (idx < 0) continue;
         const ev = evidenceByPubkey.get(info.pubkey);
         const real = ev && ev.state === "heard";
-        const pct = Math.round(((deliveredCount.get(idx) || 0) / RUNS) * 100);
+        const hits = deliveredCount.get(idx) || 0;
         rows.push(
-          `<tr><td class="sim-col-sticky">${escapeHtml(info.name)}</td><td>${real ? "✓ yes" : ev ? escapeHtml(ev.state) : "?"}</td><td>${pct}%</td></tr>`
+          `<tr><td class="sim-col-sticky">${escapeHtml(info.name)}</td><td>${real ? "✓ yes" : ev ? escapeHtml(ev.state) : "?"}</td><td>${hits}/${validRuns} runs</td></tr>`
         );
       }
-      const meanModel = [...deliveredCount.values()].reduce((a, b) => a + b, 0) / RUNS;
-      const meanKept = [...keptCount.values()].reduce((a, b) => a + b, 0) / RUNS;
+      const meanModel = [...deliveredCount.values()].reduce((a, b) => a + b, 0) / validRuns;
+      const meanKept = [...keptCount.values()].reduce((a, b) => a + b, 0) / validRuns;
 
-      // Likelihood verdict (plan round 3): under the model's spread, what's
-      // the chance EVERY healthy-silent observer stayed silent? Clean
-      // delivery rates only — a collided arrival logs nothing, so it
-      // doesn't contradict silence.
-      const silentRates = [];
+      // Likelihood verdict (plan round 3, estimator fixed per review C2):
+      // count the JOINT outcome directly — the fraction of runs in which
+      // every healthy-silent observer got no clean delivery. Deliveries to
+      // those observers share relay chains, so multiplying per-observer
+      // marginals as if independent overstated "died near sender". A
+      // collided arrival logs nothing, so only clean deliveries count
+      // against silence.
       const silentNames = [];
       for (const info of lastEpisode.allObservers || []) {
         const ev = evidenceByPubkey.get(info.pubkey);
         const idx = indexByRefId.has(info.pubkey) ? indexByRefId.get(info.pubkey) : -1;
-        if (!ev || ev.state !== "silent-active" || idx < 0) continue;
-        silentRates.push((deliveredCount.get(idx) || 0) / RUNS);
-        silentNames.push(info.name);
+        if (ev && ev.state === "silent-active" && contradictedNodes.has(idx)) silentNames.push(info.name);
       }
       let verdict = "";
-      if (silentRates.length) {
-        const pAllSilent = HopReachEvidence.allSilentProbability(silentRates);
-        const pct = pAllSilent >= 0.01 ? `${Math.round(pAllSilent * 100)}%` : pAllSilent >= 0.0001 ? `${(pAllSilent * 100).toFixed(2)}%` : "<0.01%";
+      if (contradictedNodes.size > 0) {
+        const pJoint = jointSilentRuns / validRuns;
+        const frac = `${jointSilentRuns}/${validRuns} runs`;
         verdict =
-          pAllSilent < 0.15
-            ? `<strong>Verdict: the flood almost certainly died near the sender.</strong> If it had spread as modelled, the chance of all ${silentRates.length} healthy observer(s) (${silentNames.map(escapeHtml).join(", ")}) staying silent is ${pct} — one local loss at the proven frontier explains everything that ${silentRates.length} independent distant collisions would have to.`
-            : `<strong>Verdict: inconclusive.</strong> Under the model, all ${silentRates.length} healthy observer(s) staying silent has probability ${pct} — the modelled spread with unlucky collisions is a plausible story here.`;
+          pJoint <= 0.15
+            ? `<strong>Verdict: the flood almost certainly died near the sender.</strong> If it had spread as modelled, ALL ${contradictedNodes.size} healthy observer(s)${silentNames.length ? ` (${silentNames.map(escapeHtml).join(", ")})` : ""} stayed silent together in only ${frac} — one local loss at the proven frontier explains what the model needs a rare joint coincidence for.`
+            : `<strong>Verdict: inconclusive.</strong> All ${contradictedNodes.size} healthy observer(s) stayed silent together in ${frac} under the model — the modelled spread with unlucky collisions is a plausible story here. (${validRuns} runs can only resolve to ±${Math.round(100 / validRuns)}%.)`;
         const verdictEl = document.getElementById("sim-episode-frontier-verdict");
         if (verdictEl) verdictEl.innerHTML = verdict;
       }
@@ -5943,10 +6100,12 @@
       document.getElementById("sim-episode-probability-result").innerHTML =
         `<p>Across ${RUNS} jittered runs: mean model reach <strong>${meanModel.toFixed(1)}</strong> nodes; ` +
         `mean evidence-constrained reach <strong>${meanKept.toFixed(1)}</strong>. ` +
-        `The model spread into evidence-contradicted territory in <strong>${escapedRuns}/${RUNS}</strong> runs — ` +
-        (escapedRuns > RUNS / 2
-          ? "the model consistently over-reaches versus reality here; treat the constrained figure as the real footprint."
-          : "timing luck decides it; the real packet plausibly lost such a coin toss.") +
+        `The model spread into evidence-contradicted territory in <strong>${escapedRuns}/${validRuns}</strong> runs — ` +
+        (escapedRuns === 0
+          ? "model and evidence agree; nothing to reconcile."
+          : escapedRuns > validRuns / 2
+            ? "the model consistently over-reaches versus reality here; treat the constrained figure as the real footprint."
+            : "timing luck decides it; the real packet plausibly lost such a coin toss.") +
         `</p>` +
         (verdict ? `<p>${verdict}</p>` : "") +
         `<div class="sim-config-table-scroll"><table class="sim-config-table"><thead><tr><th class="sim-col-sticky">Observer</th><th>Reality</th><th>Sim delivery rate</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
@@ -6402,7 +6561,8 @@
         const rawChain = obs.resolved_path || [];
         if (rawChain.length === 0) continue;
         if (originPubkey === null && rawChain[0]) originPubkey = rawChain[0].toLowerCase();
-        const tMs = Date.parse(obs.timestamp) || 0;
+        const tMs = Date.parse(obs.timestamp);
+        if (Number.isNaN(tMs)) continue; // malformed stamp must not anchor the replay at 1970 (M3)
         if (targetMs === null || tMs < targetMs) targetMs = tMs; // earliest observation = when this packet actually happened
         for (const k of rawChain) if (k) allPubkeys.add(k.toLowerCase());
         const observerKey = (obs.observer_id || "").toLowerCase();
@@ -6412,9 +6572,13 @@
             addProvenEdge(provenEdges, rawChain[i].toLowerCase(), rawChain[i + 1].toLowerCase(), tMs);
           }
         }
-        const lastResolvedHop = [...rawChain].reverse().find((k) => k);
-        if (observerKey && lastResolvedHop) {
-          addProvenEdge(provenEdges, lastResolvedHop.toLowerCase(), observerKey, tMs);
+        // Only when the FINAL hop resolved: with a trailing null the
+        // observer actually heard the unresolved relay, and bridging over
+        // it fabricates a proven edge (SIMULATION_REVIEW.md M2 — the
+        // reconstruct flow already drops this case).
+        const lastRaw = rawChain[rawChain.length - 1];
+        if (observerKey && lastRaw) {
+          addProvenEdge(provenEdges, lastRaw.toLowerCase(), observerKey, tMs);
         }
       }
       if (originPubkey === null) throw new Error("Couldn't determine this packet's origin from CoreScope's data.");
@@ -6478,7 +6642,7 @@
           simNodes.push({
             id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
             antennaHeightM: r.antennaHeightM ?? null,
-            regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: !r.observedUnscoped,
+            regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: r.observedUnscopedKnown ? !r.observedUnscoped : false,
             address: shortAddressFromPubkey(r.id),
           });
           aliveAdded++;
@@ -6513,7 +6677,10 @@
 
       const observedTransmissions = buildRealTimeline(windowPackets, hash, pubkeyToIndex);
       realTimelineEvents = observedTransmissions; // replaced below by the merged observed+predicted timeline
-      replayWindowStartMs = observedTransmissions.length ? observedTransmissions[0].tMs : targetMs;
+      // Fall back to the window's actual start — anchoring at the target
+      // instant clamped every pre-target flood to t=0, a fabricated
+      // simultaneous pileup (SIMULATION_REVIEW.md M4).
+      replayWindowStartMs = observedTransmissions.length ? observedTransmissions[0].tMs : targetMs - REAL_TIMELINE_WINDOW_MS;
       replayTargetHash = hash;
       stopRealTimelineReplay();
       simRealActivityLayer.clearLayers();
@@ -6591,6 +6758,12 @@
       // that packet's own receptions — feeding it the whole window would
       // credit hops from unrelated floods as if they were this one's.
       const targetPid = predictedMessages.findIndex((m) => m.sourceHash === hash);
+      // The 🎲 probability analysis re-runs exactly these messages — this
+      // flow never populates simMessageGenerators, and consuming stale
+      // generators from an earlier reconstruction produced a confident
+      // verdict from zero valid runs (SIMULATION_REVIEW.md C1).
+      lastEpisodeMessages = predictedMessages;
+      lastEpisodeTargetPid = targetPid;
 
       // Observer evidence: what was every observer doing at the target's
       // transit? Silent-active observers (provably alive, idle, heard
@@ -6598,9 +6771,15 @@
       // them: reality says the packet never got there this time.
       const { observerEvidence } = buildObserverEvidence({ detail: packetData, targetMs, hash, liveness });
       const evidenceByPubkey = new Map(observerEvidence.map((o) => [o.pubkey, o]));
+      // Nodes in the target's own observed relay chains provably HAD the
+      // packet — their missing upload never contradicts delivery (C6).
+      const provenRelayPk = new Set();
+      for (const o of packetData.observations || []) {
+        for (const pk of o.resolved_path || []) if (pk) provenRelayPk.add(pk.toLowerCase());
+      }
       const contradictedNodes = new Set();
       for (const o of observerEvidence) {
-        if (o.state !== "silent-active") continue;
+        if (o.state !== "silent-active" || provenRelayPk.has(o.pubkey)) continue;
         const idx = pubkeyToIndex.get(o.pubkey);
         if (idx != null) contradictedNodes.add(idx);
       }
@@ -6800,9 +6979,14 @@
       `${unconfirmable.length} predicted into repeaters this packet's observations say nothing about (can't be judged either way), ` +
       `${unmodeled.length} proven but not even predicted possible.` +
       constrainedNote;
-    document.getElementById("sim-bottleneck-unconfirmable-note").textContent = unconfirmable.length
-      ? `${unconfirmable.length} further predicted hop${unconfirmable.length === 1 ? "" : "s"} went into repeaters that never appear in this packet's real path data at all — CoreScope only learns a hop happened when one of its observers reports a path through it, so it has no evidence either way about those. They're excluded from the list below rather than counted as misses.`
-      : "";
+    const refutedNames = [...new Set(refuted.map((r) => `${simNodes[r.fromNode] ? simNodes[r.fromNode].label : r.fromNode} → ${simNodes[r.node] ? simNodes[r.node].label : r.node}`))];
+    document.getElementById("sim-bottleneck-unconfirmable-note").textContent =
+      (refuted.length
+        ? `REFUTED (healthy observers were alive, idle and silent — the packet demonstrably never got there): ${refutedNames.join("; ")}. `
+        : "") +
+      (unconfirmable.length
+        ? `${unconfirmable.length} further predicted hop${unconfirmable.length === 1 ? "" : "s"} went into repeaters that never appear in this packet's real path data at all — CoreScope only learns a hop happened when one of its observers reports a path through it, so it has no evidence either way about those. They're excluded from the list below rather than counted as misses.`
+        : "");
 
     const list = document.getElementById("sim-bottleneck-list");
     list.innerHTML = "";

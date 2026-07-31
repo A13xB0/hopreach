@@ -250,10 +250,11 @@ type ChannelParams struct {
 	// never did, so trial-to-trial delivery variance came only from relay
 	// timing, understating real uncertainty — see the optimizer's own
 	// confidence machinery, which assumes trial variance reflects real
-	// variance). Interferer SNRs are left at their mean (a deliberate
-	// scoping choice to keep one draw per reception rather than one per
-	// interferer; the wanted signal's own fade dominates whether a
-	// marginal packet is decoded). 0 = no fading.
+	// variance). Each interferer's SNR also draws its own independent
+	// fade (one draw per signal per reception). Known limit: the draws are
+	// independent per reception even for the same physical signal pair, so
+	// in rare tails one demodulator can win both sides of an overlap —
+	// see SIMULATION_REVIEW.md A6. 0 = no fading.
 	FadingSigmaDB float64 `json:"fadingSigmaDb"`
 }
 
@@ -515,8 +516,22 @@ type Transmission struct {
 // in the classic hidden-node case (two senders that can't hear each other
 // but share a downstream listener), so that scenario's collision rate is
 // unaffected by this.
-const cadFailRetryDelayMs = 200
+// Firmware note: Dispatcher's base implementation returns a fixed 200ms,
+// but Mesh overrides it with a randomized nextInt(1,4)*120 — 120/240/360ms
+// (src/Mesh.cpp) — and that override is what every repeater build runs.
+// The randomization exists to break retry lockstep between two deferring
+// nodes; a fixed cadence made them re-collide every round
+// (SIMULATION_REVIEW.md A4).
+func cadFailRetryDelayMs(rng RNG) uint32 {
+	return uint32(1+rng.IntN(3)) * 120
+}
+
 const cadFailMaxDurationMs = 4000
+
+// maxPathSizeBytes mirrors MeshCore's MAX_PATH_SIZE (MeshCore.h): the
+// accumulated relay-path buffer a packet can carry. A relay refuses to
+// append its own hash past this.
+const maxPathSizeBytes = 64
 
 // transmission is one node's single over-the-air send of one packet —
 // tracked globally for the lifetime of the simulation so collision checks
@@ -695,10 +710,6 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 	}
 
 	var transmissions []transmission
-	// relayed[packetID][node] marks that node has actually gone on to
-	// relay this packet onward — reporting-only (Reception.WasRelayed).
-	// Not used for the dedup/loop decision itself; see seen below.
-	relayed := make(map[int]map[int]bool)
 	// seen[packetID][node] mirrors real firmware's SimpleMeshTables::
 	// hasSeen() (src/helpers/SimpleMeshTables.h): mark-and-test on every
 	// *successfully decoded* copy of a packet, regardless of what the node
@@ -779,6 +790,28 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 			// check below — gated against the WORST-CASE (MAX_TRANS_UNIT)
 			// airtime at this node's own radio settings, not this
 			// specific message's smaller payload (see maxTransUnitBytes).
+			// A single radio strictly serializes its own sends — firmware
+			// queues outbound packets (Dispatcher::checkSend + STATE_TX_WAIT)
+			// and can never air two overlapping frames. Without this gate one
+			// node could transmit two packets simultaneously, and (because
+			// collision checks skip same-sender pairs) the physically
+			// impossible overlap was also invisible to every listener
+			// (SIMULATION_REVIEW.md A1).
+			ownBusyUntil := uint32(0)
+			for _, prior := range transmissions {
+				if prior.sender == e.sender && prior.endMs > e.atMs && prior.startMs <= e.atMs && prior.endMs > ownBusyUntil {
+					ownBusyUntil = prior.endMs
+				}
+			}
+			if ownBusyUntil > 0 {
+				heap.Push(&q, event{
+					atMs: ownBusyUntil, kind: eventSend,
+					sender: e.sender, packetID: e.packetID, payloadLen: e.payloadLen, hopCount: e.hopCount, region: e.region, direct: e.direct, hashSize: e.hashSize, path: e.path, pathNodes: e.pathNodes,
+					cadDeferred: e.cadDeferred, cadBusyStart: e.cadBusyStart, budgetDeferred: e.budgetDeferred,
+				})
+				continue
+			}
+
 			if !ab.DisableDutyCycle {
 				if wait := budget.deferralMs(AirtimeMs(node.Prefs.Radio, maxTransUnitBytes)); wait > 0 {
 					heap.Push(&q, event{
@@ -797,7 +830,7 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 				}
 				if e.atMs-busyStart < cadFailMaxDurationMs {
 					heap.Push(&q, event{
-						atMs: e.atMs + cadFailRetryDelayMs, kind: eventSend,
+						atMs: e.atMs + cadFailRetryDelayMs(rng), kind: eventSend,
 						sender: e.sender, packetID: e.packetID, payloadLen: e.payloadLen, hopCount: e.hopCount, region: e.region, direct: e.direct, hashSize: e.hashSize, path: e.path, pathNodes: e.pathNodes,
 						cadDeferred: true, cadBusyStart: busyStart,
 					})
@@ -834,10 +867,6 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 				HopCount: e.hopCount, PayloadLen: e.payloadLen, OnAirLen: onAir, HashSize: e.hashSize, Region: e.region, Direct: e.direct,
 				IsRelay: e.hopCount > 0, CADDeferred: e.cadDeferred, BudgetDeferred: e.budgetDeferred,
 			})
-			if relayed[e.packetID] == nil {
-				relayed[e.packetID] = make(map[int]bool)
-			}
-			relayed[e.packetID][e.sender] = true
 			// Real firmware explicitly marks a packet as seen right after
 			// sending it too ("mark this packet as already sent in case it
 			// is rebroadcast back to us" — src/Mesh.cpp), so a copy that
@@ -1016,6 +1045,13 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 						dropReason = "hop_limit"
 					case !tx.direct && tx.region == "" && e.hopCount >= listenerNode.effectiveFloodMaxUnscoped():
 						dropReason = "hop_limit_unscoped"
+					case (len(tx.path)+1)*tx.hashSize > maxPathSizeBytes:
+						// Firmware Mesh::routeRecvPacket refuses to relay
+						// unless (n+1)*hashSize fits MAX_PATH_SIZE (64 B) —
+						// real floods die at 21 hops with 3-byte hashes; the
+						// sim used to flood on to its 64-hop default
+						// (SIMULATION_REVIEW.md A2).
+						dropReason = "path_full"
 					case !listenerNode.acceptsRegion(tx.region):
 						dropReason = "region_mismatch"
 					default:
@@ -1038,7 +1074,12 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 						if !ab.DisablePathByteAirtime {
 							scoreLen = onAirLen(tx.payloadLen, len(tx.path), tx.hashSize, tx.region != "")
 						}
-						score := PacketScore(effWantedSNR, sf, scoreLen)
+						// Firmware hardcodes SF10 here regardless of the
+						// radio's actual SF (RadioLibWrappers.h packetScore:
+						// "assume sf=10") — using the real SF inverted the
+						// weak-signal bias either side of SF10
+						// (SIMULATION_REVIEW.md A3).
+						score := PacketScore(effWantedSNR, 10, scoreLen)
 						// The weak-signal RX hold-back is sized on the full
 						// received frame airtime (firmware calcRxDelay's own
 						// air_time = getEstAirtimeFor(len), the whole frame).
@@ -1051,9 +1092,14 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 						// region-scoped traffic differs from the full frame
 						// here (an unscoped packet has no transport codes, so
 						// its full airtime already IS the delay airtime).
+						// Firmware appends its own hash BEFORE computing the
+						// delay window (getRetransmitDelay is called after
+						// setPathHashCount(n+1)) — sizing on the received
+						// frame left every window one hash of airtime narrow
+						// (SIMULATION_REVIEW.md A5).
 						relayDelayAirtime := tx.endMs - tx.startMs
-						if !ab.DisablePathByteAirtime && tx.region != "" {
-							relayDelayAirtime = AirtimeMs(tx.radio, onAirLen(tx.payloadLen, len(tx.path), tx.hashSize, false))
+						if !ab.DisablePathByteAirtime {
+							relayDelayAirtime = AirtimeMs(tx.radio, onAirLen(tx.payloadLen, len(tx.path)+1, tx.hashSize, false))
 						}
 						var txDelay uint32
 						if tx.direct {
@@ -1076,10 +1122,6 @@ func RunWithAblation(scenario Scenario, messages []Message, rng RNG, maxSimTimeM
 							sender: e.listener, packetID: e.packetID,
 							payloadLen: tx.payloadLen, hopCount: e.hopCount + 1, region: tx.region, direct: tx.direct, hashSize: tx.hashSize, path: newPath, pathNodes: newPathNodes,
 						})
-						if relayed[e.packetID] == nil {
-							relayed[e.packetID] = make(map[int]bool)
-						}
-						relayed[e.packetID][e.listener] = true
 					}
 				}
 			}

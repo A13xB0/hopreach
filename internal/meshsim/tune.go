@@ -11,8 +11,9 @@ import (
 // the search (a few hundred candidate simulations) fast enough to run
 // interactively in the browser.
 //
-// DirectTxDelayFactor isn't searched: Run only models flood traffic (see
-// engine.go's package doc), so direct-traffic delay has no effect on any
+// DirectTxDelayFactor isn't searched: the grid predates Message.Direct
+// support, and direct traffic remains rare enough that its delay factor
+// has little effect on any
 // simulated outcome yet — searching it would produce misleading
 // identical-score "suggestions." Revisit once direct/routed traffic is
 // modeled.
@@ -46,10 +47,17 @@ type TuneRequest struct {
 type Suggestion struct {
 	Rule          ConfigRule `json:"rule"`
 	CollisionRate float64    `json:"collisionRate"`
+	// DeliveryRatio is the candidate's mean delivery ratio across trials —
+	// the PRIMARY ranking key. Ranking by CollisionRate alone was the
+	// degenerate objective this package's own docs warn about (a policy
+	// where every node backs off enormously collides less and delivers
+	// less) — see SIMULATION_REVIEW.md B3.
+	DeliveryRatio float64 `json:"deliveryRatio"`
 }
 
 // TuneResult is Suggest's output: the no-override baseline collision rate,
-// and every searched candidate ranked best (lowest CollisionRate) first.
+// and every searched candidate ranked best first — highest DeliveryRatio,
+// then lowest CollisionRate as the tie-break.
 type TuneResult struct {
 	Baseline    float64      `json:"baseline"`
 	Suggestions []Suggestion `json:"suggestions"`
@@ -157,15 +165,21 @@ func Suggest(req TuneRequest, progress func(done, total int)) TuneResult {
 		}
 	}
 
-	baseline := evaluate(req, ConfigRule{}, trials)
+	baseline, _ := evaluate(req, ConfigRule{}, trials)
 	report()
 
 	suggestions := make([]Suggestion, 0, len(candidates))
 	for _, c := range candidates {
-		suggestions = append(suggestions, Suggestion{Rule: c, CollisionRate: evaluate(req, c, trials)})
+		coll, deliv := evaluate(req, c, trials)
+		suggestions = append(suggestions, Suggestion{Rule: c, CollisionRate: coll, DeliveryRatio: deliv})
 		report()
 	}
-	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].CollisionRate < suggestions[j].CollisionRate })
+	sort.Slice(suggestions, func(i, j int) bool {
+		if suggestions[i].DeliveryRatio != suggestions[j].DeliveryRatio {
+			return suggestions[i].DeliveryRatio > suggestions[j].DeliveryRatio
+		}
+		return suggestions[i].CollisionRate < suggestions[j].CollisionRate
+	})
 
 	return TuneResult{Baseline: baseline, Suggestions: suggestions}
 }
@@ -176,13 +190,14 @@ func Suggest(req TuneRequest, progress func(done, total int)) TuneResult {
 // candidate rule (plus the baseline) reuses the exact same per-trial seeds,
 // so differences in the averaged result reflect the rule, not which
 // candidate happened to get a luckier draw.
-func evaluate(req TuneRequest, rule ConfigRule, trials int) float64 {
+func evaluate(req TuneRequest, rule ConfigRule, trials int) (collision, delivery float64) {
 	scenario := applyRuleToScenario(req.Scenario, req.Attrs, rule)
-	var total float64
+	var totalColl, totalDeliv float64
 	for trial := 0; trial < trials; trial++ {
 		rng := rand.New(rand.NewPCG(req.Seed, uint64(trial)))
 		report := Run(scenario, req.Messages, rng, req.MaxSimTimeMs)
-		total += report.CollisionRate()
+		totalColl += report.CollisionRate()
+		totalDeliv += report.DeliveryRatio(scenario, req.Messages)
 	}
-	return total / float64(trials)
+	return totalColl / float64(trials), totalDeliv / float64(trials)
 }

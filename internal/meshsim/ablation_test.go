@@ -141,11 +141,21 @@ func TestAblationDisableDutyCycleRemovesBudgetDeferral(t *testing.T) {
 		Nodes: []SimNode{testNode(false), testNode(false)},
 		Links: []Link{{From: 0, To: 1, SNRdB: 20}},
 	}
-	airtime := AirtimeMs(DefaultNodePrefs().Radio, maxTransUnitBytes)
-	n := int(dutyCycleWindowMs*dutyCycleFactor/float64(airtime)) + 200
+	// With firmware-accurate TX serialization a single radio airs these
+	// back-to-back, so the budget drains at (spend − refill) per frame.
+	// Max-size frames sit EXACTLY on the gate's knife edge (refill per
+	// frame = airtime·factor = est/minTxBudgetAirtimeDiv = the threshold,
+	// for factor 0.5 and div 2) and never defer — matching firmware's own
+	// arithmetic for gapless max-size sends. Half-size frames refill less
+	// than the max-size-est threshold and throttle properly; the old
+	// fixture only "worked" via the physically impossible
+	// everything-at-once burst.
+	payload := maxTransUnitBytes / 2
+	frameAirtime := AirtimeMs(DefaultNodePrefs().Radio, payload)
+	n := int(dutyCycleWindowMs*dutyCycleFactor/((1-dutyCycleFactor)*float64(frameAirtime))) + 400
 	messages := make([]Message, n)
 	for i := range messages {
-		messages[i] = Message{Origin: 0, SendAtMs: uint32(i), PayloadLen: maxTransUnitBytes}
+		messages[i] = Message{Origin: 0, SendAtMs: uint32(i), PayloadLen: payload}
 	}
 
 	normal := Run(scenario, messages, zeroRNG{}, dutyCycleWindowMs*2)

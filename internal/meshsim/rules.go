@@ -263,7 +263,10 @@ func applyRuleToScenario(scenario Scenario, attrs []NodeAttrs, rule ConfigRule) 
 	copy(out.Nodes, scenario.Nodes)
 	for i := range out.Nodes {
 		var a NodeAttrs
-		if attrs != nil {
+		if attrs != nil && i < len(attrs) {
+			// Guarded like AssignPolicy: a short attrs list from a
+			// malformed request must degrade to zero attrs, not panic the
+			// whole WASM instance (SIMULATION_REVIEW.md).
 			a = attrs[i]
 		}
 		if rule.Matches(a) {
@@ -297,7 +300,10 @@ func applyPolicyToScenario(scenario Scenario, attrs []NodeAttrs, policy ConfigPo
 	copy(out.Nodes, scenario.Nodes)
 	for i := range out.Nodes {
 		var a NodeAttrs
-		if attrs != nil {
+		if attrs != nil && i < len(attrs) {
+			// Guarded like AssignPolicy: a short attrs list from a
+			// malformed request must degrade to zero attrs, not panic the
+			// whole WASM instance (SIMULATION_REVIEW.md).
 			a = attrs[i]
 		}
 		for _, rule := range policy {

@@ -15,6 +15,20 @@ test("loraAirtimeMs: SF7/125k 50B lands in the published range", () => {
   assert.ok(ms > 80 && ms < 130, `got ${ms}`);
 });
 
+test("loraAirtimeMs: SF≤8 uses the 32-symbol MeshCore preamble (drift pin)", () => {
+  // Engine parity (internal/meshsim/airtime.go preambleSymbolsForSF): at
+  // SF8/62.5kHz one symbol is 4.096ms, so the 16-extra-symbol difference
+  // is ~65.5ms — assert the preamble term explicitly so a fixed-16
+  // regression can't sneak back in.
+  const sym = Math.pow(2, 8) / 62500 * 1000;
+  const withPayloadZeroDiff = E.loraAirtimeMs(1, 8, 62.5, 5) - (32 + 4.25) * sym;
+  assert.ok(withPayloadZeroDiff > 0, "airtime must exceed the 32-symbol preamble");
+  const sf9 = E.loraAirtimeMs(1, 9, 62.5, 5);
+  const sf9sym = Math.pow(2, 9) / 62500 * 1000;
+  assert.ok(sf9 - (16 + 4.25) * sf9sym > 0);
+  assert.ok(sf9 - (32 + 4.25) * sf9sym < 0, "SF9 must use the 16-symbol preamble");
+});
+
 test("loraAirtimeMs: SF12 much slower; garbage returns 0", () => {
   assert.ok(E.loraAirtimeMs(50, 12, 125, 5) > 1500);
   assert.equal(E.loraAirtimeMs(0, 7, 125, 5), 0);

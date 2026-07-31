@@ -15,13 +15,12 @@ rather than two that can drift.
 ## Event model
 
 A discrete-event simulation over a directed graph of links, each carrying an
-SNR margin. Three event kinds drive it:
+SNR margin. Two event kinds drive it:
 
 | Event | Meaning |
 | --- | --- |
-| `eventSend` | A node keys its radio. Airtime is computed from the frame and radio parameters; the transmission occupies the channel for that whole duration. |
+| `eventSend` | A node keys its radio (gated, in firmware order, by its own in-progress transmission — one radio strictly serializes its sends — then duty budget, then CAD). Airtime is computed from the frame and radio parameters; the transmission occupies the channel for that whole duration. A relay decision re-enters here as a new `eventSend` scheduled after the relay delay. |
 | `eventRxComplete` | A listener finishes receiving. Capture/collision is resolved here, against every transmission that overlapped. |
-| `eventRelay` | A node that decided to relay actually transmits, after its retransmit delay has elapsed. |
 
 Time is integer milliseconds from zero. A run is fully deterministic for a
 given `(scenario, messages, seed)`, which is what makes paired comparisons
@@ -71,13 +70,23 @@ fading, so existing behaviour is unchanged unless a caller opts in. The
 browser opts in; the Go tests mostly don't.
 
 Other reception outcomes: `tx_busy` (the listener's own transmitter was
-keyed — radios are half duplex), `already_seen` (loop detection),
-`region_mismatch`, and `weak_signal`.
+keyed — radios are half duplex), `already_seen` (duplicate suppression —
+firmware `hasSeen`, deliberately distinct from loop detection),
+`loop_detect` (the path-hash loop check), `cannot_relay`, `hop_limit` /
+`hop_limit_unscoped` (the `flood.max` gates), `path_full` (firmware's
+`MAX_PATH_SIZE`: a relay refuses to append its hash past 64 accumulated
+path bytes — 21 hops at 3-byte hashes), `region_mismatch`, and
+`weak_signal`.
 
 ## Timing
 
-- **Retransmit delay** — `getRetransmitDelay`/`getDirectRetransmitDelay`
-  from `Dispatcher.cpp`, driven by a packet score derived from SNR.
+- **Retransmit delay** — `MyMesh::getRetransmitDelay`/
+  `getDirectRetransmitDelay`: a **uniform random draw** in
+  `[0, 5·airtime·txDelayFactor]`, sized on the frame *after* the relay
+  appends its own hash (firmware appends before computing the window). It
+  is NOT signal-strength driven — the SNR-derived packet score only drives
+  the receive hold-back below (and, matching firmware, that score is
+  computed as if SF10 regardless of the radio's actual SF).
 - **Receive hold-back** — `RxDelayMs` implements firmware's
   `(pow(rxDelayBase, 0.85 - score) - 1) * airtime`. Firmware processes
   immediately when the result is under 50 ms; that gate is reproduced. It
@@ -121,6 +130,34 @@ listener's own configured size — at 1 byte, unrelated repeaters collide in
 the path often enough to suppress legitimate relays, which is exactly the
 real-world failure this reproduces.
 
+## How the browser builds your scenario
+
+The engine is only as honest as the scenario the frontend feeds it. The
+result-shaping heuristics live in `public/simulator.js` /
+`public/planner.js`, not the engine, and are worth knowing when
+interpreting results:
+
+- **Observed-link SNR is a heuristic, not a measurement**: a CoreScope
+  observed link's SNR is `SF threshold + min(15, log2(1+count)·3)` from
+  its observation count, so a single observation always clears the decode
+  threshold. Model-built links use `threshold + propagation margin`.
+  Replay flows additionally grade a proven observer edge with the
+  observation's real reported SNR when present.
+- **`DenyUnscoped` defaults**: with `corescope.scope_observation`
+  enabled, a real repeater never observed relaying unscoped traffic loads
+  with `DenyUnscoped=true` (absence-as-signal); with the feature disabled
+  (the shipped default) the data simply doesn't exist, and every repeater
+  loads with the firmware default (unscoped relaying allowed).
+- **Freshness**: "Load real repeaters" defaults to repeaters heard within
+  25 h (and replays load the set alive at the packet's own time) — dead
+  repeaters on the map make the model predict hops through them.
+- **Direct traffic floods**: the engine has no routing tables; a "direct"
+  message propagates like a flood with different timing and hop limits.
+  Delivery/airtime figures for direct sends are upper bounds.
+- **Radio compatibility gating** (same frequency/BW/SF to link) is applied
+  by the model link builder only — CoreScope-observed links are taken as
+  proof the two radios really do communicate.
+
 ## Deliberate divergences
 
 | Divergence | Why |
@@ -129,6 +166,9 @@ real-world failure this reproduces.
 | Node path hashes derive from node index, not a public key | Full key material isn't modelled. Only hash *collisions* matter for reproducing loop-detect behaviour, and those are preserved. |
 | `DenyUnscoped` exists at all | Firmware has no such switch; regions are purely additive. It's a what-if knob for asking "what if this repeater stopped carrying unscoped traffic". |
 | Same-frequency, different-SF transmissions don't interfere | Real spreading factors are quasi-orthogonal. Treated as no interference rather than partial. |
+| Interference needs a decode-level link | CAD and interference are gated on the link graph; real radios carrier-sense (and absorb interference power from) signals below the decode threshold. A link graph built from decoded packets under-defers CAD and understates aggregate interference from marginal paths. |
+| Whole-frame interference windows | An interferer is evaluated against the wanted frame's entire window (no per-symbol accounting): a burst that only ever overlapped the preamble can still count against the payload, and aggregated interferers need not have overlapped each other. |
+| Independent fading draws per reception | Each reception draws its own fades even for the same physical signal pair, so in rare tails one demodulator can decode both sides of an overlap. |
 | `AblationFlags` | Disables individual real mechanisms (half duplex, CAD, loop detect) to attribute a measured difference to one of them. A research instrument, deliberately not exposed in the UI — someone disabling half duplex to "improve" their numbers would get confidently wrong answers. Its zero value is byte-for-byte identical to a normal run. |
 
 ## Optimizer
@@ -159,6 +199,16 @@ from, since a long greedy search will otherwise overfit to its own random
 draws.
 
 ## Validation against real traffic
+
+> **Caveat (2026-07):** the recall figures below describe the flood engine
+> replaying proven topologies. The replay feature has a documented
+> over-prediction failure mode in the other direction — predicting spread
+> that healthy silent observers contradict — which is why episode analysis
+> now reports an evidence-constrained reach alongside the raw model spread
+> (see `docs/REPLAY_NEGATIVE_EVIDENCE_PLAN.md` and the observer-evidence
+> classifier in `public/evidence.js`). Treat single-run replay output as
+> one sample, not ground truth; the 10× jittered ensemble is the honest
+> view.
 
 The flood model has been checked against production CoreScope observations
 by reconstructing the union of observed relay hops into a proven topology,

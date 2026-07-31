@@ -1,5 +1,12 @@
 # Full simulation-subsystem review — 2026-07-31
 
+> **Status update (same day):** everything below marked 🔴/🟠 plus the
+> cheap 🟡 items has been FIXED (see the fix commit); A6–A8 remain as
+> disclosed model limitations (now in simulator-model.md's divergence
+> table), L6 (saved replay setups can't re-run their comparison) remains
+> open and disclosed. Cross-project preamble fix (C7) applied to MeshCIM
+> and HopLink separately.
+
 Scope: `internal/meshsim/*` (engine, airtime, delays, links, rules, topology,
 rng, report, scoring, optimizer, policy tuner), `wasm/meshsim.go`, the JS
 bridge/scenario/worker layer, the whole replay + observer-evidence pipeline
