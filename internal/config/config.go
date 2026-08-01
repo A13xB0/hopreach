@@ -37,6 +37,7 @@ type Config struct {
 	Map         MapConfig         `yaml:"map"`
 	Region      RegionConfig      `yaml:"region"`
 	CoreScope   CoreScopeConfig   `yaml:"corescope"`
+	Beacon      BeaconConfig      `yaml:"beacon"`
 	Terrain     TerrainConfig     `yaml:"terrain"`
 	Propagation PropagationConfig `yaml:"propagation"`
 	Coverage    CoverageConfig    `yaml:"coverage"`
@@ -95,6 +96,33 @@ type RegionConfig struct {
 	// whose default_scope matches "#"+RequiredScope. Empty (the default)
 	// keeps every repeater inside the boundary regardless of scope.
 	RequiredScope string `yaml:"required_scope"`
+}
+
+// BeaconConfig points at a MeshCore Beacon server as an alternative source of
+// repeater nodes, observed links and packets
+// (docs/BEACON_COMPATIBILITY_PLAN.md). Disabled unless Enabled is set, in
+// which case it replaces CoreScope as the data source.
+type BeaconConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	APIURL  string `yaml:"api_url"`
+
+	// IATAs is REQUIRED when enabled. Beacon partitions the world by
+	// 3-letter IATA code, and an unfiltered client pulls every network the
+	// server observes — calibrating a local map against links on another
+	// continent produces a plausible, wrong result. Startup fails rather
+	// than defaulting.
+	IATAs []string `yaml:"iatas"`
+
+	RequestTimeoutSeconds float64 `yaml:"request_timeout_seconds"`
+
+	// ReachStaleDays ages out neighbour edges. Beacon never deletes an edge
+	// when it stops being reported, so without this, calibration is fed
+	// links that no longer exist.
+	ReachStaleDays int `yaml:"reach_stale_days"`
+
+	// DetailConcurrency bounds the packet-detail fan-out used to recover
+	// resolved paths (Beacon omits them from list responses by design).
+	DetailConcurrency int `yaml:"detail_concurrency"`
 }
 
 // CoreScopeConfig points at the CoreScope instance to pull repeater nodes
@@ -281,6 +309,12 @@ func Default() Config {
 		},
 		Region: RegionConfig{
 			RequiredScope: "",
+		},
+		Beacon: BeaconConfig{
+			Enabled:               false,
+			RequestTimeoutSeconds: 30,
+			ReachStaleDays:        14,
+			DetailConcurrency:     8,
 		},
 		CoreScope: CoreScopeConfig{
 			APIURL:                "https://scotmesh-corescope.mm7roq.compute.oarc.uk",
