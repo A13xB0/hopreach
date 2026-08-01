@@ -86,13 +86,13 @@ type Observation struct {
 
 // Packet is one transmission, deduplicated across observers.
 type Packet struct {
-	Hash      string
-	HeardAt   time.Time // first hearing
-	RouteType int       // 0/1 = flood
+	Hash        string
+	HeardAt     time.Time // first hearing
+	RouteType   int       // 0/1 = flood
 	PayloadType int
-	HashSize  int
-	HopCount  int
-	Scope     string
+	HashSize    int
+	HopCount    int
+	Scope       string
 
 	// OriginKey is the originating node when the backend could decode it.
 	OriginKey string

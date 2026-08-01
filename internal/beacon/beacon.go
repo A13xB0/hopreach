@@ -61,9 +61,9 @@ func New(baseURL string, iatas []string, httpClient *http.Client) (*Client, erro
 		httpClient = http.DefaultClient
 	}
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		IATAs:   iatas,
-		HTTP:    httpClient,
+		BaseURL:  strings.TrimRight(baseURL, "/"),
+		IATAs:    iatas,
+		HTTP:     httpClient,
 		uuidByPK: map[string]string{},
 	}, nil
 }
@@ -133,13 +133,13 @@ type latestObserver struct {
 }
 
 type packetSummary struct {
-	PacketHash      string          `json:"packetHash"`
-	PayloadType     int             `json:"payloadType"`
-	RouteType       int             `json:"routeType"`
-	Scope           *string         `json:"scope"`
-	FirstHeardAt    int64           `json:"firstHeardAt"` // epoch ms
-	LastHeardAt     int64           `json:"lastHeardAt"`
-	LatestObserver  *latestObserver `json:"latestObserver"`
+	PacketHash     string          `json:"packetHash"`
+	PayloadType    int             `json:"payloadType"`
+	RouteType      int             `json:"routeType"`
+	Scope          *string         `json:"scope"`
+	FirstHeardAt   int64           `json:"firstHeardAt"` // epoch ms
+	LastHeardAt    int64           `json:"lastHeardAt"`
+	LatestObserver *latestObserver `json:"latestObserver"`
 }
 
 type packetHeader struct {
