@@ -21,10 +21,21 @@ server {
     location / {
         root   /usr/share/nginx/html;
         index  index.html index.htm;
+
+        # index.html is a MANIFEST, not just a page: it lists every JS and CSS
+        # file the app loads, in order. A browser holding a stale copy against
+        # freshly-revalidated JS loads scripts that call modules the old file
+        # never included — which is a blank map, not a degraded one.
+        #
+        # This was survivable while app.js was self-contained. It stopped being
+        # survivable the moment the front end became ~20 files, and it broke
+        # production for every returning visitor until they hard-refreshed.
+        # The regex block below cannot cover this: "/" does not end in .html.
+        add_header Cache-Control "no-cache";
     }
 
     # No Cache-Control was set here at all, which left browsers free to use
-    # their own heuristic freshness lifetime for .js/.wasm — no fixed
+    # their own heuristic freshness lifetime for .js/.wasm/.css/.html — no fixed
     # duration, but commonly hours, based on each file's own Last-Modified
     # age. Every JS/WASM file here is baked into the image at build time
     # with no cache-busting hash in its filename, so a browser tab open
@@ -38,7 +49,7 @@ server {
     # rather than disabling caching outright — nginx still answers with a
     # cheap 304 when the file genuinely hasn't changed, so this costs a
     # round-trip, not a re-download, on the common case.
-    location ~ \.(js|wasm)$ {
+    location ~ \.(js|wasm|css|html)$ {
         root          /usr/share/nginx/html;
         add_header    Cache-Control "no-cache";
     }
