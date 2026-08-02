@@ -20,3 +20,4 @@ test-results/
 # Claude Code's own local session/tooling state — not project source.
 .claude/
 
+/corescope-to-beacon
