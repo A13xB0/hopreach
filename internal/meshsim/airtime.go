@@ -149,3 +149,86 @@ func onAirLen(payloadLen, hashCount, hashSize int, hasTransportCodes bool) int {
 	}
 	return n
 }
+
+// --- item 9: airtime duty-cycle budget ----------------------------------
+//
+// Real firmware caps every node to roughly a 50% airtime duty cycle over a
+// rolling 1-hour window (Dispatcher::updateTxBudget/checkSend,
+// src/Dispatcher.cpp) — a node that's been transmitting heavily has to wait
+// out its own budget before sending again, on top of every other gate this
+// package already models (hop limits, loop.detect, CAD). Modeled last and
+// in isolation from this package's other correctness fixes so it can't
+// confound their own before/after measurements — a heavily-loaded scenario
+// will now take longer to finish flooding than it did before this, which is
+// correct, not a regression.
+const (
+	dutyCycleWindowMs = 3_600_000 // Dispatcher::getDutyCycleWindowMs()'s real default (1 hour)
+	// dutyCycleFactor is 1/(1+getAirtimeBudgetFactor()); real firmware's
+	// getAirtimeBudgetFactor() returns a constant 1.0, giving exactly 0.5 —
+	// a 50% duty cycle. Not user-configurable in real firmware either.
+	dutyCycleFactor = 0.5
+	// minTxBudgetAirtimeDiv mirrors MIN_TX_BUDGET_AIRTIME_DIV: a send is
+	// gated on having at least 1/N of the worst-case airtime as budget.
+	minTxBudgetAirtimeDiv = 2
+	// maxTransUnitBytes mirrors MAX_TRANS_UNIT: the budget gate is always
+	// checked against this worst-case packet size at the sender's own
+	// radio settings, never this specific message's own (usually smaller)
+	// payload — a conservative pre-check real firmware performs before it
+	// even knows the actual size of whatever's queued to go out next.
+	maxTransUnitBytes = 255
+)
+
+// txBudget is one node's own rolling airtime allowance. Starts full (as if
+// freshly booted), refills linearly with elapsed simulation time up to
+// dutyCycleWindowMs*dutyCycleFactor, and is debited by the real measured
+// airtime of every transmission that node actually sends — direct port of
+// Dispatcher's own tx_budget_ms/updateTxBudget/checkSend.
+type txBudget struct {
+	remainingMs  float64
+	lastUpdateMs uint32
+}
+
+func newTxBudget() txBudget {
+	return txBudget{remainingMs: dutyCycleWindowMs * dutyCycleFactor}
+}
+
+// refill brings b up to date as of nowMs — direct port of
+// Dispatcher::updateTxBudget(). nowMs must never decrease between calls on
+// the same txBudget (guaranteed here since Run only ever refills a given
+// node's own budget at that node's own next chronological eventSend).
+func (b *txBudget) refill(nowMs uint32) {
+	elapsed := nowMs - b.lastUpdateMs
+	if elapsed == 0 {
+		return
+	}
+	const maxBudget = dutyCycleWindowMs * dutyCycleFactor
+	b.remainingMs += float64(elapsed) * dutyCycleFactor
+	if b.remainingMs > maxBudget {
+		b.remainingMs = maxBudget
+	}
+	b.lastUpdateMs = nowMs
+}
+
+// deferralMs returns how long (from the moment b was last refilled) a node
+// must wait before estAirtimeMs/minTxBudgetAirtimeDiv worth of budget is
+// available, or 0 if it's available now — direct port of the "needed /
+// duty_cycle" formula in Dispatcher::checkSend().
+func (b txBudget) deferralMs(estAirtimeMs uint32) uint32 {
+	threshold := float64(estAirtimeMs) / minTxBudgetAirtimeDiv
+	if b.remainingMs >= threshold {
+		return 0
+	}
+	needed := threshold - b.remainingMs
+	return uint32(needed / dutyCycleFactor)
+}
+
+// spend debits actualAirtimeMs from the budget, floored at zero — direct
+// port of Dispatcher's own post-send deduction.
+func (b *txBudget) spend(actualAirtimeMs uint32) {
+	spend := float64(actualAirtimeMs)
+	if spend >= b.remainingMs {
+		b.remainingMs = 0
+	} else {
+		b.remainingMs -= spend
+	}
+}
