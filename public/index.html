@@ -892,6 +892,9 @@
      backend (CoreScope, Beacon, …) is a server config change. Loaded first —
      app.js, planner.js and simulator.js all use it. -->
 <script src="mesh-api.js"></script>
+<!-- Frame parsing, SHA-256/HMAC and region decoding — pure byte arithmetic,
+     lifted out of simulator.js so node --test can reach it. -->
+<script src="mesh-frame.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>
 <script src="evidence.js"></script>
