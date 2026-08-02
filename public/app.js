@@ -616,7 +616,7 @@
       // the best chance of finding a region that's gone quiet recently,
       // since this call's only job is discovering which real regions
       // exist at all, not tallying anything within a specific window.
-      const resp = await fetch("/corescope-api/api/scope-stats?window=7d");
+      const resp = await fetch(`${MeshApi.BASE}/scope-stats`);
       if (resp.ok) {
         const data = await resp.json();
         regionNames = (data.byRegion || []).map((r) => r.name).filter(Boolean);

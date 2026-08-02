@@ -110,6 +110,11 @@ server {
     # planning tools can fetch real observed neighbour data
     # (/api/nodes/:pubkey/reach) from the browser without hitting CORS —
     # CoreScope sends no Access-Control-Allow-Origin header.
+    # LEGACY passthrough. Nothing in the app uses this any more — every
+    # front-end fetch goes through /mesh-api/ (internal/meshapi), which serves
+    # whichever backend is configured in one stable shape. Kept only so an
+    # existing bookmark or external script doesn't 404; safe to delete once
+    # nothing external depends on it.
     location /corescope-api/ {
         proxy_pass {{.CoreScopeAPIURL}}/;
         proxy_set_header Host $proxy_host;

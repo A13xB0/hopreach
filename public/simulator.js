@@ -338,10 +338,12 @@
     const loadFilter = document.getElementById("sim-scope-filter");
     const messageRegion = document.getElementById("sim-message-region");
     try {
-      const resp = await fetch("/corescope-api/api/scope-stats?window=7d");
-      if (!resp.ok) return;
-      const data = await resp.json();
-      const names = (data.byRegion || []).map((r) => r.name).filter(Boolean);
+      let names = [];
+      try {
+        names = await MeshApi.scopes();
+      } catch {
+        return;
+      }
       for (const name of names) {
         const opt1 = document.createElement("option");
         opt1.value = name;
@@ -1575,7 +1577,7 @@
   async function fetchCorescopeLinksFor(nodeIndex, nodes) {
     const n = nodes[nodeIndex];
     if (n.source !== "real") return [];
-    const resp = await fetch(`/corescope-api/api/nodes/${encodeURIComponent(n.refId)}/reach?days=${CORESCOPE_REACH_DAYS}`);
+    const resp = await fetch(`${MeshApi.BASE}/nodes/${encodeURIComponent(n.refId)}/reach?days=${CORESCOPE_REACH_DAYS}`);
     if (!resp.ok) return [];
     const data = await resp.json();
     const links = [];
@@ -4919,7 +4921,7 @@
 
   async function ensureNodeDirectory() {
     if (nodeDirectoryCache) return nodeDirectoryCache;
-    const resp = await fetch("/corescope-api/api/nodes?limit=5000");
+    const resp = await fetch(`${MeshApi.BASE}/nodes?limit=5000`);
     if (!resp.ok) throw new Error(`CoreScope node directory fetch failed: HTTP ${resp.status}`);
     const data = await resp.json();
     nodeDirectoryCache = new Map();
@@ -5044,84 +5046,28 @@
   // span the observer-evidence classification needs (who was provably alive
   // around the target), without making the reconstruction window itself any
   // bigger.
+  // Packets around a moment, plus a wider slice for observer liveness.
+  //
+  // Was ~80 lines of backwards `offset` binary search with a legacy fallback,
+  // because CoreScope has no time filter. The mesh API takes a time range, so
+  // this is now two straight requests — and on a backend that filters
+  // server-side (Beacon) they are genuinely cheap.
   async function fetchPacketsAroundTime(targetMs, windowMs, livenessMs) {
     const liveHalf = Math.max(windowMs, livenessMs || 0);
-    const pageOne = async (offset, limit) => {
-      const resp = await fetch(`/corescope-api/api/packets?limit=${limit}&offset=${offset}&sort=timestamp&order=desc`);
-      if (!resp.ok) throw new Error(`packets fetch failed: HTTP ${resp.status}`);
-      const data = await resp.json();
-      return data.packets || [];
+    const liveness = await MeshApi.packetsBetween(
+      targetMs - liveHalf, targetMs + liveHalf, REAL_TIMELINE_MAX_LIMIT);
+    const inWindow = liveness.filter((p) => {
+      const t = Date.parse(p.timestamp);
+      return !Number.isNaN(t) && t >= targetMs - windowMs && t <= targetMs + windowMs;
+    });
+    // hitCap: the backend returned exactly as many rows as we allowed, so the
+    // oldest edge of the window may be truncated. Callers surface this rather
+    // than presenting partial coverage as complete.
+    return {
+      packets: inWindow,
+      liveness,
+      hitCap: liveness.length >= REAL_TIMELINE_MAX_LIMIT,
     };
-    const tsAt = async (offset) => {
-      const pk = await pageOne(offset, 1);
-      if (pk.length === 0) return null; // past the end of history
-      const t = Date.parse(pk[0].timestamp);
-      return Number.isNaN(t) ? null : t;
-    };
-    try {
-      // Find the first offset whose timestamp is older than the span's
-      // newest edge (list is newest-first).
-      const newestEdge = targetMs + liveHalf;
-      let lo = 0;
-      let hi = 4096;
-      for (;;) {
-        const t = await tsAt(hi);
-        if (t === null || t < newestEdge) break;
-        hi *= 2;
-        if (hi > 1 << 20) break; // 1M rows — beyond any sane instance
-      }
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        const t = await tsAt(mid);
-        if (t === null || t < newestEdge) hi = mid;
-        else lo = mid + 1;
-      }
-      // Page forward (older) from just before that offset until we pass the
-      // span's oldest edge.
-      const oldestEdge = targetMs - liveHalf;
-      const all = [];
-      let offset = Math.max(0, lo - 8); // covers same-second timestamp ties and small concurrent-insert shifts at the edge
-      let pages = 0;
-      let coveredOldest = false;
-      while (pages < 40) {
-        const pk = await pageOne(offset, 400);
-        if (pk.length === 0) {
-          coveredOldest = true; // ran out of history — nothing older exists
-          break;
-        }
-        all.push(...pk);
-        const oldest = Date.parse(pk[pk.length - 1].timestamp);
-        if (!Number.isNaN(oldest) && oldest < oldestEdge) {
-          coveredOldest = true;
-          break;
-        }
-        offset += pk.length;
-        pages++;
-      }
-      const withMs = all.map((p) => ({ p, tMs: Date.parse(p.timestamp) })).filter((x) => !Number.isNaN(x.tMs));
-      const inWindow = withMs.filter((x) => x.tMs >= targetMs - windowMs && x.tMs <= targetMs + windowMs).map((x) => x.p);
-      const inLiveness = withMs.filter((x) => x.tMs >= targetMs - liveHalf && x.tMs <= targetMs + liveHalf).map((x) => x.p);
-      return { packets: inWindow, liveness: inLiveness, hitCap: !coveredOldest };
-    } catch (err) {
-      // Instance without sort/offset support — fall back to the legacy
-      // newest-first walk (window only; liveness degrades to the window).
-      let limit = 300;
-      for (;;) {
-        const resp = await fetch(`/corescope-api/api/packets?limit=${limit}`);
-        if (!resp.ok) throw new Error(`packets fetch failed: HTTP ${resp.status}`);
-        const data = await resp.json();
-        const packets = data.packets || [];
-        if (packets.length === 0) return { packets: [], liveness: [], hitCap: false };
-        const withMs = packets.map((p) => ({ p, tMs: Date.parse(p.timestamp) })).filter((x) => !Number.isNaN(x.tMs));
-        const oldestMs = Math.min(...withMs.map((x) => x.tMs));
-        const inWindow = withMs.filter((x) => x.tMs >= targetMs - windowMs && x.tMs <= targetMs + windowMs).map((x) => x.p);
-        const coveredOldestEdge = oldestMs <= targetMs - windowMs;
-        if (coveredOldestEdge || limit >= REAL_TIMELINE_MAX_LIMIT || packets.length < limit) {
-          return { packets: inWindow, liveness: inWindow, hitCap: !coveredOldestEdge && limit >= REAL_TIMELINE_MAX_LIMIT };
-        }
-        limit *= 2;
-      }
-    }
   }
 
   // The origin (true sender) of a real packet, lowercased, if identifiable —
@@ -5231,12 +5177,11 @@
     if (regionKeyCache) return regionKeyCache;
     const keys = new Map();
     try {
-      const resp = await fetch("/corescope-api/api/scope-stats?window=7d");
-      if (resp.ok) {
-        const data = await resp.json();
-        for (const r of data.byRegion || []) {
-          if (!r.name) continue;
-          keys.set(r.name, sha256Bytes(new TextEncoder().encode(r.name)).slice(0, 16));
+      const names = await MeshApi.scopes();
+      {
+        for (const name of names) {
+          if (!name) continue;
+          keys.set(name, sha256Bytes(new TextEncoder().encode(name)).slice(0, 16));
         }
       }
     } catch {
@@ -5360,7 +5305,7 @@
     try {
       setStatus("sim-replay-hash-status", "Reconstructing — fetching the target packet…");
       // The window is centred on the target packet's own time.
-      const detailResp = await fetch(`/corescope-api/api/packets/${encodeURIComponent(hash)}`);
+      const detailResp = await fetch(`${MeshApi.BASE}/packets/${encodeURIComponent(hash)}`);
       if (!detailResp.ok) throw new Error(`packet ${hash} not found (HTTP ${detailResp.status})`);
       const detail = await detailResp.json();
       const targetMs = Date.parse((detail.packet && detail.packet.timestamp) || (detail.observations && detail.observations[0] && detail.observations[0].timestamp));
@@ -6537,7 +6482,7 @@
     setStatus("sim-replay-hash-status", "Fetching packet + node data from CoreScope…");
     try {
       const [packetData, nodeDir] = await Promise.all([
-        fetch(`/corescope-api/api/packets/${encodeURIComponent(hash)}`).then((r) => {
+        fetch(`${MeshApi.BASE}/packets/${encodeURIComponent(hash)}`).then((r) => {
           if (!r.ok) throw new Error(`packet fetch failed: HTTP ${r.status}`);
           return r.json();
         }),

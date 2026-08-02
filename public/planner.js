@@ -572,7 +572,7 @@
   async function fetchRealNeighbors(pubkey) {
     const cacheKey = `${pubkey}:${reachWindowDays}`;
     if (realNeighborCache.has(cacheKey)) return realNeighborCache.get(cacheKey);
-    const promise = fetch(`/corescope-api/api/nodes/${encodeURIComponent(pubkey)}/reach?days=${reachWindowDays}`)
+    const promise = fetch(`${MeshApi.BASE}/nodes/${encodeURIComponent(pubkey)}/reach?days=${reachWindowDays}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data) =>
         (data.links || []).map((l) => ({

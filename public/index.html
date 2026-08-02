@@ -880,6 +880,11 @@
 <script src="propagation.js"></script>
 <script src="meshsim-scenario.js"></script>
 <script src="meshsim-bridge.js"></script>
+<!-- The single door to mesh observation data: every nodes/links/scopes/packets
+     fetch goes through it and the base path lives in one place, so switching
+     backend (CoreScope, Beacon, …) is a server config change. Loaded first —
+     app.js, planner.js and simulator.js all use it. -->
+<script src="mesh-api.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>
 <script src="evidence.js"></script>
