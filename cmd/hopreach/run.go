@@ -88,6 +88,20 @@ func observeRepeaterScopes(ctx context.Context, src meshsource.Source, selected 
 	return scopes, participation.Unscoped, regionNames
 }
 
+// sourceLabel describes where the run's observations came from: the backend
+// name, and its endpoint when the config names one.
+func sourceLabel(src meshsource.Source, cfg appConfig) string {
+	name := src.Name()
+	url := cfg.source.CoreScope.APIURL
+	if name == "beacon" {
+		url = cfg.source.Beacon.APIURL
+	}
+	if url == "" {
+		return name
+	}
+	return name + " " + url
+}
+
 // repeaterInScope reports whether n is a member of region scopeName, via
 // either its observed scope set (real, cryptographically confirmed
 // observations — see observeRepeaterScopes) or its own self-reported
@@ -461,8 +475,12 @@ func run(cfg appConfig) (err error) {
 	}
 
 	m := meta{
-		GeneratedAt:           time.Now().UTC().Format(time.RFC3339),
-		Source:                cfg.apiURL,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		// Where this data actually came from. Previously always the CoreScope
+		// URL, whatever backend ran — so a Beacon-rendered map claimed
+		// CoreScope provenance, which is exactly the kind of quiet
+		// mislabelling that makes a stale map impossible to diagnose.
+		Source:                sourceLabel(src, cfg),
 		Boundary:              cfg.regionBoundaryLabel,
 		RequiredScope:         cfg.requiredScope,
 		TotalRepeatersFetched: len(nodes),
