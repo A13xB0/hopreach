@@ -28,19 +28,24 @@ test("neighborSets projects directed links to an undirected graph", () => {
   assert.deepEqual([...ns[2]], [1]);
 });
 
-// CHARACTERISATION, NOT APPROVAL. This pins what the mirror does today so
-// the extraction is provably a move; the divergence it documents is fixed in
-// the very next commit, which flips these assertions.
-//
-// topology.go drops an out-of-range link whole (`if l.From < 0 || l.From >= n
-// || ... { continue }`). This mirror keeps whichever half it can resolve, so
-// node 0 ends up with phantom neighbours 99 and -1 — an inflated neighbour
-// count, and then a TypeError when the articulation DFS walks into index 99.
-// Unreachable in the app today, since simLinks is always built from simNodes.
-test("neighborSets: currently keeps the resolvable half of a bad link", () => {
+test("neighborSets: a link to a node that doesn't exist is dropped whole", () => {
+  // topology.go drops such a link entirely (`if l.From < 0 || l.From >= n ||
+  // ... { continue }`). Keeping the half that resolves instead gave node 0
+  // phantom neighbours 99 and -1: an inflated neighbour count, and a
+  // TypeError once the articulation DFS walked into index 99.
   const ns = T.neighborSets(nodesOf(2), [link(0, 1), link(0, 99), link(-1, 0)]);
-  assert.deepEqual([...ns[0]], [1, 99, -1]);
-  assert.throws(() => T.findArticulationPoints(ns), TypeError);
+  assert.deepEqual([...ns[0]], [1]);
+  assert.deepEqual([...ns[1]], [0]);
+  assert.deepEqual(T.findArticulationPoints(ns), [false, false]);
+});
+
+test("nodeAttrs counts neighbours the same way neighborSets does", () => {
+  // The two used to carry separate copies of the same loop, so a fix to one
+  // silently left the other diverged.
+  const nodes = nodesOf(2);
+  const links = [link(0, 1), link(0, 99)];
+  assert.equal(T.nodeAttrs(nodes, links, null)[0].neighborCount,
+    T.neighborSets(nodes, links)[0].size);
 });
 
 // ── articulation points (Tarjan low-link) ─────────────────────────────────

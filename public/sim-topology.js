@@ -32,11 +32,7 @@
   // "corescope", which never touches terrain); neighbour count is derived
   // straight from the currently-built links, in either direction.
   function nodeAttrs(nodes, links, grid) {
-    const neighbors = nodes.map(() => new Set());
-    for (const l of links) {
-      if (neighbors[l.from]) neighbors[l.from].add(l.to);
-      if (neighbors[l.to]) neighbors[l.to].add(l.from);
-    }
+    const neighbors = neighborSets(nodes, links);
     return nodes.map((n, i) => ({
       altitudeM: grid ? grid.at(n.lat, n.lon) : 0,
       neighborCount: neighbors[i].size,
@@ -125,8 +121,13 @@
   function neighborSets(nodes, links) {
     const neighbors = nodes.map(() => new Set());
     for (const l of links) {
-      if (neighbors[l.from]) neighbors[l.from].add(l.to);
-      if (neighbors[l.to]) neighbors[l.to].add(l.from);
+      // Both endpoints or neither, matching topology.go. Adding only the
+      // half that resolves would give the surviving node a neighbour index
+      // with no Set behind it, which inflates its neighbour count and then
+      // throws once findArticulationPoints walks into it.
+      if (!neighbors[l.from] || !neighbors[l.to]) continue;
+      neighbors[l.from].add(l.to);
+      neighbors[l.to].add(l.from);
     }
     return neighbors;
   }
