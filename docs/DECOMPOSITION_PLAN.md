@@ -4,6 +4,23 @@ Enforces Rule 1 of `CLAUDE.md` (< 400 lines per file, one responsibility) on
 the files that currently violate it. Ordered by **risk, lowest first** — build
 confidence on the moves with airtight nets before touching the ones without.
 
+## Status
+
+| Stage | State | Result |
+|---|---|---|
+| 1 — Go splits | **done** | `optimize.go` 1854→1254, `engine.go` 1439→856, five new files |
+| 2 — CSS | **done** | `style.css` 2248→1363, three new sheets |
+| 3a — `mesh-frame.js` | **done** | 199 lines out, 12 unit tests |
+| 3b — `sim-topology.js` | **done** | 223 lines out, 22 unit tests; found and fixed a real Go/JS divergence |
+| 3c — `sim-rankings.js` | todo | |
+| 4 — episode | blocked on fixtures | |
+| 5 — planner.js | todo | |
+| 6 — gpucompute | todo | |
+
+`public/simulator.js` is **7527 → 7201**. The unit suite went from 11 tests
+to 45, which is the more important number: before this, none of the extracted
+logic had a single assertion that runs on a quiet mesh.
+
 ## The offenders
 
 | Lines | File | Net protecting it |
