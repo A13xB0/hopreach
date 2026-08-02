@@ -13,8 +13,9 @@
   "use strict";
 
   const S = window.SimState;
+  const { SIM_MAX_RANGE_KM, SIM_ZOOM_CAP, CORESCOPE_REACH_DAYS } = window.SimConstants;
 
-  let CORESCOPE_REACH_DAYS, SF_THRESHOLDS_DB, SIM_MAX_RANGE_KM, SIM_ZOOM_CAP, cfg, effectiveNodeType, effectivePrefsFor, setStatus, updateWorkflowState;
+  let SF_THRESHOLDS_DB, cfg, effectiveNodeType, effectivePrefsFor, setStatus, updateWorkflowState;
 
   // --- connectivity building --------------------------------------------
 
@@ -331,7 +332,7 @@
 
 
   function init(context) {
-    ({ CORESCOPE_REACH_DAYS, SF_THRESHOLDS_DB, SIM_MAX_RANGE_KM, SIM_ZOOM_CAP, cfg, effectiveNodeType, effectivePrefsFor, setStatus, updateWorkflowState } = context);
+    ({ SF_THRESHOLDS_DB, cfg, effectiveNodeType, effectivePrefsFor, setStatus, updateWorkflowState } = context);
     return api;
   }
 

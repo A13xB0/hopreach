@@ -13,8 +13,9 @@
   "use strict";
 
   const S = window.SimState;
+  const { DEFAULT_MESSAGE_HASH_SIZE } = window.SimConstants;
 
-  let DEFAULT_MESSAGE_HASH_SIZE, addProvenEdge, buildLinksFromCorescope, buildLinksFromModel, buildObserverEvidence, buildRealTimeline, buildReplayObservations, buildReplayTimeline, buildWindowFloodMessages, carriesTransportCode, ensureBottleneckLegendControl, ensureNodeDirectory, escapeHtml, extractPacketHash, fetchPacketsAroundTime, filterRepeatersAliveAt, isCanonicalDelivery, isolatedNodeHint, randomId, rebuildLinkIndexes, redrawNodeMarkers, regionOfPacket, renderEpisodeAnalysis, renderMessageNodeOptions, renderNodeList, renderResults, renderSentMessagesList, scenarioFromState, setRealReplayStatus, setStatus, shortAddressFromPubkey, simProvenLayer, simRealActivityLayer, stopRealTimelineReplay, syncRealReplayControls, updateWorkflowState;
+  let addProvenEdge, buildLinksFromCorescope, buildLinksFromModel, buildObserverEvidence, buildRealTimeline, buildReplayObservations, buildReplayTimeline, buildWindowFloodMessages, carriesTransportCode, ensureBottleneckLegendControl, ensureNodeDirectory, escapeHtml, extractPacketHash, fetchPacketsAroundTime, filterRepeatersAliveAt, isCanonicalDelivery, isolatedNodeHint, randomId, rebuildLinkIndexes, redrawNodeMarkers, regionOfPacket, renderEpisodeAnalysis, renderMessageNodeOptions, renderNodeList, renderResults, renderSentMessagesList, scenarioFromState, setRealReplayStatus, setStatus, shortAddressFromPubkey, simProvenLayer, simRealActivityLayer, stopRealTimelineReplay, syncRealReplayControls, updateWorkflowState;
 
   async function replayFromHash() {
     const hash = extractPacketHash(document.getElementById("sim-replay-hash-input").value);
@@ -562,7 +563,7 @@
   }
 
   function init(context) {
-    ({ DEFAULT_MESSAGE_HASH_SIZE, addProvenEdge, buildLinksFromCorescope, buildLinksFromModel, buildObserverEvidence, buildRealTimeline, buildReplayObservations, buildReplayTimeline, buildWindowFloodMessages, carriesTransportCode, ensureBottleneckLegendControl, ensureNodeDirectory, escapeHtml, extractPacketHash, fetchPacketsAroundTime, filterRepeatersAliveAt, isCanonicalDelivery, isolatedNodeHint, randomId, rebuildLinkIndexes, redrawNodeMarkers, regionOfPacket, renderEpisodeAnalysis, renderMessageNodeOptions, renderNodeList, renderResults, renderSentMessagesList, scenarioFromState, setRealReplayStatus, setStatus, shortAddressFromPubkey, simProvenLayer, simRealActivityLayer, stopRealTimelineReplay, syncRealReplayControls, updateWorkflowState } = context);
+    ({ addProvenEdge, buildLinksFromCorescope, buildLinksFromModel, buildObserverEvidence, buildRealTimeline, buildReplayObservations, buildReplayTimeline, buildWindowFloodMessages, carriesTransportCode, ensureBottleneckLegendControl, ensureNodeDirectory, escapeHtml, extractPacketHash, fetchPacketsAroundTime, filterRepeatersAliveAt, isCanonicalDelivery, isolatedNodeHint, randomId, rebuildLinkIndexes, redrawNodeMarkers, regionOfPacket, renderEpisodeAnalysis, renderMessageNodeOptions, renderNodeList, renderResults, renderSentMessagesList, scenarioFromState, setRealReplayStatus, setStatus, shortAddressFromPubkey, simProvenLayer, simRealActivityLayer, stopRealTimelineReplay, syncRealReplayControls, updateWorkflowState } = context);
     return api;
   }
 

@@ -13,8 +13,9 @@
   "use strict";
 
   const S = window.SimState;
+  const { DEFAULT_MESSAGE_HASH_SIZE } = window.SimConstants;
 
-  let DEFAULT_MESSAGE_HASH_SIZE, buildLinksFromModel, buildObserverEvidence, ensureNodeDirectory, episodeEvidenceLayer, escapeHtml, extractPacketHash, fetchPacketsAroundTime, hideResults, isCanonicalDelivery, map, messagesFromState, mulberry32, originPubkeyOfPacket, randomId, redrawNodeMarkers, regionOfPacket, renderMessageList, renderMessageNodeOptions, renderNodeList, scenarioFromState, setStatus, shortAddressFromPubkey;
+  let buildLinksFromModel, buildObserverEvidence, ensureNodeDirectory, episodeEvidenceLayer, escapeHtml, extractPacketHash, fetchPacketsAroundTime, hideResults, isCanonicalDelivery, map, messagesFromState, mulberry32, originPubkeyOfPacket, randomId, redrawNodeMarkers, regionOfPacket, renderMessageList, renderMessageNodeOptions, renderNodeList, scenarioFromState, setStatus, shortAddressFromPubkey;
 
   async function reconstructEpisodeFromWindow() {
     const hash = extractPacketHash(document.getElementById("sim-replay-hash-input").value);
@@ -800,7 +801,7 @@
   // transmission with a list of confirmed recipients, and the renderer fans
 
   function init(context) {
-    ({ DEFAULT_MESSAGE_HASH_SIZE, buildLinksFromModel, buildObserverEvidence, ensureNodeDirectory, episodeEvidenceLayer, escapeHtml, extractPacketHash, fetchPacketsAroundTime, hideResults, isCanonicalDelivery, map, messagesFromState, mulberry32, originPubkeyOfPacket, randomId, redrawNodeMarkers, regionOfPacket, renderMessageList, renderMessageNodeOptions, renderNodeList, scenarioFromState, setStatus, shortAddressFromPubkey } = context);
+    ({ buildLinksFromModel, buildObserverEvidence, ensureNodeDirectory, episodeEvidenceLayer, escapeHtml, extractPacketHash, fetchPacketsAroundTime, hideResults, isCanonicalDelivery, map, messagesFromState, mulberry32, originPubkeyOfPacket, randomId, redrawNodeMarkers, regionOfPacket, renderMessageList, renderMessageNodeOptions, renderNodeList, scenarioFromState, setStatus, shortAddressFromPubkey } = context);
     return api;
   }
 
