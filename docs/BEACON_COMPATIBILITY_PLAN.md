@@ -37,10 +37,13 @@ source:
 | Observed reach / links | ✅ | ✅ | Beacon synthesises from neighbour lists both directions |
 | Calibration against observed links | ✅ | ✅ | same `[]meshsource.ReachLink` |
 | Coverage rasters, all tiers | ✅ | ✅ | pure function of positions + terrain |
-| Region/scope list | ✅ | ⚠️ | different question (§0.2) |
+| Region/scope catalogue | ✅ | ❌ | different question, so the feature is off (§0.2) |
+| Region tagging on repeaters | ✅ | ❌ | off with the catalogue |
+| Per-scope coverage rasters | ✅ | ❌ | off with the catalogue |
+| Map's region filter control | ✅ | ❌ | hidden, not empty (§0.2) |
+| Packet scope (per packet) | ✅ | ✅ | Beacon reports it directly |
 | Observed region participation | ✅ | ✅ | both derived from traffic (§0.3) |
 | Observed-unscoped signal | ✅ | ✅ | both derived from traffic |
-| Per-scope coverage rasters | ✅ | ✅ | follows from participation |
 | Packet window (replay) | ✅ | ✅ | Beacon filters server-side; CoreScope needs the offset search |
 | Packet detail, all observations | ✅ | ✅ | |
 | Resolved relay paths | ✅ | ✅ | list omits them; recovered by bounded detail fan-out |
@@ -60,18 +63,38 @@ Filled with one `/nodes?scope=NAME` request per region rather than one detail
 request per node, since that filter matches on exactly this field. Worth
 raising upstream; the workaround is cheap and correct either way.
 
-### 0.2 `/scopes` answers a different question
+### 0.2 No region catalogue on Beacon, so the region features are off
 
 CoreScope's scope list is "regions this instance knows". Beacon's
 `/scopes?iatas=…` is "regions with observers in these IATAs" — it joins
 through `observer_scopes`, so a region nobody local has been heard on is
 absent. On the migrated sample that is 3 of 9.
 
-Both answers are defensible and neither is wrong; they are simply not the
-same question. HopReach uses the list to decide which per-scope rasters to
-generate, so on Beacon it generates them for locally-observed regions only.
-Recorded rather than papered over: forcing them to agree would mean
-fabricating regions on one side or hiding them on the other.
+Both answers are defensible; they are simply not the same question. But the
+features built on the list — the per-region coverage rasters and the map's
+region filter — both *present themselves as the complete set*. Built from a
+partial list they are quietly wrong in a way no user can see: a region that
+is missing looks like a region with no repeaters in it, which is a wrong
+answer rather than a missing one.
+
+So it is declared rather than discovered. `meshsource.Capabilities.ScopeCatalog`
+is false for Beacon, and everything downstream switches off together:
+
+| Layer | Behaviour when false |
+|---|---|
+| `cmd/hopreach` | skips scope observation and per-region rasters, logs why |
+| `meta.json` | `capabilities.scope_catalog: false`, no `scope_coverage` |
+| `/mesh-api/api/source` | reports the capability |
+| `public/app.js` | the region filter control is never created |
+
+The main coverage rasters, calibration, replay and everything else run
+normally. A backend that cannot answer completely says so, and the feature is
+absent rather than half-drawn — an absent control is visibly absent, and a
+half-drawn map is not.
+
+Note this is about *enumerating* regions. Anything keyed to a specific scope
+still works on Beacon: a packet's own scope, region participation, and a
+node's self-reported default scope.
 
 ### 0.3 Region participation is derived from traffic on both
 

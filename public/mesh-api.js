@@ -82,6 +82,34 @@
     }
   }
 
+  // Backends do not all answer the same questions, and the honest response to
+  // one that cannot is to drop the feature rather than render it from a
+  // partial answer. Cached because every caller asks at startup and the answer
+  // cannot change without a restart.
+  let capabilitiesPromise = null;
+
+  function capabilities() {
+    if (!capabilitiesPromise) {
+      capabilitiesPromise = getJSON(`${BASE}/source`)
+        .then((d) => d.capabilities || {})
+        // Unreachable backend: claim nothing. A feature that stays hidden is
+        // recoverable on reload; one built from a half-answer is not.
+        .catch(() => ({}));
+    }
+    return capabilitiesPromise;
+  }
+
+  /**
+   * True when the backend can enumerate EVERY region on the mesh.
+   *
+   * Completeness is the point. Region filtering and per-region coverage both
+   * present themselves as the whole set, so a partial list makes them quietly
+   * wrong — a region that is missing looks like a region nobody is on.
+   */
+  async function supportsScopeCatalog() {
+    return (await capabilities()).scope_catalog === true;
+  }
+
   /**
    * True when every hop of a path was actually resolved.
    *
@@ -106,6 +134,7 @@
     packetsBetween,
     packetDetail,
     sourceName,
+    supportsScopeCatalog,
     pathComplete,
   };
 });

@@ -191,9 +191,16 @@ func httpError(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// handleSource lets the UI say which backend it is looking at.
+// handleSource names the backend and declares what it can answer, so a page
+// can hide a feature outright rather than showing an empty one.
 func (h *Handler) handleSource(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{"source": h.Source.Name()})
+	caps := h.Source.Capabilities()
+	writeJSON(w, map[string]any{
+		"source": h.Source.Name(),
+		"capabilities": map[string]bool{
+			"scope_catalog": caps.ScopeCatalog,
+		},
+	})
 }
 
 func (h *Handler) handleNodes(w http.ResponseWriter, r *http.Request) {

@@ -18,6 +18,7 @@ import (
 // is unresolved, and the origin field the front end actually reads.
 
 type fakeSource struct {
+	caps    meshsource.Capabilities
 	nodes   []meshsource.Node
 	links   []meshsource.ReachLink
 	scopes  []string
@@ -25,7 +26,8 @@ type fakeSource struct {
 	detail  meshsource.Packet
 }
 
-func (f *fakeSource) Name() string { return "fake" }
+func (f *fakeSource) Name() string                          { return "fake" }
+func (f *fakeSource) Capabilities() meshsource.Capabilities { return f.caps }
 func (f *fakeSource) FetchRepeaters(context.Context) ([]meshsource.Node, error) {
 	return f.nodes, nil
 }
@@ -268,5 +270,28 @@ func TestSourceEndpointNamesTheBackend(t *testing.T) {
 	got := serve(t, &fakeSource{}, Prefix+"api/source")
 	if got["source"] != "fake" {
 		t.Errorf("source = %v", got["source"])
+	}
+}
+
+func TestSourceEndpointDeclaresCapabilities(t *testing.T) {
+	// The front end hides a feature outright when the backend cannot answer
+	// completely. Inferring that from an empty result instead would be
+	// indistinguishable from a mesh that genuinely has no regions.
+	got := serve(t, &fakeSource{caps: meshsource.Capabilities{ScopeCatalog: true}},
+		Prefix+"api/source")
+	caps, ok := got["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("no capabilities in %v", got)
+	}
+	if caps["scope_catalog"] != true {
+		t.Errorf("scope_catalog = %v, want true", caps["scope_catalog"])
+	}
+
+	got = serve(t, &fakeSource{}, Prefix+"api/source")
+	caps = got["capabilities"].(map[string]any)
+	if caps["scope_catalog"] != false {
+		t.Errorf("scope_catalog = %v, want false — a backend that cannot "+
+			"enumerate every region must say so, not stay silent",
+			caps["scope_catalog"])
 	}
 }

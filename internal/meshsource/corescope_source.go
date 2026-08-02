@@ -28,6 +28,12 @@ func NewCoreScopeSource(c *corescope.Client) *CoreScopeSource {
 
 func (s *CoreScopeSource) Name() string { return "corescope" }
 
+// Capabilities: CoreScope keeps a global region list, so the catalogue is
+// complete and everything region-shaped can be built on it.
+func (s *CoreScopeSource) Capabilities() Capabilities {
+	return Capabilities{ScopeCatalog: true}
+}
+
 func (s *CoreScopeSource) FetchRepeaters(ctx context.Context) ([]Node, error) {
 	raw, err := s.Client.FetchRepeaters(ctx)
 	if err != nil {

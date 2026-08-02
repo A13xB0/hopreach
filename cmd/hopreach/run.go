@@ -426,13 +426,26 @@ func run(cfg appConfig) (err error) {
 	var observedScopes map[string][]string
 	var observedUnscopedCounts map[string]int
 	var knownRegionNames []string
-	if cfg.scopeObservationEnabled {
-		prog.Update("observing_scopes", 0, 1, "Observing repeater regions from CoreScope packet transport codes")
+
+	// Region features need a COMPLETE list of regions, not merely a
+	// non-empty one: the map's region filter and the per-region rasters both
+	// present themselves as the whole set, so building them from a partial
+	// list produces a map that is quietly wrong — a missing region looks like
+	// a region with no repeaters in it. A backend that cannot enumerate them
+	// all says so, and the feature is switched off rather than half-drawn.
+	scopesAvailable := cfg.scopeObservationEnabled && src.Capabilities().ScopeCatalog
+	if cfg.scopeObservationEnabled && !scopesAvailable {
+		log.Printf("scope observation: %s cannot enumerate every region on the "+
+			"mesh, so region tagging and per-region coverage are disabled for "+
+			"this run (see meshsource.Capabilities.ScopeCatalog)", src.Name())
+	}
+	if scopesAvailable {
+		prog.Update("observing_scopes", 0, 1, "Observing repeater regions from packet transport codes")
 		observedScopes, observedUnscopedCounts, knownRegionNames = observeRepeaterScopes(ctx, src, selected, cfg.scopeObservationWindowHours)
 		prog.Update("observing_scopes", 1, 1, fmt.Sprintf("Observed region(s) for %d/%d repeaters", len(observedScopes), len(selected)))
 	}
 
-	features := buildFeatures(selected, sites, calResults, observedScopes, observedUnscopedCounts, cfg.scopeObservationEnabled, cfg)
+	features := buildFeatures(selected, sites, calResults, observedScopes, observedUnscopedCounts, scopesAvailable, cfg)
 	fc := featureCollection{Type: "FeatureCollection", Features: features}
 
 	counts := map[string]int{"active": 0, "degraded": 0, "silent": 0}
@@ -455,6 +468,7 @@ func run(cfg appConfig) (err error) {
 		TotalRepeatersFetched: len(nodes),
 		RepeatersInRegion:     len(features),
 		Counts:                counts,
+		Capabilities:          capabilities{ScopeCatalog: scopesAvailable},
 		Version:               buildinfo.Version,
 		// Seeded from whatever the last run wrote (nil on a genuine first
 		// run) so meta.json keeps showing real, servable coverage for the
@@ -579,7 +593,7 @@ func run(cfg appConfig) (err error) {
 		// there's no reliable per-repeater region membership at scale (see
 		// observeRepeaterScopes — default_scope alone is sparse in practice),
 		// so there'd be nothing meaningful to split by.
-		if cfg.scopeObservationEnabled && len(knownRegionNames) > 0 {
+		if scopesAvailable && len(knownRegionNames) > 0 {
 			if !cfg.standardRequiresGPU || engine.Available() {
 				tierStart := time.Now()
 				for i, scopeName := range knownRegionNames {

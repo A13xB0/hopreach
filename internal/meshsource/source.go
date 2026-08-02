@@ -147,6 +147,10 @@ type Source interface {
 	// Name identifies the backend in logs and diagnostics.
 	Name() string
 
+	// Capabilities says what this backend can actually answer, so callers can
+	// switch a feature off rather than render half of it.
+	Capabilities() Capabilities
+
 	// FetchRepeaters returns every repeater the backend knows.
 	FetchRepeaters(ctx context.Context) ([]Node, error)
 
@@ -180,6 +184,28 @@ type Source interface {
 	// pulling every packet in the window across the network to recompute
 	// what the backend already knows.
 	FetchRegionParticipation(ctx context.Context, since time.Time, regionNames []string) (Participation, error)
+}
+
+// Capabilities is what a backend can answer, declared rather than discovered.
+//
+// The alternative is to attempt everything and degrade on whatever comes back
+// thin — which is how you end up drawing a region map that silently omits
+// regions. A backend that cannot answer completely says so, and the feature
+// is switched off end to end instead of rendered partially.
+type Capabilities struct {
+	// ScopeCatalog: can this backend enumerate EVERY region on the mesh?
+	//
+	// Completeness is the whole point, and it is why this is not simply
+	// "does /scopes return anything". Per-region coverage rasters and the
+	// map's region filter both present themselves as the full set of
+	// regions; built from a partial list they are quietly wrong in a way a
+	// user cannot see — a region missing from the filter looks like a region
+	// with no repeaters in it.
+	//
+	// CoreScope keeps a global list of regions it knows. Beacon's /scopes is
+	// scoped to observers in the requested IATAs, so it answers "regions
+	// somebody local was heard on" — a reasonable question, and not this one.
+	ScopeCatalog bool
 }
 
 // Participation is one window's worth of observed region membership.

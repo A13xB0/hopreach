@@ -238,6 +238,14 @@
   }
 
   async function initScopeFilterControl() {
+    // Region filtering needs the COMPLETE set of regions. A backend that can
+    // only report the ones it has locally observed (Beacon) would give a
+    // filter that silently omits regions — and a missing region reads as "no
+    // repeaters there", which is a wrong answer rather than a missing one. So
+    // the control is not offered at all unless the backend says it can
+    // enumerate them; see meshsource.Capabilities.ScopeCatalog.
+    if (!(await MeshApi.supportsScopeCatalog())) return;
+
     let regionNames = [];
     try {
       // window is one of CoreScope's own fixed enum values ("1h"/"24h"/

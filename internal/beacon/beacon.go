@@ -81,6 +81,22 @@ func New(baseURL string, iatas []string, httpClient *http.Client) (*Client, erro
 
 func (c *Client) Name() string { return "beacon" }
 
+// Capabilities reports no scope catalogue.
+//
+// Beacon knows a packet's scope perfectly well — it stores it at ingest, and
+// FetchRegionParticipation uses it. What it has no way to answer is "every
+// region on this mesh": /scopes joins through observer_scopes and so returns
+// the regions local observers have been heard on. On a mesh whose regions
+// outnumber its observers' coverage that is a strict subset, and a per-region
+// coverage map built from a subset omits regions without saying so.
+//
+// So the region features are switched off on Beacon rather than rendered from
+// a partial list. Everything that depends on a *specific* scope — packet
+// scope, participation, a node's own default scope — still works.
+func (c *Client) Capabilities() meshsource.Capabilities {
+	return meshsource.Capabilities{ScopeCatalog: false}
+}
+
 // ── wire types (mirror beacon-server's Go structs, not beacon-docs) ─────────
 
 type page[T any] struct {

@@ -225,15 +225,26 @@ type coverageOutputs struct {
 	CalibratedPrecision *coverageMeta `json:"calibrated_precision,omitempty"`
 }
 
+// capabilities mirrors meshsource.Capabilities onto the wire.
+type capabilities struct {
+	ScopeCatalog bool `json:"scope_catalog"`
+}
+
 type meta struct {
-	GeneratedAt           string           `json:"generated_at"`
-	Source                string           `json:"source"`
-	Boundary              string           `json:"boundary"`
-	RequiredScope         string           `json:"required_scope"`
-	TotalRepeatersFetched int              `json:"total_repeaters_fetched"`
-	RepeatersInRegion     int              `json:"repeaters_in_region"`
-	Counts                map[string]int   `json:"counts"`
-	Coverage              *coverageOutputs `json:"coverage,omitempty"`
+	GeneratedAt           string         `json:"generated_at"`
+	Source                string         `json:"source"`
+	Boundary              string         `json:"boundary"`
+	RequiredScope         string         `json:"required_scope"`
+	TotalRepeatersFetched int            `json:"total_repeaters_fetched"`
+	RepeatersInRegion     int            `json:"repeaters_in_region"`
+	Counts                map[string]int `json:"counts"`
+
+	// Capabilities tells the front end which backend-dependent features are
+	// worth offering. Without it the map has to infer support from an empty
+	// result, which is indistinguishable from a mesh that genuinely has no
+	// regions.
+	Capabilities capabilities     `json:"capabilities"`
+	Coverage     *coverageOutputs `json:"coverage,omitempty"`
 	// ScopeCoverage holds one standard-tier coverage raster per known
 	// MeshCore region (e.g. "#fif"), computed from only the repeaters
 	// actually in that region — see run()'s "computing_scope_coverage"
