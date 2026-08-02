@@ -295,3 +295,24 @@ func TestSourceEndpointDeclaresCapabilities(t *testing.T) {
 			caps["scope_catalog"])
 	}
 }
+
+func TestAnUnreportedPathDoesNotClaimToBeComplete(t *testing.T) {
+	// Beacon's packet LIST carries hop counts but omits paths by design. With
+	// only "did every hop I was given resolve?" an empty list answers yes —
+	// so a 3-hop flood whose path nobody reported would present as a
+	// fully-resolved direct reception.
+	src := &fakeSource{packets: []meshsource.Packet{
+		{Hash: "aa", HeardAt: time.Now(), RouteType: 1, HopCount: 3}, // path omitted
+		{Hash: "bb", HeardAt: time.Now(), RouteType: 1, HopCount: 0}, // genuinely direct
+	}}
+	got := serve(t, src, Prefix+"api/packets?since=1&until=9999999999999")
+	packets := got["packets"].([]any)
+
+	if packets[0].(map[string]any)["path_complete"] != false {
+		t.Error("a packet with hops but no reported path must not claim a " +
+			"complete path — that is 'we were not told', not 'heard direct'")
+	}
+	if packets[1].(map[string]any)["path_complete"] != true {
+		t.Error("a genuine direct reception has no hops and IS complete")
+	}
+}

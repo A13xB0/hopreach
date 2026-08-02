@@ -107,7 +107,7 @@ type wirePacket struct {
 // toWirePacket is the single conversion both the window and detail handlers
 // use, so a field added to one can never be forgotten by the other.
 func toWirePacket(p meshsource.Packet) wirePacket {
-	path, complete := hopKeys(p.Path)
+	path, complete := hopKeys(p.Path, p.HopCount)
 	return wirePacket{
 		Hash:         p.Hash,
 		Timestamp:    p.HeardAt.UTC().Format(time.RFC3339),
@@ -163,7 +163,14 @@ func intOrNil(v int) *int {
 // reports whether every hop was actually resolved. An unknown hop becomes an
 // empty string rather than being dropped, so hop *positions* stay truthful —
 // silently shortening a path would turn a 3-hop flood into a 2-hop one.
-func hopKeys(hops []meshsource.Hop) ([]string, bool) {
+//
+// hopCount is what the backend says the path length was, which is not always
+// the same as how many hops it handed us. A packet heard direct has neither,
+// and is complete. A packet the backend says travelled three hops but reports
+// no path for is NOT complete — Beacon's packet list is exactly this: it
+// carries hop counts but omits paths by design, so without the count an empty
+// list would claim to be a fully-resolved zero-hop flood.
+func hopKeys(hops []meshsource.Hop, hopCount int) ([]string, bool) {
 	out := make([]string, 0, len(hops))
 	complete := true
 	for _, h := range hops {
@@ -173,6 +180,9 @@ func hopKeys(hops []meshsource.Hop) ([]string, bool) {
 			continue
 		}
 		out = append(out, h.PublicKey)
+	}
+	if len(hops) == 0 && hopCount > 0 {
+		complete = false
 	}
 	return out, complete
 }
@@ -316,7 +326,7 @@ func (h *Handler) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	obs := make([]wireObservation, 0, len(p.Observations))
 	for _, o := range p.Observations {
-		op, oc := hopKeys(o.Path)
+		op, oc := hopKeys(o.Path, len(o.Path))
 		obs = append(obs, wireObservation{
 			ObserverID:   o.ObserverKey,
 			ObserverName: o.ObserverName,
