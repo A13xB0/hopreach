@@ -1,0 +1,396 @@
+/* ======================================================================
+   Planning tools
+   ----------------------------------------------------------------------
+   Split out of style.css. Loaded after it and before the simulator sheet;
+   see the load order in index.html.
+   ====================================================================== */
+
+/* --- planning tools --- */
+
+#map-tools {
+  position: absolute;
+  /* Sits above the replay transport bar when one is showing (see
+     --transport-clearance, measured in app.js) and drops back to the map's
+     own bottom edge when there isn't one. */
+  bottom: calc(0.75rem + var(--transport-clearance, 0px));
+  left: 0.75rem;
+  /* An absolutely-positioned element that overflows its own width doesn't
+     just clip visually — it enlarges its containing block's SCROLLABLE
+     area, which on a narrow phone forced the whole page into a wider
+     layout viewport than the device actually has (~515px computed from a
+     412px screen, confirmed live), and the browser then zoomed the entire
+     page out to fit — not a rendering quirk, an actual horizontal-scroll
+     bug affecting every control on the page, not just this one. `right`
+     caps the box at the viewport edge same as `left` already did, and
+     flex-wrap lets a fourth button drop to a second row instead of
+     pushing the box past that cap. --map-tools-clearance (set in app.js)
+     already measures the row's real rendered height via ResizeObserver, so
+     a wrapped two-row layout pushes bottom-docked controls up correctly
+     without any change there. */
+  right: 0.75rem;
+  flex-wrap: wrap;
+  /* Leaflet's own control corners sit at z-index:1000, and the layers
+     control (top-right, expanded) can overlap the panel's top edge since
+     the panel spans the full right side — this must stay above that. */
+  z-index: 1100;
+  display: flex;
+  gap: 0.5rem;
+}
+#map-tools button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+/* Each button carries both a full and an abbreviated label; the desktop
+   row has room for the full one, the phone tab bar doesn't (four tabs on
+   a 360px screen). The mobile block at the end of this file swaps them.
+   #map-options-toggle opens the phone-only Map sheet, so on desktop —
+   where those controls are still docked on the map itself — it has
+   nothing to open.
+   The "hide this button" rule is scoped #map-tools #id (2,0,0) on
+   purpose: a bare #id is 1,0,0 and would LOSE to the #map-tools button
+   (1,0,1) rule that sets display on every button in the row. */
+#map-tools .tool-label-short { display: none; }
+#map-tools #map-options-toggle { display: none; }
+#map-tools button:hover { filter: brightness(1.1); }
+#companion-pin-toggle.active {
+  background: #f97316;
+}
+#map-declutter-toggle.active {
+  background: #f97316;
+}
+
+.alpha-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  color: #fff;
+  background: linear-gradient(120deg, #a855f7, #ec4899, #f97316, #a855f7);
+  background-size: 300% 100%;
+  animation: alpha-badge-shimmer 3s linear infinite;
+  box-shadow: 0 0 6px rgba(236,72,153,0.6);
+  vertical-align: middle;
+}
+@keyframes alpha-badge-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 300% 50%; }
+}
+#companion-pin-hint {
+  position: absolute;
+  bottom: calc(3.5rem + var(--transport-clearance, 0px));
+  left: 0.75rem;
+  z-index: 1100;
+  max-width: 280px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+}
+
+#plan-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  max-width: 90vw;
+  background: var(--card-bg);
+  border-left: 1px solid var(--border);
+  z-index: 1100;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.75rem;
+  box-shadow: -4px 0 16px rgba(0,0,0,0.4);
+}
+#plan-panel.hidden { display: none; }
+
+/* Docked to the right edge, same as #plan-panel — a full-viewport overlay
+   was tried and reverted: it left no map visible at all while the
+   simulator was open, which defeats a tool that's fundamentally about
+   node positions and links. Noticeably wider than #plan-panel's 320px
+   (dozens of loaded repeaters, a full results log, and a per-repeater
+   prediction breakdown need more room than that), while still leaving the
+   majority of a normal-width screen as visible map. */
+#sim-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 92vw;
+  background: var(--card-bg);
+  border-left: 1px solid var(--border);
+  z-index: 1100;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.75rem;
+  box-shadow: -4px 0 16px rgba(0,0,0,0.4);
+}
+#sim-panel.hidden { display: none; }
+
+#sim-predict-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+#sim-predict-progress.hidden { display: none; }
+#sim-predict-progress-text { white-space: nowrap; flex-shrink: 0; }
+#sim-predict-progress .progress-track { flex: 1; }
+#sim-predict-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #f97316, #22c55e);
+  transition: width 0.2s ease;
+}
+/* Item 15b's own progress bar — same shape as #sim-predict-progress above. */
+#sim-stress-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+#sim-stress-progress.hidden { display: none; }
+#sim-stress-progress-text { white-space: nowrap; flex-shrink: 0; }
+#sim-stress-progress .progress-track { flex: 1; }
+#sim-stress-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #f97316, #22c55e);
+  transition: width 0.2s ease;
+}
+/* Item 15c's policy-search results section within #sim-predictions-modal —
+   hidden until a policy search has actually run, so the existing
+   single-rule "Predict settings" output isn't cluttered for anyone not
+   using the newer search. */
+#sim-policy-section.hidden { display: none; }
+/* Phase 4 work item 4 — adaptive optimizer. Same "hidden until it has
+   actually produced something" convention as #sim-policy-section above. */
+#sim-optimize-section.hidden { display: none; }
+#sim-optimize-progress.hidden { display: none; }
+#sim-optimize-holdout-note.hidden { display: none; }
+#sim-optimize-cancel.hidden { display: none; }
+#sim-optimize-holdout-note.sim-holdout-warning { color: #f97316; }
+#sim-optimize-node-detail.hidden { display: none; }
+.sim-optimize-node-row { cursor: pointer; }
+.sim-optimize-node-row:hover { background: rgba(255,255,255,0.08); }
+/* An adjusted repeater is marked with a text glyph in its own cell, not a
+   row colour — same word-labels-not-colour reasoning as the policy
+   profile breakdown above. */
+.sim-optimize-round-kept { color: #4ade80; }
+/* Phase 8 — a before/after problem count that got WORSE after a change. */
+.sim-episode-worse { color: #f87171; }
+#sim-episode-modal { width: min(920px, 100%); }
+/* Phase 6 work item H — an accepted flood.max reduction always carries a
+   reachability warning (see internal/meshsim.OptimizeDeviation.Warning's
+   own doc comment on why: the delivery gate can't see topology the
+   simulator never knew about). Deliberately colour AND a ⚠ glyph/prefix
+   already in the text — this is a real risk flag, not a cosmetic label,
+   so it gets more than the plain word-labels convention above. */
+.sim-optimize-deviation-warning { color: #f97316; }
+
+/* The four toolbar buttons that open a results modal (Results, Predicted
+   settings, Bottleneck analysis, Rankings) start with class="hidden" and
+   only lose it once there's real data to open (see
+   renderResults/renderSuggestions/renderBottleneckAnalysis/renderRankings)
+   — this is what makes that actually take effect. Without a matching
+   rule, class="hidden" alone does nothing and every one of them would sit
+   there clickable-but-empty from the moment Simulate mode opens, the same
+   bug this project already hit once with the old docked sections these
+   buttons replaced. */
+#sim-open-results-modal.hidden,
+#sim-open-predictions-modal.hidden,
+#sim-open-bottleneck-modal.hidden,
+#sim-rankings-expand.hidden,
+/* These two were never added when the optimizer and episode-analysis
+   modals were introduced — found while reviewing the redesigned panel:
+   both sat visible-but-empty from the moment Simulate mode opened,
+   exactly the bug this comment already warns about. Pre-existing, not
+   introduced by the panel restructure (confirmed against git history). */
+#sim-open-optimize-modal.hidden,
+#sim-open-episode-modal.hidden {
+  display: none;
+}
+
+.sim-workspace {
+  display: flex;
+  flex-direction: column;
+}
+
+.plan-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  margin-bottom: 0.75rem;
+}
+.plan-panel-header button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.2rem;
+  cursor: pointer;
+  line-height: 1;
+}
+.panel-header-actions { display: flex; align-items: center; gap: 0.15rem; }
+/* Minimising is a bottom-sheet idea — on desktop the panel is a full-height
+   sidebar with nothing to shrink towards. */
+.panel-minimise { display: none; }
+
+.plan-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+.plan-row select, .plan-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.neighbor-window-control {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  margin-top: 0.5rem;
+  font-size: 0.72rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  /* Vertical stack (header row, then body) now it goes through the shared
+     collapsible pattern — was a single flex row when this was the one
+     floating control with no collapse mechanism of its own. */
+  display: flex;
+  flex-direction: column;
+}
+/* :not(.hidden), not a bare .map-control-body selector — that would tie
+   .map-control-body.hidden's own specificity exactly and win on source
+   order alone, silently cancelling the collapse (found live: classList
+   correctly had "hidden", computed display was "flex" anyway). This
+   selector is more specific than the hidden one and simply doesn't match
+   a hidden element at all, so there's nothing left to fight it. */
+.neighbor-window-control .map-control-body:not(.hidden) {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.neighbor-window-control label {
+  color: var(--text-muted);
+  flex: 1 1 auto;
+}
+.neighbor-window-control select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.72rem;
+}
+
+#plan-panel button, #plan-panel select, #plan-panel input[type="text"],
+#sim-panel button, #sim-panel select, #sim-panel input[type="text"], #sim-panel input[type="number"] {
+  background: var(--surface1, #0a1929);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#plan-panel input[type="text"], #sim-panel input[type="text"], #sim-panel input[type="number"] { cursor: text; }
+#plan-panel button:hover, #sim-panel button:hover { border-color: var(--accent); }
+#sim-panel button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.plan-mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+.plan-mode-btn { flex: 1 1 30%; }
+.plan-mode-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.plan-full-width-btn {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+.plan-full-width-btn.active {
+  background: #a855f7;
+  border-color: #a855f7;
+  color: #fff;
+}
+
+/* The one action that gets full-weight primary treatment on Plan's own
+   file-operations row — see PLAN-05 in the UX review. Export/Import/KML
+   sit underneath, deliberately quieter (.plan-secondary-row), since
+   they're aimed at round-tripping through another tool rather than at
+   the everyday "send this to someone" case. */
+.plan-promoted-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  padding: 0.55rem 0.6rem;
+}
+.plan-promoted-btn:hover { filter: brightness(1.08); border-color: var(--accent); }
+.plan-secondary-row button {
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  padding: 0.3rem 0.45rem;
+  border-color: transparent;
+}
+.plan-secondary-row button:hover { color: var(--text); border-color: var(--border); }
+
+.plan-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text);
+  cursor: pointer;
+}
+.plan-checkbox-row input[type="checkbox"] {
+  width: auto;
+  cursor: pointer;
+}
+/* Nothing to preview until at least one repeater is planned — greyed
+   rather than silently inert when clicked. */
+.plan-checkbox-row-disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.plan-checkbox-row-disabled input[type="checkbox"] { cursor: default; }
+
+.plan-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.05);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.plan-hint.hidden { display: none; }
+

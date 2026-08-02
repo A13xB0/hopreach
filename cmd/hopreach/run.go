@@ -16,20 +16,21 @@ import (
 	"hopreach/internal/buildinfo"
 	"hopreach/internal/calibration"
 	"hopreach/internal/compute"
-	"hopreach/internal/corescope"
 	"hopreach/internal/coverage"
 	"hopreach/internal/demgrid"
 	"hopreach/internal/geo"
+	"hopreach/internal/meshsource"
 	"hopreach/internal/progress"
 	"hopreach/internal/propagation"
+	"hopreach/internal/sources"
 	"hopreach/internal/sysinfo"
 )
 
 // selectRepeaters keeps nodes that have coordinates, fall within the
 // configured region boundary, and (if cfg.requiredScope is set) are scoped
 // to it.
-func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig) []corescope.Node {
-	selected := make([]corescope.Node, 0, len(nodes))
+func selectRepeaters(nodes []meshsource.Node, region geo.Boundary, cfg appConfig) []meshsource.Node {
+	selected := make([]meshsource.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if n.Lat == nil || n.Lon == nil {
 			continue
@@ -38,7 +39,7 @@ func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig)
 			continue
 		}
 		if cfg.requiredScope != "" {
-			if n.DefaultScope == nil || strings.TrimPrefix(*n.DefaultScope, "#") != cfg.requiredScope {
+			if strings.TrimPrefix(n.DefaultScope, "#") != cfg.requiredScope {
 				continue
 			}
 		}
@@ -59,37 +60,46 @@ func selectRepeaters(nodes []corescope.Node, region geo.Boundary, cfg appConfig)
 // which is a related but distinct concept. A repeater can genuinely have
 // more than one region enabled at once, so scopes returns every region
 // with at least one confirmed observation, not just the single
-// most-observed one — see corescope.ObservedScopes. Also returns the real,
+// most-observed one — see meshsource.ObservedScopes. Also returns the real,
 // currently-known region name list itself (regardless of whether any
 // repeater matched one) — the caller uses this to know which per-scope
 // coverage rasters to generate, see the "computing_scope_coverage" block in
 // run(). Errors are logged and treated as "no scope data available" rather
 // than fatal: this is an enrichment nothing downstream depends on.
-func observeRepeaterScopes(ctx context.Context, client *corescope.Client, selected []corescope.Node, windowHours float64) (scopes map[string][]string, unscopedCounts map[string]int, regionNames []string) {
-	allNodes, err := client.FetchAllNodes(ctx)
-	if err != nil {
-		log.Printf("scope observation: fetching node directory failed, skipping: %v", err)
-		return nil, nil, nil
-	}
-	regionNames, err = client.FetchKnownRegionNames(ctx)
+func observeRepeaterScopes(ctx context.Context, src meshsource.Source, selected []meshsource.Node, windowHours float64) (scopes map[string][]string, unscopedCounts map[string]int, regionNames []string) {
+	regionNames, err := src.FetchScopes(ctx)
 	if err != nil {
 		log.Printf("scope observation: fetching known region names failed, skipping: %v", err)
 		return nil, nil, nil
 	}
 	since := time.Now().Add(-time.Duration(windowHours * float64(time.Hour)))
-	participation, err := client.FetchRegionParticipation(ctx, since, allNodes, regionNames)
+	participation, err := src.FetchRegionParticipation(ctx, since, regionNames)
 	if err != nil {
 		log.Printf("scope observation: fetching region participation failed, skipping: %v", err)
 		return nil, nil, regionNames
 	}
 	scopes = make(map[string][]string, len(selected))
 	for _, n := range selected {
-		observed := corescope.ObservedScopes(participation.Scoped[strings.ToLower(n.PublicKey)])
+		observed := meshsource.ObservedScopes(participation.Scoped[strings.ToLower(n.PublicKey)])
 		if len(observed) > 0 {
 			scopes[strings.ToLower(n.PublicKey)] = observed
 		}
 	}
 	return scopes, participation.Unscoped, regionNames
+}
+
+// sourceLabel describes where the run's observations came from: the backend
+// name, and its endpoint when the config names one.
+func sourceLabel(src meshsource.Source, cfg appConfig) string {
+	name := src.Name()
+	url := cfg.source.CoreScope.APIURL
+	if name == "beacon" {
+		url = cfg.source.Beacon.APIURL
+	}
+	if url == "" {
+		return name
+	}
+	return name + " " + url
 }
 
 // repeaterInScope reports whether n is a member of region scopeName, via
@@ -99,13 +109,13 @@ func observeRepeaterScopes(ctx context.Context, client *corescope.Client, select
 // client-side, so "which repeaters are in this scope" means the same thing
 // in the per-scope coverage this generates as it does in the map's own
 // scope-filter checkboxes and popups.
-func repeaterInScope(n corescope.Node, scopeName string, observedScopes map[string][]string) bool {
+func repeaterInScope(n meshsource.Node, scopeName string, observedScopes map[string][]string) bool {
 	for _, s := range observedScopes[strings.ToLower(n.PublicKey)] {
 		if s == scopeName {
 			return true
 		}
 	}
-	return n.DefaultScope != nil && *n.DefaultScope == scopeName
+	return n.DefaultScope == scopeName
 }
 
 // scopeSlug turns a region name (e.g. "#ioi-admin") into a safe filename
@@ -343,8 +353,12 @@ func run(cfg appConfig) (err error) {
 		return err
 	}
 
-	client := corescope.NewClient(cfg.apiURL, httpClient)
-	nodes, err := client.FetchRepeaters(ctx)
+	src, err := sources.FromConfig(cfg.source)
+	if err != nil {
+		return fmt.Errorf("selecting observation backend: %w", err)
+	}
+	log.Printf("observation backend: %s", src.Name())
+	nodes, err := src.FetchRepeaters(ctx)
 	if err != nil {
 		prog.Update("error", 0, 0, err.Error())
 		return err
@@ -393,7 +407,7 @@ func run(cfg appConfig) (err error) {
 		// well before the first coverage tile exists, rather than everyone
 		// having to wait for the entire run just to see the repeater list.
 		prog.Update("fetching_reach_data", 0, 1, "Fetching observed reach data from CoreScope")
-		reachByPubkey := corescope.FetchAllReach(ctx, client, selected, cfg.calibration.ReachDays, func(done, total int) {
+		reachByPubkey := meshsource.FetchAllReach(ctx, src, selected, cfg.calibration.ReachDays, func(done, total int) {
 			prog.Update("fetching_reach_data", done, total, fmt.Sprintf("Fetching reach data (%d/%d)", done, total))
 		})
 		calResults = make([]calibration.Result, len(selected))
@@ -426,13 +440,26 @@ func run(cfg appConfig) (err error) {
 	var observedScopes map[string][]string
 	var observedUnscopedCounts map[string]int
 	var knownRegionNames []string
-	if cfg.scopeObservationEnabled {
-		prog.Update("observing_scopes", 0, 1, "Observing repeater regions from CoreScope packet transport codes")
-		observedScopes, observedUnscopedCounts, knownRegionNames = observeRepeaterScopes(ctx, client, selected, cfg.scopeObservationWindowHours)
+
+	// Region features need a COMPLETE list of regions, not merely a
+	// non-empty one: the map's region filter and the per-region rasters both
+	// present themselves as the whole set, so building them from a partial
+	// list produces a map that is quietly wrong — a missing region looks like
+	// a region with no repeaters in it. A backend that cannot enumerate them
+	// all says so, and the feature is switched off rather than half-drawn.
+	scopesAvailable := cfg.scopeObservationEnabled && src.Capabilities().ScopeCatalog
+	if cfg.scopeObservationEnabled && !scopesAvailable {
+		log.Printf("scope observation: %s cannot enumerate every region on the "+
+			"mesh, so region tagging and per-region coverage are disabled for "+
+			"this run (see meshsource.Capabilities.ScopeCatalog)", src.Name())
+	}
+	if scopesAvailable {
+		prog.Update("observing_scopes", 0, 1, "Observing repeater regions from packet transport codes")
+		observedScopes, observedUnscopedCounts, knownRegionNames = observeRepeaterScopes(ctx, src, selected, cfg.scopeObservationWindowHours)
 		prog.Update("observing_scopes", 1, 1, fmt.Sprintf("Observed region(s) for %d/%d repeaters", len(observedScopes), len(selected)))
 	}
 
-	features := buildFeatures(selected, sites, calResults, observedScopes, observedUnscopedCounts, cfg.scopeObservationEnabled, cfg)
+	features := buildFeatures(selected, sites, calResults, observedScopes, observedUnscopedCounts, scopesAvailable, cfg)
 	fc := featureCollection{Type: "FeatureCollection", Features: features}
 
 	counts := map[string]int{"active": 0, "degraded": 0, "silent": 0}
@@ -448,13 +475,18 @@ func run(cfg appConfig) (err error) {
 	}
 
 	m := meta{
-		GeneratedAt:           time.Now().UTC().Format(time.RFC3339),
-		Source:                cfg.apiURL,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		// Where this data actually came from. Previously always the CoreScope
+		// URL, whatever backend ran — so a Beacon-rendered map claimed
+		// CoreScope provenance, which is exactly the kind of quiet
+		// mislabelling that makes a stale map impossible to diagnose.
+		Source:                sourceLabel(src, cfg),
 		Boundary:              cfg.regionBoundaryLabel,
 		RequiredScope:         cfg.requiredScope,
 		TotalRepeatersFetched: len(nodes),
 		RepeatersInRegion:     len(features),
 		Counts:                counts,
+		Capabilities:          capabilities{ScopeCatalog: scopesAvailable},
 		Version:               buildinfo.Version,
 		// Seeded from whatever the last run wrote (nil on a genuine first
 		// run) so meta.json keeps showing real, servable coverage for the
@@ -579,7 +611,7 @@ func run(cfg appConfig) (err error) {
 		// there's no reliable per-repeater region membership at scale (see
 		// observeRepeaterScopes — default_scope alone is sparse in practice),
 		// so there'd be nothing meaningful to split by.
-		if cfg.scopeObservationEnabled && len(knownRegionNames) > 0 {
+		if scopesAvailable && len(knownRegionNames) > 0 {
 			if !cfg.standardRequiresGPU || engine.Available() {
 				tierStart := time.Now()
 				for i, scopeName := range knownRegionNames {

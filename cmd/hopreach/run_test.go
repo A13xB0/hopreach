@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"hopreach/internal/analytics"
-	"hopreach/internal/corescope"
+	"hopreach/internal/meshsource"
 )
 
 // TestCleanStaleGridScratch is the regression test for a real production
@@ -104,8 +104,6 @@ func TestRecordCrashedRunIfAny(t *testing.T) {
 	}
 }
 
-func strPtr(s string) *string { return &s }
-
 // TestRepeaterInScope covers the union repeaterInScope draws on — the same
 // one public/app.js's repeaterScopesOf uses client-side, so which repeaters
 // count as "in scope #x" agrees between the per-scope coverage this drives
@@ -117,31 +115,31 @@ func TestRepeaterInScope(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		node        corescope.Node
+		node        meshsource.Node
 		scope       string
 		wantInScope bool
 	}{
 		{
 			name:        "matches via inferred scopes (case-insensitive pubkey)",
-			node:        corescope.Node{PublicKey: "AA"},
+			node:        meshsource.Node{PublicKey: "AA"},
 			scope:       "#ioi",
 			wantInScope: true,
 		},
 		{
 			name:        "does not match a region the repeater's inferred set lacks",
-			node:        corescope.Node{PublicKey: "AA"},
+			node:        meshsource.Node{PublicKey: "AA"},
 			scope:       "#fif",
 			wantInScope: false,
 		},
 		{
 			name:        "matches via default_scope when not in inferred set at all",
-			node:        corescope.Node{PublicKey: "BB", DefaultScope: strPtr("#fif")},
+			node:        meshsource.Node{PublicKey: "BB", DefaultScope: "#fif"},
 			scope:       "#fif",
 			wantInScope: true,
 		},
 		{
 			name:        "no default_scope and no inferred entry never matches",
-			node:        corescope.Node{PublicKey: "CC"},
+			node:        meshsource.Node{PublicKey: "CC"},
 			scope:       "#sco",
 			wantInScope: false,
 		},

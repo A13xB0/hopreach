@@ -170,28 +170,18 @@ func decodePacketRegion(rawHex string, candidateKeys map[string][16]byte) (regio
 	if err != nil || len(raw) < 6 {
 		return "", false
 	}
-	header := raw[0]
-	routeType := int(header & 0x03)
-	if routeType != routeTypeTransportFlood && routeType != routeTypeTransportDirect {
-		return "", false
-	}
-	payloadType := (header >> 2) & 0x0F
-	if len(raw) < 5 {
+	// Structure comes from ParseFrame (frame.go) so the wire format is
+	// parsed in one place; only route types carrying a transport code have
+	// anything to decode.
+	f, ok := ParseFrame(rawHex)
+	if !ok || !f.HasTransport {
 		return "", false
 	}
 	transportCode1 := uint16(raw[1]) | uint16(raw[2])<<8 // little-endian, matching the firmware's own native uint16_t layout
-
-	pathLenByte := raw[5]
-	hopCount := int(pathLenByte & 0x3F)
-	hashSize := int(pathLenByte>>6) + 1
-	pathEnd := 6 + hopCount*hashSize
-	if pathEnd > len(raw) {
-		return "", false // malformed/truncated capture
-	}
-	payload := raw[pathEnd:]
+	payload := raw[f.PayloadOffset:]
 
 	msg := make([]byte, 0, 1+len(payload))
-	msg = append(msg, payloadType)
+	msg = append(msg, f.PayloadType)
 	msg = append(msg, payload...)
 
 	for name, key := range candidateKeys {

@@ -73,6 +73,15 @@ server {
         proxy_pass http://127.0.0.1:8081;
     }
 
+    # Mesh data, translated. The browser used to fetch a vendor's API through
+    # /corescope-api/ and parse that vendor's field names; this serves
+    # whichever backend is configured (CoreScope, Beacon, …) in one stable
+    # shape, so switching backends is a config change rather than a front-end
+    # rewrite. See internal/meshapi and docs/DATA_SOURCE_SPEC.md.
+    location /mesh-api/ {
+        proxy_pass http://127.0.0.1:8081;
+    }
+
     # Analytics data behind the /analytics page — see cmd/hopreach-shareapi's
     # handleAnalytics. Public and unauthenticated: contains no IP addresses,
     # user agents, or any other visitor-identifying data, only aggregate
@@ -101,6 +110,11 @@ server {
     # planning tools can fetch real observed neighbour data
     # (/api/nodes/:pubkey/reach) from the browser without hitting CORS —
     # CoreScope sends no Access-Control-Allow-Origin header.
+    # LEGACY passthrough. Nothing in the app uses this any more — every
+    # front-end fetch goes through /mesh-api/ (internal/meshapi), which serves
+    # whichever backend is configured in one stable shape. Kept only so an
+    # existing bookmark or external script doesn't 404; safe to delete once
+    # nothing external depends on it.
     location /corescope-api/ {
         proxy_pass {{.CoreScopeAPIURL}}/;
         proxy_set_header Host $proxy_host;

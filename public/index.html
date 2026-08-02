@@ -7,7 +7,16 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<!-- style.css was 2248 lines; it is now six, split at its own section
+     banners. LOAD ORDER IS LOAD-BEARING: the Leaflet overrides have to
+     follow Leaflet's own stylesheet, and the mobile block must stay last so
+     its phone layout still wins. Keep this order here and in analytics.html. -->
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style-planner.css">
+<link rel="stylesheet" href="style-sim-panel.css">
+<link rel="stylesheet" href="style-simulator.css">
+<link rel="stylesheet" href="style-leaflet.css">
+<link rel="stylesheet" href="style-mobile.css">
 </head>
 <body>
 <div id="app">
@@ -880,6 +889,45 @@
 <script src="propagation.js"></script>
 <script src="meshsim-scenario.js"></script>
 <script src="meshsim-bridge.js"></script>
+<!-- The single door to mesh observation data: every nodes/links/scopes/packets
+     fetch goes through it and the base path lives in one place, so switching
+     backend (CoreScope, Beacon, …) is a server config change. Loaded first —
+     app.js, planner.js and simulator.js all use it. -->
+<script src="mesh-api.js"></script>
+<!-- Frame parsing, SHA-256/HMAC and region decoding — pure byte arithmetic,
+     lifted out of simulator.js so node --test can reach it. -->
+<script src="mesh-frame.js"></script>
+<!-- The JS mirrors of internal/meshsim's config rules and topology
+     attributes, kept honest by tests/unit/sim-topology.test.mjs. -->
+<script src="sim-state.js"></script>
+<script src="sim-constants.js"></script>
+<script src="sim-topology.js"></script>
+<script src="sim-rankings.js"></script>
+<script src="sim-links.js"></script>
+<script src="sim-modals.js"></script>
+<script src="sim-window.js"></script>
+<script src="sim-nodes.js"></script>
+<script src="sim-setups.js"></script>
+<script src="sim-panel.js"></script>
+<script src="sim-nodes-modal.js"></script>
+<script src="sim-run.js"></script>
+<script src="sim-inspector.js"></script>
+<script src="sim-transport.js"></script>
+<script src="sim-map-controls.js"></script>
+<script src="sim-policy.js"></script>
+<script src="sim-optimize.js"></script>
+<script src="sim-episode.js"></script>
+<script src="sim-realtime.js"></script>
+<script src="sim-replay.js"></script>
+<script src="map-state.js"></script>
+<script src="map-responsive.js"></script>
+<script src="plan-state.js"></script>
+<script src="plan-los.js"></script>
+<script src="plan-los.js"></script>
+<script src="plan-neighbors.js"></script>
+<script src="plan-kml.js"></script>
+<script src="plan-connect.js"></script>
+<script src="plan-area.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>
 <script src="evidence.js"></script>

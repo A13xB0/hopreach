@@ -6,8 +6,8 @@ package calibration
 import (
 	"math"
 
-	"hopreach/internal/corescope"
 	"hopreach/internal/demgrid"
+	"hopreach/internal/meshsource"
 	"hopreach/internal/propagation"
 )
 
@@ -32,7 +32,7 @@ import (
 // smooth deficit-below-comfortable penalty means degrading a link's
 // margin costs something even while it's still positive, so the search
 // can no longer "hide" that kind of real quality loss.
-func scorePosition(grid *demgrid.Grid, p propagation.Params, lat, lon, groundM float64, links []corescope.ReachLink) float64 {
+func scorePosition(grid *demgrid.Grid, p propagation.Params, lat, lon, groundM float64, links []meshsource.ReachLink) float64 {
 	txHeightM := groundM + p.AntennaHeightM
 	score := 0.0
 	for _, l := range links {
@@ -86,7 +86,7 @@ const kmPerDegLat = 110.574
 // offset, at 16 angles each, each ring rotated a bit from the last so the
 // sampled points don't all line up on the same handful of compass
 // directions ring after ring.
-func Position(grid *demgrid.Grid, p propagation.Params, cal Config, origLat, origLon float64, links []corescope.ReachLink) Result {
+func Position(grid *demgrid.Grid, p propagation.Params, cal Config, origLat, origLon float64, links []meshsource.ReachLink) Result {
 	origGroundM := grid.At(origLat, origLon)
 	scoreBefore := scorePosition(grid, p, origLat, origLon, origGroundM, links)
 

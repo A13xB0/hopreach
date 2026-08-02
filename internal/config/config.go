@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +38,8 @@ type Config struct {
 	Map         MapConfig         `yaml:"map"`
 	Region      RegionConfig      `yaml:"region"`
 	CoreScope   CoreScopeConfig   `yaml:"corescope"`
+	Beacon      BeaconConfig      `yaml:"beacon"`
+	Source      SourceConfig      `yaml:"source"`
 	Terrain     TerrainConfig     `yaml:"terrain"`
 	Propagation PropagationConfig `yaml:"propagation"`
 	Coverage    CoverageConfig    `yaml:"coverage"`
@@ -95,6 +98,92 @@ type RegionConfig struct {
 	// whose default_scope matches "#"+RequiredScope. Empty (the default)
 	// keeps every repeater inside the boundary regardless of scope.
 	RequiredScope string `yaml:"required_scope"`
+}
+
+// BeaconConfig points at a MeshCore Beacon server as an alternative source of
+// repeater nodes, observed links and packets
+// (docs/BEACON_COMPATIBILITY_PLAN.md). Disabled unless Enabled is set, in
+// which case it replaces CoreScope as the data source.
+// SourceConfig selects which observation backend HopReach reads from.
+//
+// One explicit choice, rather than a flag on one of the two backends: an
+// `enabled` bool inside `beacon:` made an either/or read like an add-on, and
+// left "both configured" meaning something only the factory's ordering
+// decided.
+type SourceConfig struct {
+	// Type is "corescope" or "beacon". Empty means corescope, which is what
+	// every deployment predating this key is running.
+	Type string `yaml:"type"`
+
+	// Scopes is the complete list of MeshCore regions on this network, e.g.
+	// ["#sco", "#fif"]. Optional, and only needed when the backend cannot
+	// enumerate them itself.
+	//
+	// The region features present themselves as the whole set, so a partial
+	// list makes them quietly wrong — a missing region reads as a region with
+	// no repeaters in it. Beacon's own /scopes is scoped to local observers
+	// and so is usually a subset, which is why those features are off there
+	// by default. Listing the regions here supplies what the backend cannot
+	// and switches them back on.
+	//
+	// This is enumeration only. Which packets belong to which region is still
+	// decoded from real traffic; a region listed here that nobody has been
+	// heard on simply gets no observations.
+	Scopes []string `yaml:"scopes"`
+}
+
+// SourceType names a backend. Kept as constants so a typo in config.yaml is
+// rejected at load rather than silently selecting the default.
+const (
+	SourceCoreScope = "corescope"
+	SourceBeacon    = "beacon"
+)
+
+// Resolve returns the effective backend name, applying the default and the
+// deprecated beacon.enabled alias.
+func (c Config) Resolve() (string, error) {
+	t := strings.ToLower(strings.TrimSpace(c.Source.Type))
+	if t == "" {
+		// Deprecated: beacon.enabled predates source.type. Honour it so a
+		// deployed config keeps working, but source.type wins if both are set.
+		if c.Beacon.Enabled {
+			return SourceBeacon, nil
+		}
+		return SourceCoreScope, nil
+	}
+	switch t {
+	case SourceCoreScope, SourceBeacon:
+		return t, nil
+	default:
+		return "", fmt.Errorf(
+			"config: source.type %q is not a known backend (want %q or %q)",
+			c.Source.Type, SourceCoreScope, SourceBeacon)
+	}
+}
+
+type BeaconConfig struct {
+	// Deprecated: use source.type: beacon. Still honoured when source.type
+	// is unset so an existing config.yaml keeps working — see Config.Resolve.
+	Enabled bool   `yaml:"enabled"`
+	APIURL  string `yaml:"api_url"`
+
+	// IATAs is REQUIRED when enabled. Beacon partitions the world by
+	// 3-letter IATA code, and an unfiltered client pulls every network the
+	// server observes — calibrating a local map against links on another
+	// continent produces a plausible, wrong result. Startup fails rather
+	// than defaulting.
+	IATAs []string `yaml:"iatas"`
+
+	RequestTimeoutSeconds float64 `yaml:"request_timeout_seconds"`
+
+	// ReachStaleDays ages out neighbour edges. Beacon never deletes an edge
+	// when it stops being reported, so without this, calibration is fed
+	// links that no longer exist.
+	ReachStaleDays int `yaml:"reach_stale_days"`
+
+	// DetailConcurrency bounds the packet-detail fan-out used to recover
+	// resolved paths (Beacon omits them from list responses by design).
+	DetailConcurrency int `yaml:"detail_concurrency"`
 }
 
 // CoreScopeConfig points at the CoreScope instance to pull repeater nodes
@@ -281,6 +370,12 @@ func Default() Config {
 		},
 		Region: RegionConfig{
 			RequiredScope: "",
+		},
+		Beacon: BeaconConfig{
+			Enabled:               false,
+			RequestTimeoutSeconds: 30,
+			ReachStaleDays:        14,
+			DetailConcurrency:     8,
 		},
 		CoreScope: CoreScopeConfig{
 			APIURL:                "https://scotmesh-corescope.mm7roq.compute.oarc.uk",

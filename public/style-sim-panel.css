@@ -1,0 +1,388 @@
+/* ======================================================================
+   Simulate panel: workflow rail, Basic/Advanced tiering, accordions,
+   and the neighbour list both panels share.
+   ====================================================================== */
+
+/* --- Simulate panel: workflow rail, Basic/Advanced tiering, accordions -
+   The panel used to be one long scroll through ~9 workflows at equal
+   visual weight. This groups them into named, collapsible sections; a
+   rail above tracks real progress through the four that make a run
+   possible; a tier toggle defers the rest (policy search, the optimizer,
+   stress test) until asked for. Nothing here removes a control or
+   changes what it does — see simulator.js's updateWorkflowState/setSimTier. */
+
+.sim-acc {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+  background: rgba(255,255,255,0.02);
+}
+.sim-acc-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: none;
+  border: none;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+}
+/* Measured live at ~32px — under the ~44px touch-target guideline.
+   Desktop stays as-is. */
+@media (max-width: 700px) {
+  .sim-acc-head { min-height: 44px; }
+}
+.sim-acc-title { flex: 1; font-size: 0.85rem; font-weight: 600; }
+.sim-acc-head:hover .sim-acc-title { color: var(--accent); }
+.sim-acc-badge { font-size: 0.68rem; color: var(--text-muted); white-space: nowrap; }
+.sim-acc-chevron { font-size: 0.65rem; color: var(--text-muted); transition: transform 0.15s; flex-shrink: 0; }
+.sim-acc.open .sim-acc-chevron { transform: rotate(90deg); }
+.sim-acc-body { padding: 0 0.7rem 0.65rem; display: none; }
+.sim-acc.open .sim-acc-body { display: block; }
+/* An accordion body's own contents (plan-row/plan-field-row/buttons)
+   inherit the existing #sim-panel-scoped rules further up this file —
+   nothing about being inside .sim-acc-body changes their own styling. */
+
+.sim-rail {
+  display: flex;
+  align-items: center;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+}
+.sim-rail-step {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+  padding: 0.1rem 0.15rem;
+}
+/* Measured live at ~30px — under the ~44px touch-target guideline.
+   Desktop stays as-is. */
+@media (max-width: 700px) {
+  .sim-rail-step { min-height: 44px; }
+}
+.sim-rail-step:hover { color: var(--text); }
+.sim-rail-dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--text-muted); flex-shrink: 0; }
+.sim-rail-step.done { color: var(--status-active); }
+.sim-rail-step.done .sim-rail-dot { background: var(--status-active); border-color: var(--status-active); }
+.sim-rail-step.now { color: var(--text); font-weight: 700; }
+.sim-rail-step.now .sim-rail-dot { background: var(--accent); border-color: var(--accent); }
+.sim-rail-link { width: 0.9rem; height: 1px; background: var(--border); margin: 0 0.3rem; flex-shrink: 0; }
+
+.sim-tier-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+.sim-tier-label { font-size: 0.72rem; color: var(--text-muted); }
+.sim-tier-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem;
+  background: rgba(255,255,255,0.03);
+}
+.sim-tier-seg button {
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sim-tier-seg button.on { background: var(--accent); color: #fff; }
+
+/* Hidden, not removed — see setSimTier in simulator.js. */
+.sim-advanced-only { display: none; }
+.sim-workspace.tier-advanced .sim-advanced-only { display: block; }
+
+/* The tool's own strongest credibility signal (replaying its model
+   against real production traffic) gets a visually distinct treatment at
+   every tier, rather than a plain section heading at the very bottom of
+   the panel — cyan, the same colour the replay's own "observed" traffic
+   already uses on the map, not a new accent. */
+.sim-promoted {
+  border: 1px solid #22d3ee;
+  background: linear-gradient(180deg, rgba(34,211,238,0.08), rgba(34,211,238,0) 60%);
+  border-radius: 8px;
+  padding: 0.75rem 0.8rem;
+  margin: 1rem 0;
+}
+.sim-promoted-eyebrow {
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #22d3ee;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+}
+.sim-promoted-title { margin: 0 0 0.35rem; font-size: 0.95rem; color: var(--text); }
+.sim-promoted-body { margin: 0 0 0.6rem; font-size: 0.76rem; color: var(--text-muted); line-height: 1.5; }
+/* Default link blue barely read against this card's own dark background —
+   white/bold/underlined stands out the way an inline link inside a muted
+   paragraph needs to, without competing with the cyan eyebrow/border. */
+.sim-promoted-body a {
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sim-promoted-body a:hover { color: #22d3ee; }
+
+/* Phase 6 Tier 2/3 — the "Advanced (experimental)" optimizer toggles are a
+   plain native <details>, deliberately: it's a genuinely optional, rarely-
+   needed section (the plan's own advice is to try at most one of these at
+   a time), and a native disclosure widget needs no JS open/close wiring. */
+#sim-optimize-advanced {
+  margin: 0.5rem 0;
+  font-size: 0.78rem;
+}
+#sim-optimize-advanced summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0.3rem 0;
+}
+#sim-optimize-advanced[open] summary {
+  color: var(--text);
+}
+
+#companion-pin-height-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+#companion-pin-height {
+  width: 4rem;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.72rem;
+}
+
+.plan-section-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin: 0.6rem 0 0.3rem;
+}
+
+.sim-subsection-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0.6rem 0 0.15rem;
+}
+
+.plan-list { display: flex; flex-direction: column; gap: 0.3rem; }
+.plan-empty { font-size: 0.75rem; color: var(--text-muted); font-style: italic; }
+
+.plan-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255,255,255,0.04);
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.75rem;
+}
+.plan-item-label { font-weight: 600; }
+.plan-item-sub { color: var(--text-muted); font-size: 0.68rem; flex: 1; }
+
+/* Shown instead of rendering every row of a long list up front (item 10E —
+   a dense run can produce thousands of receptions) — see
+   LONG_LIST_ROW_CAP/appendShowAllButton in simulator.js. */
+.sim-show-all-btn {
+  align-self: center;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  padding: 0.3rem 0.8rem;
+}
+
+/* item 10C — discrete labelled figures replacing a run-on summary sentence
+   (see renderStatStrip in simulator.js), so the number that matters reads
+   at a glance instead of competing with the rest of the sentence. */
+.sim-stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.sim-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: rgba(255,255,255,0.04);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  min-width: 4.5rem;
+}
+.sim-stat-value { font-size: 1.05rem; font-weight: 700; line-height: 1.1; }
+.sim-stat-label { font-size: 0.65rem; color: var(--text-muted); }
+.sim-stat.sim-stat-bad .sim-stat-value { color: #f87171; }
+.sim-stat.sim-stat-bad { background: rgba(248,113,113,0.12); }
+.plan-item-actions { display: flex; gap: 0.2rem; }
+.plan-item-actions button {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+}
+
+.plan-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.plan-field-row input[type="number"] {
+  width: 4rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.75rem;
+}
+
+.plan-connect-option {
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.plan-connect-option:hover {
+  background: rgba(255,255,255,0.08);
+}
+.plan-connect-option.selected {
+  border-color: #4ade80;
+  background: rgba(74,222,128,0.12);
+}
+.plan-connect-option .plan-item-actions button {
+  background: #4ade80;
+  border-color: #4ade80;
+  color: #0b1220;
+  font-weight: 600;
+}
+
+.plan-hop-result {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 0.15rem 0.6rem;
+}
+
+#plan-share-result {
+  font-size: 0.72rem;
+  background: rgba(255,255,255,0.05);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.6rem;
+  word-break: break-all;
+}
+#plan-share-result a { color: var(--accent); }
+#plan-share-result.hidden { display: none; }
+
+.planned-marker-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #a855f7;
+  border: 2px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+.companion-pin-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: #f97316;
+  border: 2px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+/* A personal, local-only repositioning of a real repeater — distinct from
+   both the purple "new planned site" dot and the orange companion pin, so
+   all three read as different things at a glance. Never replaces the real
+   repeater's own marker; see the dashed connector below. */
+.override-marker-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #f59e0b;
+  border: 2px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+/* --- neighbours --- */
+
+.plan-item-neighbors {
+  cursor: default;
+}
+
+.leaflet-tooltip.neighbor-tooltip-wrap {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+.leaflet-tooltip.neighbor-tooltip-wrap::before {
+  display: none;
+}
+
+.neighbor-tooltip {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.72rem;
+  max-width: 240px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+.neighbor-tooltip-title { font-weight: 700; margin-bottom: 0.1rem; }
+.neighbor-tooltip-sub { color: var(--text-muted); font-size: 0.68rem; margin-bottom: 0.35rem; }
+.neighbor-tooltip ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.neighbor-tooltip li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nb-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.nb-dot.nb-strong { background: #4ade80; }
+.nb-dot.nb-marginal { background: #facc15; }
+.nb-dot.nb-weak { background: #f87171; }

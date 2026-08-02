@@ -1,0 +1,31 @@
+# Beacon instance for HopReach's backend-parity testing.
+#
+# Scotland only: ScotMesh is what the migrated CoreScope data describes, and
+# Beacon partitions the world by IATA, so the codes here define which nodes
+# HopReach's beacon client is allowed to see.
+iatas:
+  EDI:
+    name: Edinburgh
+    lat: 55.9500
+    lng: -3.3725
+  GLA:
+    name: Glasgow
+    lat: 55.8719
+    lng: -4.4331
+  ABZ:
+    name: Aberdeen
+    lat: 57.2019
+    lng: -2.1978
+  INV:
+    name: Inverness
+    lat: 57.5425
+    lng: -4.0475
+
+regions:
+  - slug: scotland
+    name: Scotland
+    display_order: 1
+    center_lat: 56.8
+    center_lng: -4.2
+    zoom_level: 6
+    iatas: [EDI, GLA, ABZ, INV]

@@ -49,6 +49,8 @@ type ReachLink struct {
 	Lon        *float64 `json:"lon"`
 	Bottleneck int      `json:"bottleneck"`
 	Bidir      bool     `json:"bidir"`
+	WeHear     int      `json:"we_hear"`
+	TheyHear   int      `json:"they_hear"`
 }
 
 type reachResponse struct {

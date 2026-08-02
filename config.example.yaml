@@ -277,3 +277,31 @@ remote_worker:
   # Precision-tier job on a worker with a cold DEM tile cache can spend
   # several minutes just fetching tiles before GPU compute even starts.
   job_timeout_seconds: 1800
+
+# ── Alternative data source: MeshCore Beacon ─────────────────────────────────
+# HopReach normally reads a CoreScope instance (see `corescope:` above). A
+# MeshCore Beacon server can be used instead — see
+# docs/BEACON_COMPATIBILITY_PLAN.md for what differs and what to verify first.
+#
+# Selection is explicit: nothing changes until `enabled: true`, so a
+# half-filled block can't silently swap the data underneath a map.
+beacon:
+  enabled: false
+  api_url: "https://beacon.example.org"
+
+  # REQUIRED when enabled, no default. Beacon partitions the world by 3-letter
+  # IATA code; an unfiltered client pulls every network the server observes,
+  # and calibrating a local map against links on another continent produces a
+  # plausible, wrong result. Startup fails rather than guessing.
+  iatas: ["EDI"]
+
+  request_timeout_seconds: 30
+
+  # Ages out observed neighbour edges. Beacon never deletes an edge when it
+  # stops being reported, so without this, calibration is fed links that no
+  # longer exist.
+  reach_stale_days: 14
+
+  # Bounds the packet-detail fan-out used to recover resolved paths (Beacon
+  # omits them from list responses by design). This is someone else's server.
+  detail_concurrency: 8
