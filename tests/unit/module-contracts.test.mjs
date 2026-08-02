@@ -193,3 +193,37 @@ test("modules read shared state from SimState, not from a private copy", () => {
     }
   }
 });
+
+// A meta-test on the reference checker itself.
+//
+// The checker missed every bare assignment for a while, because acorn-walk
+// reports an assignment target as a VariablePattern rather than an
+// Identifier. In a non-strict script `foo = 1` on an undeclared name creates
+// a global instead of throwing, so 98 broken writes to lifted simulator state
+// passed review and passed the checker. This pins the hole shut.
+test("the reference checker catches an implicit global", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { writeFileSync, mkdtempSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+
+  const dir = mkdtempSync(join(tmpdir(), "refcheck-"));
+  const good = join(dir, "good.js");
+  const bad = join(dir, "bad.js");
+  writeFileSync(good, "(function(){ let x = 1; x = 2; return x; })();\n");
+  writeFileSync(bad, "(function(){ oopsUndeclared = 2; })();\n");
+
+  const run = (f) => {
+    try {
+      execFileSync("node", ["tools/check_module_refs.mjs", f], { encoding: "utf8" });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, out: e.stdout || "" };
+    }
+  };
+
+  assert.ok(run(good).ok, "a declared-then-assigned local must pass");
+  const badRun = run(bad);
+  assert.ok(!badRun.ok, "an assignment to an undeclared name must fail the check");
+  assert.match(badRun.out, /oopsUndeclared/);
+});

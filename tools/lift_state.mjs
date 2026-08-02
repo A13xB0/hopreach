@@ -72,8 +72,19 @@ if (shadows.length) {
 }
 
 // Collect every reference to rewrite.
+//
+// BOTH visitors are required. acorn-walk reports an assignment TARGET as a
+// VariablePattern, not an Identifier, so an Identifier-only walk rewrites
+// every read and no write — and in a non-strict script the surviving
+// `foo = 1` quietly creates a global rather than throwing. See
+// tools/fix_state_assignments.mjs, which repaired 170 of exactly that.
 const edits = [];
 ancestor(ast, {
+  VariablePattern(node) {
+    if (!names.has(node.name)) return;
+    if (topLevelDeclNodes.has(node)) return;
+    edits.push({ start: node.range[0], end: node.range[1], text: `S.${node.name}` });
+  },
   Identifier(node, _s, ancestors) {
     if (!names.has(node.name)) return;
     if (topLevelDeclNodes.has(node)) return; // the declaration itself

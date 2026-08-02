@@ -80,7 +80,16 @@ function collectBindings(ast) {
 
 function freeIdentifiers(ast, bound) {
   const free = new Map();
+  const report = (node) => {
+    if (bound.has(node.name) || KNOWN.has(node.name)) return;
+    if (!free.has(node.name)) free.set(node.name, node.loc.start.line);
+  };
   ancestor(ast, {
+    // acorn-walk reports assignment targets as VariablePattern, NOT
+    // Identifier. Missing this hid every `foo = 1` where foo was never
+    // declared — which in a non-strict script silently creates a global
+    // instead of failing, so it is exactly the case worth catching.
+    VariablePattern(node) { report(node); },
     Identifier(node, _state, ancestors) {
       const parent = ancestors[ancestors.length - 2];
       if (!parent) return;
@@ -90,8 +99,7 @@ function freeIdentifiers(ast, bound) {
       if (parent.type === "MethodDefinition" && parent.key === node) return;
       if (parent.type === "LabeledStatement" || parent.type === "BreakStatement" ||
           parent.type === "ContinueStatement") return;
-      if (bound.has(node.name) || KNOWN.has(node.name)) return;
-      if (!free.has(node.name)) free.set(node.name, node.loc.start.line);
+      report(node);
     },
   });
   return free;
