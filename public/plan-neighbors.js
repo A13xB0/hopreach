@@ -114,7 +114,11 @@
       .map((n) => {
         const cls = neighborQualityClass(n, true);
         const detail = n.bidir ? "bidirectional" : "one-way heard";
-        return `<li><span class="nb-dot ${cls}"></span>${escapeHtml(n.label || n.id.slice(0, 8))} — ${n.distanceKm.toFixed(1)}km, ${detail}</li>`;
+        // Same guard the hover tooltip has always had. Without it an unknown
+        // distance threw here — *after* the lines were drawn — so the popup
+        // showed "Could not load neighbours" over a map full of them.
+        const distance = n.distanceKm == null ? "distance unknown" : `${n.distanceKm.toFixed(1)}km`;
+        return `<li><span class="nb-dot ${cls}"></span>${escapeHtml(n.label || n.id.slice(0, 8))} — ${distance}, ${detail}</li>`;
       })
       .join("");
     return `
@@ -173,7 +177,7 @@
     const results = await Promise.all(
       repeaters.map(async (r) => {
         try {
-          return { r, neighbors: await fetchRealNeighbors(r.id) };
+          return { r, neighbors: withDistance(await fetchRealNeighbors(r.id), r) };
         } catch {
           return { r, neighbors: [] }; // one repeater's fetch failing shouldn't blank out the rest
         }
@@ -209,6 +213,26 @@
     // cheap to keep in case the user flips back.
   }
 
+  // Distance from a source point to each neighbour, in km.
+  //
+  // Derived here rather than taken from the backend: it is pure geometry over
+  // two positions both sides already report, so deriving it works identically
+  // on every backend and cannot go stale. /mesh-api/'s link shape carries no
+  // distance at all, which is why every neighbour read "distance unknown".
+  //
+  // A neighbour with no position keeps a null distance — genuinely unknown,
+  // and rendered as such rather than as a fabricated 0km.
+  function withDistance(neighbors, src) {
+    if (!src) return neighbors;
+    return neighbors.map((n) => ({
+      ...n,
+      distanceKm:
+        n.lat == null || n.lon == null
+          ? null
+          : Propagation.haversineKm(src.lat, src.lng ?? src.lon, n.lat, n.lon),
+    }));
+  }
+
   async function fetchRealNeighbors(pubkey) {
     const cacheKey = `${pubkey}:${S.reachWindowDays}`;
     if (realNeighborCache.has(cacheKey)) return realNeighborCache.get(cacheKey);
@@ -221,7 +245,6 @@
           isReal: true,
           lat: l.lat,
           lon: l.lon,
-          distanceKm: l.distance_km,
           bidir: !!l.bidir,
         }))
       )
@@ -348,7 +371,8 @@
           const token = ++hoverToken;
           showNeighborHighlight(marker.getLatLng(), props.name || "Repeater", [], true, true);
           try {
-            const neighbors = await fetchRealNeighbors(props.public_key);
+            const neighbors = withDistance(
+              await fetchRealNeighbors(props.public_key), marker.getLatLng());
             if (token !== hoverToken || marker.isPopupOpen()) return; // mouse left, or a click opened the popup meanwhile
             showNeighborHighlight(marker.getLatLng(), props.name || "Repeater", neighbors, true, false);
           } catch {
@@ -396,7 +420,8 @@
       clearNeighborHighlight();
       marker.setPopupContent(window.MCCoverageMap.popupHtml(props) + neighborSectionHtml([], true));
       try {
-        const neighbors = await fetchRealNeighbors(props.public_key);
+        const neighbors = withDistance(
+          await fetchRealNeighbors(props.public_key), marker.getLatLng());
         if (S.pinnedPubkey !== null && S.pinnedPubkey !== props.public_key) return; // a different popup took over
         S.pinnedPubkey = props.public_key;
         drawNeighborLines(pinnedNeighborLayer, marker.getLatLng(), neighbors, true);

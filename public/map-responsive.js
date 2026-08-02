@@ -421,6 +421,10 @@
     ({ NARROW_VIEWPORT_PX, map } = context);
     layersControl = L.control.layers(
       baseLayers, {}, { collapsed: true, position: "topright" }).addTo(map);
+    // The api literal below is evaluated at module load, when this is still
+    // undefined, so publishing it has to happen here — after it exists and
+    // before init() returns the object the caller destructures.
+    api.layersControl = layersControl;
     bindDom();
     return api;
   }
@@ -429,7 +433,8 @@
     init,
     darkRoads,
     initialBasemap,
-    layersControl,
+    // layersControl is filled in by init(); see the note there.
+    layersControl: undefined,
   };
   return api;
 });
