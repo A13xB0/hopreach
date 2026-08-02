@@ -122,22 +122,29 @@ const moduleFiles = readdirSync("public")
 
 const sites = initCallSites();
 
+// Hosts plus every extracted module, for "is anything using this at all?".
+// The init()-contract checks below still look only at the hosts, since that
+// handshake is what they are about.
+const allLoadedSrc = allHostSrc + "\n" + moduleFiles.map((f) => readFileSync(f, "utf8")).join("\n");
+
 test("every extracted simulator module is actually wired up", () => {
   assert.ok(moduleFiles.length > 0, "no sim-*.js modules found — did the glob break?");
   for (const file of moduleFiles) {
     const { globalName, returns } = moduleContract(file);
     assert.ok(globalName, `${file}: does not register itself on root`);
     // Two shapes are in use. A module that needs simulator helpers takes them
-    // through init(); a pure one (sim-topology.js) is called directly. Either
-    // is fine — being referenced by nothing is not.
-    // A module taking helpers is wired through init(); a pure one is simply
-    // called by name, with or without the window. prefix.
+    // through init(); a pure one (sim-topology.js, plan-preview-geometry.js)
+    // is called directly. Either is fine — being referenced by nothing is not.
+    //
+    // A pure module may be used by another module rather than by a host
+    // (plan-preview.js is the only caller of plan-preview-geometry.js), so
+    // that search covers every script the page loads, not just the hosts.
     const wired = returns.has("init")
       ? sites.has(globalName)
-      : new RegExp(`\\b${globalName}\\b`).test(allHostSrc);
+      : new RegExp(`\\b${globalName}\\b`).test(allLoadedSrc);
     assert.ok(
       wired,
-      `${file}: no host file references window.${globalName} — the ` +
+      `${file}: nothing the page loads references window.${globalName} — the ` +
         `module is dead code, or the page still expects it on the old path`
     );
   }

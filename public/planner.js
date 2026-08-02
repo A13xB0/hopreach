@@ -10,8 +10,6 @@
   const STORAGE_KEY = "hopreach.plans";
   const CONNECT_MAX_NEW_KEY = "hopreach.connectMaxNew";
   const AREA_MAX_NEW_KEY = "hopreach.areaMaxNew";
-  const PREVIEW_WIDTH = 320;
-  const DEBOUNCE_MS = 400;
 
                     // Below this the hop is over the demodulation threshold but has
   // essentially no headroom for ordinary fading — worth flagging even when
@@ -251,7 +249,7 @@
   // Renders as a separate amber marker plus a dashed line back to the
   // repeater's real position; the official marker (app.js, driven by the
   // server data) is never hidden or replaced. Feeds into the same
-  // coverage-preview worker as planned repeaters (see runCoveragePreview),
+  // coverage-preview workers as planned repeaters (see plan-preview.js),
   // which is the literal "browser recalculates the coverage" ask.
 
   function findOverride(pubkey) {
@@ -379,56 +377,11 @@
         else if (msg.type === "error") setAreaStatus(msg.message);
         return;
       }
-      if (msg.generation != null && msg.generation !== S.previewGeneration) {
-        return; // superseded by a newer request — discard
-      }
-      if (msg.type === "status" || msg.type === "progress") {
-        const status = document.getElementById("plan-coverage-status");
-        status.classList.remove("hidden");
-        status.textContent = msg.type === "progress" ? `Computing preview: row ${msg.done}/${msg.total}` : msg.message;
-      } else if (msg.type === "result") {
-        document.getElementById("plan-coverage-status").classList.add("hidden");
-        renderPreviewResult(msg);
-      } else if (msg.type === "error") {
-        const status = document.getElementById("plan-coverage-status");
-        status.classList.remove("hidden");
-        status.textContent = `Preview failed: ${msg.message}`;
-      }
+      // The coverage preview runs on its own pool of workers (see
+      // plan-preview.js), not this one — this worker only serves the tools
+      // that are a single job each.
     };
     return S.worker;
-  }
-
-  function scheduleCoveragePreview() {
-    clearTimeout(S.debounceTimer);
-    S.debounceTimer = setTimeout(runCoveragePreview, DEBOUNCE_MS);
-  }
-
-  function runCoveragePreview() {
-    // Tag this request with a generation number and have the worker echo
-    // it back. The debounce only spaces out when requests are *sent* — it
-    // doesn't stop an old request (e.g. from before a repeater was
-    // deleted) from still being mid-computation when a newer one starts,
-    // and a Web Worker with an async onmessage handler can process a
-    // second message before the first's awaits resolve. Without this
-    // check, a slow stale result can arrive after a faster new one and
-    // silently overwrite it — which is exactly why deleting a repeater
-    // could appear to leave its old coverage on the map.
-    const generation = ++S.previewGeneration;
-    if (S.plan.repeaters.length === 0 && S.plan.overrides.length === 0) {
-      if (S.previewOverlay) {
-        layersControl.removeLayer(S.previewOverlay);
-        map.removeLayer(S.previewOverlay);
-        S.previewOverlay = null;
-      }
-      return;
-    }
-    ensureWorker().postMessage({
-      generation,
-      sites: planSites(),
-      realRepeaters: effectiveRealRepeaters(),
-      config: { demTileURLBase: cfg.demTileURLBase, demZoom: cfg.demZoom, propagation: cfg.propagation },
-      imageWidth: PREVIEW_WIDTH,
-    });
   }
 
   // Overrides ride along as sites too — using the repeater's own pubkey as
@@ -458,55 +411,6 @@
       const o = findOverride(r.id);
       return o ? { ...r, lat: o.lat, lon: o.lon } : r;
     });
-  }
-
-  function renderPreviewResult(msg) {
-    if (S.previewOverlay) {
-      layersControl.removeLayer(S.previewOverlay);
-      map.removeLayer(S.previewOverlay);
-      S.previewOverlay = null;
-    }
-    S.plannedNeighborsById = msg.neighbors || {};
-    renderAllPlannedNeighbors();
-    renderRepeaterList();
-    if (msg.empty) {
-      syncCoverageToggles(); // no preview to show — reflect that in the panel's own checkbox
-      return;
-    }
-
-    const { bounds, imageWidth, imageHeight, marginGreenDb } = msg;
-    const margins = new Float32Array(msg.margins);
-    const canvas = document.createElement("canvas");
-    canvas.width = imageWidth;
-    canvas.height = imageHeight;
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.createImageData(imageWidth, imageHeight);
-
-    // Blue -> purple, distinct from the real coverage map's orange->green,
-    // so "existing" and "proposed" read as different things when both are
-    // shown at once.
-    const blue = [56, 189, 248];
-    const purple = [168, 85, 247];
-    for (let i = 0; i < margins.length; i++) {
-      const m = margins[i];
-      const p = i * 4;
-      if (Number.isNaN(m)) {
-        imgData.data[p + 3] = 0;
-        continue;
-      }
-      let t = m / marginGreenDb;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      imgData.data[p] = blue[0] + t * (purple[0] - blue[0]);
-      imgData.data[p + 1] = blue[1] + t * (purple[1] - blue[1]);
-      imgData.data[p + 2] = blue[2] + t * (purple[2] - blue[2]);
-      imgData.data[p + 3] = 190;
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    const llBounds = [[bounds.south, bounds.west], [bounds.north, bounds.east]];
-    S.previewOverlay = L.imageOverlay(canvas.toDataURL("image/png"), llBounds, { interactive: false }).addTo(map);
-    layersControl.addOverlay(S.previewOverlay, "Planned coverage (preview)");
-    syncCoverageToggles();
   }
 
   // --- coverage toggles, moved into the Plan panel itself (PLAN-01) ------
@@ -585,6 +489,21 @@
     CONNECT_MAX_NEW_KEY, MARGINAL_HOP_DB, cfg, connectLayer,
   });
 
+  // The planned-coverage overlay itself: quality choice (Fast vs Full), the
+  // worker pool that computes the raster in bands, and drawing it.
+  const {
+    previewRangeKm,
+    runCoveragePreview,
+    scheduleCoveragePreview,
+  } = window.PlanPreview.init({
+    effectiveRealRepeaters: (...a) => effectiveRealRepeaters(...a),
+    planSites: (...a) => planSites(...a),
+    renderAllPlannedNeighbors: (...a) => renderAllPlannedNeighbors(...a),
+    renderRepeaterList: (...a) => renderRepeaterList(...a),
+    syncCoverageToggles: (...a) => syncCoverageToggles(...a),
+    cfg, layersControl, map,
+  });
+
   // Cover an area: drawing the target polygon and running the auto-placer that suggests where new repeaters would do the most good.
   const {
     addAreaPoint,
@@ -596,6 +515,7 @@
     ensureWorker: (...a) => ensureWorker(...a),
     escapeHtml: (...a) => escapeHtml(...a),
     planSites: (...a) => planSites(...a),
+    previewRangeKm: (...a) => previewRangeKm(...a),
     randomId: (...a) => randomId(...a),
     redrawPlannedMarkers: (...a) => redrawPlannedMarkers(...a),
     renderRepeaterList: (...a) => renderRepeaterList(...a),

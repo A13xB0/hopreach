@@ -398,6 +398,22 @@ used to be a hand-ported, independently-drifting JS reimplementation of
 that same physics — the browser and the server now agree by construction,
 not by careful manual porting.
 
+The planned-coverage raster crosses that boundary once per horizontal band
+rather than once per pixel, through `propagation.ComputeMarginsRows` — the
+same row loop `ComputeMarginsCPU` runs server-side, pinned to it by
+`TestComputeMarginsRowsMatchesFullRaster`. Two reasons. It removed the last
+JS re-derivation of `marginsRow` from the frontend; and the crossing itself
+is expensive — measured in desktop Chrome, a `pathMargin` call costs ~13.6µs
+of `syscall/js` argument marshalling and registry locking before it does any
+physics at all, against ~62µs of real work for a full-length 300-sample
+profile. Paying that per pixel threw away nearly a fifth of a raster's time.
+
+Bands also exist because Go compiled to WebAssembly has no thread
+parallelism (`runtime.NumCPU()` is 1, so `ComputeMarginsCPU`'s goroutines
+all share one thread). A full-range preview is ~30s in one worker and ~6s
+split across a pool of them, each computing its own band — see
+`public/plan-preview.js`.
+
 The split follows one rule: anything that's actually *domain logic* (the
 propagation model, the terrarium elevation-decode formula, the grid's
 bilinear interpolation) runs through the shared Go/WASM module; anything
@@ -580,6 +596,7 @@ public/
   wasm-bridge.js, wasm_exec.js*, hopreach.wasm*   Go/WebAssembly runtime + the compiled module (*generated, not committed — see Local development)
   terrain.js, propagation.js   thin JS bindings over the WASM module, plus tile fetch/cache (browser fetch + canvas decode)
   planner.js, planner-worker.js   the planning UI (add-repeater, personal adjustments, line-of-sight, connect repeaters, cover an area, save/load/export/import/share, KML export, companion pin)
+  plan-preview.js, plan-preview-geometry.js   the planned-coverage overlay: Fast vs Full detail, and the Web Worker pool that computes the raster in bands (geometry is pure and unit-tested; see tests/unit/plan-preview-geometry.test.mjs)
 docker/
   entrypoint.sh          mkdir → hopreach -prepare → cron+tail → background initial run → background share API → exec nginx
   default.conf.template   nginx config (rendered by -prepare): static site, /dem-tiles proxy, /api/plans + /gpu-worker proxies, gzip + MIME for the .wasm module

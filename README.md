@@ -119,7 +119,12 @@ anywhere, and it uses the same physics as the real map.
 - **Add a repeater** — click to drop a site and watch its predicted coverage
   appear in blue→purple, deliberately distinct from the real map's
   orange→green so proposed and existing never blur together. Drag it around
-  and the prediction follows.
+  and the prediction follows. **Preview detail** picks how the prediction is
+  computed: *Fast* is a quick estimate on coarser terrain, capped at 35km;
+  *Full* searches the whole link budget (~78km on the default settings) at
+  the same terrain detail and resolution the nightly map uses, so a proposed
+  site's coverage is directly comparable with a real one's. Full takes a few
+  seconds and fills in band by band as it computes.
 - **Check line of sight** — click a chain of points and get each hop drawn
   by margin: green clear, orange marginal, red blocked, with distances and
   dB in the panel.

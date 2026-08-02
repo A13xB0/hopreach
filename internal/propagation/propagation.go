@@ -158,9 +158,12 @@ func PathMargin(grid Grid, p Params, txLat, txLon, txHeightM, rxLat, rxLon, dist
 	return received - p.RxSensitivityDB - p.FadeMarginDB
 }
 
-func marginsRow(margins []float32, py, imageWidth, imageHeight int, bounds Bounds, grid Grid, sites []Site, rangeKm float64, p Params) {
+// marginsRow fills row py of the raster described by bounds/imageWidth/
+// imageHeight. `row` is that row's destination and must be imageWidth long —
+// where it sits in a larger buffer is the caller's business, which is what
+// lets ComputeMarginsRows hand back a band without renumbering anything.
+func marginsRow(row []float32, py, imageWidth, imageHeight int, bounds Bounds, grid Grid, sites []Site, rangeKm float64, p Params) {
 	lat := bounds.North - (float64(py)+0.5)/float64(imageHeight)*(bounds.North-bounds.South)
-	rowOffset := py * imageWidth
 	for px := 0; px < imageWidth; px++ {
 		lon := bounds.West + (float64(px)+0.5)/float64(imageWidth)*(bounds.East-bounds.West)
 
@@ -177,11 +180,44 @@ func marginsRow(margins []float32, py, imageWidth, imageHeight int, bounds Bound
 		}
 
 		if bestMargin < 0 {
-			margins[rowOffset+px] = float32(math.NaN()) // no repeater reaches this point with positive margin
+			row[px] = float32(math.NaN()) // no repeater reaches this point with positive margin
 			continue
 		}
-		margins[rowOffset+px] = float32(bestMargin)
+		row[px] = float32(bestMargin)
 	}
+}
+
+// ComputeMarginsRows computes rows [rowStart, rowEnd) of the raster
+// ComputeMarginsCPU would produce, returning just that band
+// (imageWidth*(rowEnd-rowStart) long, row-major, band-relative).
+//
+// bounds and imageHeight still describe the WHOLE raster, so a band is
+// byte-for-byte the same pixels the full computation would have put there —
+// slicing changes nothing about the geometry.
+//
+// This exists for the browser. Go compiled to WebAssembly has no real thread
+// parallelism (runtime.NumCPU() is 1, so ComputeMarginsCPU's goroutines all
+// share one thread), and the plan-mode coverage preview is far too slow
+// single-threaded at full range. The frontend instead shards a raster across
+// several Web Workers and has each compute a band through here — the same
+// per-pixel code the server's own map runs, rather than a JS re-derivation
+// of it.
+func ComputeMarginsRows(grid Grid, sites []Site, bounds Bounds, imageWidth, imageHeight, rowStart, rowEnd int, rangeKm float64, p Params) []float32 {
+	if rowStart < 0 {
+		rowStart = 0
+	}
+	if rowEnd > imageHeight {
+		rowEnd = imageHeight
+	}
+	if rowEnd <= rowStart {
+		return nil
+	}
+	band := make([]float32, imageWidth*(rowEnd-rowStart))
+	for py := rowStart; py < rowEnd; py++ {
+		off := (py - rowStart) * imageWidth
+		marginsRow(band[off:off+imageWidth], py, imageWidth, imageHeight, bounds, grid, sites, rangeKm, p)
+	}
+	return band
 }
 
 // ComputeMarginsCPU is the trusted reference implementation every other
@@ -209,7 +245,7 @@ func ComputeMarginsCPU(grid Grid, sites []Site, bounds Bounds, imageWidth, image
 		go func() {
 			defer wg.Done()
 			for py := range rows {
-				marginsRow(margins, py, imageWidth, imageHeight, bounds, grid, sites, rangeKm, p)
+				marginsRow(margins[py*imageWidth:(py+1)*imageWidth], py, imageWidth, imageHeight, bounds, grid, sites, rangeKm, p)
 				mu.Lock()
 				done++
 				if progress != nil {
