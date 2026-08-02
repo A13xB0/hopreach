@@ -15,16 +15,7 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  let ctx = null;
-
-  // Live state. These are getters because the simulator replaces the whole
-  // array on each run; capturing the value at init would pin the first one.
-  const lastMessages = () => ctx.lastMessages();
-  const lastRunMaxTimeMs = () => ctx.lastRunMaxTimeMs();
-  const simLinks = () => ctx.simLinks();
-  const simNodes = () => ctx.simNodes();
-  const transmissionIndex = () => ctx.transmissionIndex();
-  const relayCauseIndex = () => ctx.relayCauseIndex();
+  const S = window.SimState;
 
   // Helpers, stable for the page's lifetime.
   let canRelay, effectiveDenyUnscoped, effectiveRegions, escapeHtml, map;
@@ -67,7 +58,7 @@
   // gates (it always "sends," regardless of its own relay/region config).
   function computeReachableSet(originIndex, region) {
     const adj = new Map();
-    for (const l of simLinks()) {
+    for (const l of S.simLinks) {
       if (!adj.has(l.from)) adj.set(l.from, []);
       adj.get(l.from).push(l.to);
     }
@@ -76,7 +67,7 @@
     while (queue.length > 0) {
       const current = queue.shift();
       if (current !== originIndex) {
-        const node = simNodes()[current];
+        const node = S.simNodes[current];
         if (!node) continue;
         const regions = effectiveRegions(node);
         const accepts = region === "" ? !effectiveDenyUnscoped(node) : regions.includes("*") || regions.includes(region);
@@ -99,7 +90,7 @@
   // uniqueDeliveries/redundantRelays from attributing each canonical
   // delivery to whichever transmission actually caused it.
   function computeRankings(report) {
-    const perNode = simNodes().map(() => ({
+    const perNode = S.simNodes.map(() => ({
       successCount: 0,
       collisionCount: 0,
       contentionCaused: 0,
@@ -157,17 +148,17 @@
       }
     }
 
-    for (const [key, tx] of transmissionIndex()) {
+    for (const [key, tx] of S.transmissionIndex) {
       if (!tx.isRelay) continue;
-      const cause = relayCauseIndex().get(key);
+      const cause = S.relayCauseIndex.get(key);
       if (cause && perNode[tx.node]) {
         perNode[tx.node].relayDelaySumMs += tx.atMs - cause.atMs;
         perNode[tx.node].relayDelayCount++;
       }
     }
 
-    if (lastMessages()) {
-      lastMessages().forEach((m) => {
+    if (S.lastMessages) {
+      S.lastMessages.forEach((m) => {
         // Go parity (report.go PerNodeStats): background transmissions are
         // fixed interference, not delivery targets — counting their
         // reachable sets in the denominator collapsed every percentage on
@@ -184,8 +175,8 @@
     // The duration THIS report actually ran for — reading the input field
     // here meant editing it after a run silently rescaled every duty%
     // (SIMULATION_REVIEW.md B6).
-    const maxSimTimeMs = lastRunMaxTimeMs();
-    return simNodes().map((n, i) => {
+    const maxSimTimeMs = S.lastRunMaxTimeMs;
+    return S.simNodes.map((n, i) => {
       const p = perNode[i];
       const total = p.successCount + p.collisionCount;
       return {
@@ -277,7 +268,7 @@
     // doubles as a way to jump straight to a specific under-performer.
     container.querySelectorAll("tbody tr").forEach((tr) => {
       tr.addEventListener("click", () => {
-        const n = simNodes()[Number(tr.dataset.nodeIndex)];
+        const n = S.simNodes[Number(tr.dataset.nodeIndex)];
         if (n) map.panTo([n.lat, n.lon]);
       });
     });
@@ -301,7 +292,6 @@
   }
 
   function init(context) {
-    ctx = context;
     ({ canRelay, effectiveDenyUnscoped, effectiveRegions, escapeHtml, map } = context);
     return api;
   }

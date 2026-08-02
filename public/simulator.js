@@ -10,6 +10,10 @@
 // enough to suggest real device settings from, not a hand-rolled
 // approximation.
 (function () {
+  // Shared mutable state lives in sim-state.js so the feature modules below
+  // can reach it without simulator.js handing each of them 64 getters.
+  const S = window.SimState;
+
   const cfg = window.HOPREACH_CONFIG;
   const { map } = window.MCCoverageMap;
 
@@ -18,9 +22,9 @@
   // that is left here is pulling a hash out of whatever the user pasted.
   const { extractPacketHash } = window.MeshFrame;
 
-  // Per-repeater rankings live in sim-rankings.js. It reads live state
-  // through getters because the simulator replaces these arrays wholesale on
-  // every run, so handing over the current value would pin the first one.
+  // Per-repeater rankings live in sim-rankings.js. Shared state it reads
+  // straight from SimState; what it takes here is the handful of simulator
+  // helpers it calls.
   const {
     isCanonicalDelivery,
     computeRankings,
@@ -28,17 +32,7 @@
     renderRankingsTableInto,
     setRankingsFullWindowOpen,
   } = window.SimRankings.init({
-    simNodes: () => simNodes,
-    simLinks: () => simLinks,
-    lastMessages: () => lastMessages,
-    lastRunMaxTimeMs: () => lastRunMaxTimeMs,
-    canRelay: (n) => canRelay(n),
-    effectiveRegions: (n) => effectiveRegions(n),
-    effectiveDenyUnscoped: (n) => effectiveDenyUnscoped(n),
-    escapeHtml: (s) => escapeHtml(s),
-    transmissionIndex: () => transmissionIndex,
-    relayCauseIndex: () => relayCauseIndex,
-    map,
+    canRelay, effectiveRegions, effectiveDenyUnscoped, escapeHtml, map,
   });
 
   // The config-rule and topology-attribute mirrors of internal/meshsim live
@@ -46,8 +40,8 @@
   // tested. These wrappers feed it this module's own simNodes/simLinks, so
   // the call sites below read exactly as they did in-file.
   const { ruleMatchesAttrs, applyRule, applyPolicyToNodeState } = window.SimTopology;
-  const attrsFromState = (nodes, grid) => window.SimTopology.nodeAttrs(nodes, simLinks, grid);
-  const computeTopologyAttrsJs = () => window.SimTopology.topologyAttrs(simNodes, simLinks);
+  const attrsFromState = (nodes, grid) => window.SimTopology.nodeAttrs(nodes, S.simLinks, grid);
+  const computeTopologyAttrsJs = () => window.SimTopology.topologyAttrs(S.simNodes, S.simLinks);
 
   // The "Replay a real CoreScope packet" card's own description links out
   // to the actual CoreScope instance this deployment reads from — set from
@@ -77,68 +71,51 @@
   // Only 'companion' nodes are user-renameable/movable-by-nature — a
   // planned/real repeater's identity comes from its source of truth (the
   // active plan / the live map), not this tool.
-  let simNodes = [];
-  // {from: nodeIndex, to: nodeIndex, snrDb} — directed, built by
+    // {from: nodeIndex, to: nodeIndex, snrDb} — directed, built by
   // buildLinks() below, cleared whenever the node list changes so a stale
   // link referencing a removed/renumbered node can never linger.
-  let simLinks = [];
-  // Message *generators*, not individual sends — {id, nodeIndex, count,
+    // Message *generators*, not individual sends — {id, nodeIndex, count,
   // minPayload, maxPayload, minGapMs, maxGapMs}. Each one expands into
   // `count` concrete sends (see messagesFromState) with a random payload
   // length and a random gap since the previous send, both freshly drawn
   // per message rather than fixed — "10 messages, 1-5s apart, 10-50B
   // each" reads as one real batch instead of ten manual rows to fill in.
-  let simMessageGenerators = [];
-  let lastReport = null;
-  // The exact expanded {origin, sendAtMs, payloadLen, region} array passed
+      // The exact expanded {origin, sendAtMs, payloadLen, region} array passed
   // to MeshSim.run — index-aligned with each Reception's own packetId, so
   // the "Sent messages" list (see renderSentMessagesList/selectSentMessage)
   // can show each one's own origin/region without re-deriving it from the
   // generators (which don't map 1:1 to packetIds once expanded).
-  let lastMessages = null;
-  let selectedPacketId = null;
-  // A reconstructed CoreScope episode (see reconstructEpisodeFromWindow):
+      // A reconstructed CoreScope episode (see reconstructEpisodeFromWindow):
   // provenance plus the real observations needed to compare our simulation
   // against what actually happened. null unless an episode is loaded.
-  let lastEpisode = null;
-  // The exact engine messages (and target pid) the episode's own run used —
+    // The exact engine messages (and target pid) the episode's own run used —
   // set by replayFromHash, which builds messages ad hoc rather than from
   // simMessageGenerators; the 10× probability analysis re-runs THESE.
-  let lastEpisodeMessages = null;
-  let lastEpisodeTargetPid = -1;
-  // A pinned baseline run's problem counts, for the before/after delta (see
+      // A pinned baseline run's problem counts, for the before/after delta (see
   // renderEpisodeAnalysis / setEpisodeBaseline). null until pinned.
-  let episodeBaseline = null;
-  let linksGeneration = 0;
-  // Terrain grid from the last "model"/"blend" link build, reused so
+      // Terrain grid from the last "model"/"blend" link build, reused so
   // predictSettings() can look up each node's altitude without a second
   // DEM fetch — cleared in invalidateLinks() since moving a node (or
   // changing the node set) invalidates it exactly the same way it
   // invalidates links.
-  let cachedGrid = null;
-
+  
   // Per-node manual overrides on top of defaultPrefs() — keyed by the
   // node's own stable `id` (not array index, which shifts as nodes are
   // added/removed) — set via the click-to-configure popup (see
   // buildNodePopupHtml/saveNodePrefs). A node with no entry here just uses
   // defaultPrefs() unchanged.
-  let simNodePrefsOverrides = {};
-
+  
   // The last predictSettings() result, kept around so the per-node config
   // popup can show "predicted: txdelay X, rxdelay Y" for whichever node
   // was clicked without re-running the search — cleared (along with the
   // rest of a run's results) in hideResults().
-  let lastTuneResult = null;
-  let lastAttrsList = null;
-  // The last runStressTest() result (item 15b) — kept around purely so
+      // The last runStressTest() result (item 15b) — kept around purely so
   // reopening #sim-stress-modal doesn't need a fresh sweep.
-  let lastStressResult = null;
-
+  
   // The saved setup (see loadAllSetups/saveCurrentSetup below) currently
   // loaded, if any — lets "Save" overwrite the same entry instead of always
   // creating a new one, and lets the select reflect what's actually live.
-  let currentSetupId = null;
-
+  
   // predictSettings() runs MeshSim.suggest in its own Worker (see
   // meshsim-worker.js) rather than on the main thread — a real candidate
   // grid is well over a hundred rules, each several full simulation runs,
@@ -146,12 +123,10 @@
   // whole page with zero feedback for its entire duration. generation
   // guards against a stale worker message landing after the panel's been
   // cleared or another search started.
-  let predictWorker = null;
-  let predictGeneration = 0;
-
+    
   function ensurePredictWorker() {
-    if (!predictWorker) predictWorker = new Worker("meshsim-worker.js");
-    return predictWorker;
+    if (!S.predictWorker) predictWorker = new Worker("meshsim-worker.js");
+    return S.predictWorker;
   }
 
   // Sends one message to worker and resolves with its matching reply's
@@ -208,8 +183,7 @@
   // Reset at the start of every replay, and whenever growBy itself changes
   // (a stale success-based count wouldn't mean anything once switched to
   // counting collisions instead).
-  let nodeGrowthCounts = [];
-  const growthMarkers = new Map(); // node index -> L.CircleMarker
+    const growthMarkers = new Map(); // node index -> L.CircleMarker
 
   // Controls how the *live map view* of a run's results looks — entirely
   // separate from which repeaters/messages/settings are actually
@@ -228,16 +202,14 @@
   // wave when !simViewMode.keepAllPaths (see playWave). Pulses aren't
   // tracked here: they already self-remove a fraction of a second after
   // being drawn (see pulseAt), regardless of this setting.
-  let currentWaveLines = [];
-
+  
   // "off" | "companion" — click-to-place mode for a virtual companion
   // radio, scoped to this panel only (reset to "off" whenever the panel
   // closes) — see setSimPanelOpen and the map click handler below. Named
   // distinctly from Plan mode's own, unrelated "📍 Companion pin" feature
   // (a neighbour-preview tool over real repeater data, not a simulation
   // node).
-  let placementMode = "off";
-
+  
   // Monotonic — never derived from the *current* companion count, and
   // never decremented on removal. Counting the current companions and
   // adding 1 (the previous approach) breaks the moment one is removed:
@@ -245,9 +217,7 @@
   // the count is back down to 1, so the new one would also be labelled
   // "Companion 2", colliding with the one still on the map. This can only
   // go up, so a label, once used, is never handed out again this session.
-  let companionCounter = 0;
-  let placedRepeaterCounter = 0;
-
+    
   // The simulator's own repeater markers live in a pane above Leaflet's
   // default markerPane (z-index 600). Without this they share that pane with
   // the base map's clustered real-repeater markers and lose to them on DOM
@@ -300,7 +270,7 @@
   // exports and imports with everything else.
   function effectiveNodeType(node) {
     if (node.role === "listener") return "listener"; // CoreScope-labelled listener — rx only, never retransmits (see replayFromHash); not user-overridable
-    const override = simNodePrefsOverrides[node.id];
+    const override = S.simNodePrefsOverrides[node.id];
     if (override && (override.nodeType === "companion" || override.nodeType === "repeater")) return override.nodeType;
     return node.source === "companion" ? "companion" : "repeater";
   }
@@ -339,7 +309,7 @@
       setStatus("sim-status", "The active plan has no repeaters to load — add some in Plan mode first.");
       return;
     }
-    const existing = new Set(simNodes.map((n) => nodeKey(n.source, n.refId)));
+    const existing = new Set(S.simNodes.map((n) => nodeKey(n.source, n.refId)));
     let added = 0;
     for (const r of plan.repeaters) {
       const key = nodeKey("planned", r.id);
@@ -355,7 +325,7 @@
       // dropped here, so every repeater was simulated at the global default
       // height regardless of the mast the user configured — badly wrong for
       // the repeater-to-repeater links the flood sim is entirely about.
-      simNodes.push({ id: randomId(), source: "planned", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, antennaHeightM: r.antennaHeightM ?? null, regions: ["*"], address: generatedShortAddress() });
+      S.simNodes.push({ id: randomId(), source: "planned", refId: r.id, label: r.label, lat: r.lat, lon: r.lon, antennaHeightM: r.antennaHeightM ?? null, regions: ["*"], address: generatedShortAddress() });
       added++;
     }
     invalidateLinks();
@@ -437,7 +407,7 @@
       setStatus("sim-status", scope ? `No real repeaters found for ${scope}.` : staleSkipped ? `All ${staleSkipped} matching repeaters are stale (nothing heard in 25h) — switch the freshness selector to "All known" to load them anyway.` : "No real repeater data loaded yet.");
       return;
     }
-    const existing = new Set(simNodes.map((n) => nodeKey(n.source, n.refId)));
+    const existing = new Set(S.simNodes.map((n) => nodeKey(n.source, n.refId)));
     let added = 0;
     for (const r of real) {
       const key = nodeKey("real", r.id);
@@ -449,7 +419,7 @@
       // corescope.ObservedUnscoped and planner.js's own comment on this
       // field). Shown/editable afterwards as "derived by absence" in the
       // nodes modal, not asserted the way observed scopes are.
-      simNodes.push({
+      S.simNodes.push({
         id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
         antennaHeightM: r.antennaHeightM ?? null, // a repositioned real repeater may carry an override mast height; otherwise the default applies
         regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: r.observedUnscopedKnown ? !r.observedUnscoped : false,
@@ -465,14 +435,14 @@
   }
 
   function addCompanionAt(lat, lon) {
-    companionCounter++;
+    S.companionCounter++;
     // regions doesn't actually gate anything for a companion (CanRelay is
     // always false for source:"companion", so acceptsRegion is never even
     // consulted for its own relay decision — see canRelay/engine.go's
     // cannot_relay check ordering) — set the same "*" wildcard anyway so
     // the nodes modal's Scopes column doesn't show a misleading empty/deny
     // state for it.
-    simNodes.push({ id: randomId(), source: "companion", refId: randomId(), label: `Companion ${companionCounter}`, lat, lon, regions: ["*"], address: generatedShortAddress() });
+    S.simNodes.push({ id: randomId(), source: "companion", refId: randomId(), label: `Companion ${S.companionCounter}`, lat, lon, regions: ["*"], address: generatedShortAddress() });
     invalidateLinks();
     renderNodeList();
     renderMessageNodeOptions();
@@ -484,12 +454,12 @@
   // site that isn't in CoreScope — so it picks up the existing badge,
   // rename and remove affordances rather than needing a fourth source kind.
   function addPlacedRepeaterAt(lat, lon) {
-    placedRepeaterCounter++;
-    simNodes.push({
+    S.placedRepeaterCounter++;
+    S.simNodes.push({
       id: randomId(),
       source: "planned",
       refId: randomId(),
-      label: `Repeater ${placedRepeaterCounter}`,
+      label: `Repeater ${S.placedRepeaterCounter}`,
       lat,
       lon,
       regions: ["*"],
@@ -502,23 +472,23 @@
   }
 
   function setPlacementMode(next) {
-    placementMode = placementMode === next ? "off" : next;
-    document.getElementById("sim-add-companion").classList.toggle("active", placementMode === "companion");
-    document.getElementById("sim-companion-hint").classList.toggle("hidden", placementMode !== "companion");
-    document.getElementById("sim-add-repeater").classList.toggle("active", placementMode === "repeater");
-    document.getElementById("sim-repeater-hint").classList.toggle("hidden", placementMode !== "repeater");
+    placementMode = S.placementMode === next ? "off" : next;
+    document.getElementById("sim-add-companion").classList.toggle("active", S.placementMode === "companion");
+    document.getElementById("sim-companion-hint").classList.toggle("hidden", S.placementMode !== "companion");
+    document.getElementById("sim-add-repeater").classList.toggle("active", S.placementMode === "repeater");
+    document.getElementById("sim-repeater-hint").classList.toggle("hidden", S.placementMode !== "repeater");
   }
 
   map.on("click", (e) => {
-    if (placementMode === "companion") {
+    if (S.placementMode === "companion") {
       addCompanionAt(e.latlng.lat, e.latlng.lng);
-    } else if (placementMode === "repeater") {
+    } else if (S.placementMode === "repeater") {
       addPlacedRepeaterAt(e.latlng.lat, e.latlng.lng);
     }
   });
 
   function renameNode(id) {
-    const n = simNodes.find((x) => x.id === id);
+    const n = S.simNodes.find((x) => x.id === id);
     if (!n) return;
     const name = prompt("Label:", n.label);
     if (name) {
@@ -530,24 +500,24 @@
   }
 
   function removeNode(id) {
-    delete simNodePrefsOverrides[id];
+    delete S.simNodePrefsOverrides[id];
     // Deleting a mid-list node shifts every later index — remap generators
     // and the episode target, and drop anything pointing at the removed
     // node. The old filter only dropped generators falling off the END of
     // the array, silently moving every later sender onto the wrong node
     // (SIMULATION_REVIEW.md B1).
-    const removedIdx = simNodes.findIndex((n) => n.id === id);
-    simNodes = simNodes.filter((n) => n.id !== id);
+    const removedIdx = S.simNodes.findIndex((n) => n.id === id);
+    simNodes = S.simNodes.filter((n) => n.id !== id);
     if (removedIdx >= 0) {
       const remap = (i) => (i === removedIdx ? -1 : i > removedIdx ? i - 1 : i);
-      simMessageGenerators = simMessageGenerators
+      simMessageGenerators = S.simMessageGenerators
         .map((g) => ({ ...g, nodeIndex: remap(g.nodeIndex) }))
         .filter((g) => g.nodeIndex >= 0);
-      if (lastEpisode && lastEpisode.target) {
-        const t = remap(lastEpisode.target.nodeIndex);
+      if (S.lastEpisode && S.lastEpisode.target) {
+        const t = remap(S.lastEpisode.target.nodeIndex);
         if (t < 0) lastEpisode = null; // target removed — episode meaningless
-        else lastEpisode.target.nodeIndex = t;
-        document.getElementById("sim-open-episode-modal").classList.toggle("hidden", !lastEpisode);
+        else S.lastEpisode.target.nodeIndex = t;
+        document.getElementById("sim-open-episode-modal").classList.toggle("hidden", !S.lastEpisode);
       }
       // The last report indexes the OLD node list — every downstream reader
       // (rankings, episode stats, replay) would mislabel rows.
@@ -585,7 +555,7 @@
   function invalidateLinks() {
     simLinks = [];
     cachedGrid = null;
-    linksGeneration++;
+    S.linksGeneration++;
     setStatus("sim-links-status", "Connectivity not built yet for the current node set — click \"Build links\".");
     updateWorkflowState();
   }
@@ -643,7 +613,7 @@
     // which is honest ("nothing loaded yet") and is itself a distinct
     // option value, so picking the setup you actually want always fires a
     // real change event.
-    const matchesCurrent = ids.includes(currentSetupId);
+    const matchesCurrent = ids.includes(S.currentSetupId);
     if (!matchesCurrent) {
       const placeholder = document.createElement("option");
       placeholder.value = "";
@@ -656,36 +626,36 @@
       const opt = document.createElement("option");
       opt.value = id;
       opt.textContent = all[id].name || "(untitled)";
-      if (id === currentSetupId) opt.selected = true;
+      if (id === S.currentSetupId) opt.selected = true;
       sel.appendChild(opt);
     }
   }
 
   function saveCurrentSetup() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Nothing to save — load some nodes first.");
       return;
     }
     const nameInput = document.getElementById("sim-setup-name");
     const name = nameInput.value.trim() || "Untitled setup";
     const all = loadAllSetups();
-    const id = currentSetupId || randomId();
+    const id = S.currentSetupId || randomId();
     all[id] = {
       id,
       name,
       savedAt: Date.now(),
-      nodes: simNodes,
-      links: simLinks,
+      nodes: S.simNodes,
+      links: S.simLinks,
       connectivitySource: document.getElementById("sim-connectivity-source").value,
-      messageGenerators: simMessageGenerators,
-      nodePrefsOverrides: simNodePrefsOverrides,
+      messageGenerators: S.simMessageGenerators,
+      nodePrefsOverrides: S.simNodePrefsOverrides,
       seed: document.getElementById("sim-seed").value,
       maxSimTimeMs: document.getElementById("sim-max-time").value,
       trials: document.getElementById("sim-trials").value,
       // A reconstructed CoreScope episode's provenance + real observations,
       // so reloading the setup restores the actual-vs-predicted comparison.
       // Already plain arrays/objects, so it serialises directly.
-      episode: lastEpisode || undefined,
+      episode: S.lastEpisode || undefined,
     };
     saveAllSetups(all);
     currentSetupId = id;
@@ -695,11 +665,11 @@
   }
 
   function deleteCurrentSetup() {
-    if (!currentSetupId) return;
+    if (!S.currentSetupId) return;
     const all = loadAllSetups();
-    const name = all[currentSetupId] ? all[currentSetupId].name : "this setup";
+    const name = all[S.currentSetupId] ? all[S.currentSetupId].name : "this setup";
     if (!confirm(`Delete saved setup "${name}"? This can't be undone.`)) return;
-    delete all[currentSetupId];
+    delete all[S.currentSetupId];
     saveAllSetups(all);
     currentSetupId = null;
     document.getElementById("sim-setup-name").value = "";
@@ -735,15 +705,15 @@
     // Restore (or clear) the reconstructed-episode analysis for this setup.
     lastEpisode = s.episode || null;
     episodeBaseline = null;
-    document.getElementById("sim-open-episode-modal").classList.toggle("hidden", !lastEpisode);
+    document.getElementById("sim-open-episode-modal").classList.toggle("hidden", !S.lastEpisode);
 
     // Keep the monotonic companion counter ahead of anything just loaded,
     // so a newly-placed companion never collides with a restored one's
     // label (see addCompanionAt/companionCounter's own comment).
-    for (const n of simNodes) {
+    for (const n of S.simNodes) {
       if (n.source !== "companion") continue;
       const m = /^Companion (\d+)$/.exec(n.label || "");
-      if (m) companionCounter = Math.max(companionCounter, parseInt(m[1], 10));
+      if (m) companionCounter = Math.max(S.companionCounter, parseInt(m[1], 10));
     }
 
     hideResults(); // any previous report doesn't match the freshly loaded scenario
@@ -751,10 +721,10 @@
     renderMessageNodeOptions();
     renderMessageList();
     redrawNodeMarkers();
-    if (simLinks.length > 0) {
+    if (S.simLinks.length > 0) {
       setStatus(
         "sim-links-status",
-        `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} restored from "${s.name || "this setup"}" (${s.connectivitySource || "model"}).`
+        `${S.simLinks.length} directed link${S.simLinks.length === 1 ? "" : "s"} restored from "${s.name || "this setup"}" (${s.connectivitySource || "model"}).`
       );
     } else {
       setStatus("sim-links-status", "Connectivity not built yet for the current node set — click \"Build links\".");
@@ -778,18 +748,18 @@
   // planned repeater imported elsewhere doesn't need that original plan to
   // still exist, same reasoning as planner.js's own plan export.
   function exportCurrentSetup() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Nothing to export — load some nodes first.");
       return;
     }
     const name = document.getElementById("sim-setup-name").value.trim() || "Untitled setup";
     const data = {
       name,
-      nodes: simNodes,
-      links: simLinks,
+      nodes: S.simNodes,
+      links: S.simLinks,
       connectivitySource: document.getElementById("sim-connectivity-source").value,
-      messageGenerators: simMessageGenerators,
-      nodePrefsOverrides: simNodePrefsOverrides,
+      messageGenerators: S.simMessageGenerators,
+      nodePrefsOverrides: S.simNodePrefsOverrides,
       seed: document.getElementById("sim-seed").value,
       maxSimTimeMs: document.getElementById("sim-max-time").value,
       trials: document.getElementById("sim-trials").value,
@@ -824,7 +794,7 @@
   // (dragging a companion, loading more nodes, etc. while the modal is up)
   // plus the toolbar button's node-count badge.
   function renderNodeList() {
-    document.getElementById("sim-node-count-badge").textContent = String(simNodes.length);
+    document.getElementById("sim-node-count-badge").textContent = String(S.simNodes.length);
     if (!document.getElementById("sim-nodes-modal").classList.contains("hidden")) renderNodesModalTable();
     updateWorkflowState();
   }
@@ -835,7 +805,7 @@
   // exactly as-is. Only ever sort a copy of {node, originalIndex} pairs,
   // never simNodes itself.
   function nodesSortedByLabel() {
-    return simNodes.map((n, i) => ({ n, i })).sort((a, b) => a.n.label.localeCompare(b.n.label));
+    return S.simNodes.map((n, i) => ({ n, i })).sort((a, b) => a.n.label.localeCompare(b.n.label));
   }
 
   function renderMessageNodeOptions() {
@@ -848,25 +818,24 @@
       opt.textContent = n.label;
       sel.appendChild(opt);
     });
-    if (prevValue && Number(prevValue) < simNodes.length) sel.value = prevValue;
+    if (prevValue && Number(prevValue) < S.simNodes.length) sel.value = prevValue;
   }
 
   // Set while editing an existing sender (see editSender/cancelEditSender)
   // — addMessage() updates this entry in place instead of pushing a new
   // one when set.
-  let editingGeneratorId = null;
-
+  
   function renderMessageList() {
-    document.getElementById("sim-message-count-badge").textContent = String(simMessageGenerators.length);
+    document.getElementById("sim-message-count-badge").textContent = String(S.simMessageGenerators.length);
     updateWorkflowState(); // ahead of the early return below — 0 senders is itself real state the rail needs
     const list = document.getElementById("sim-message-list");
     list.innerHTML = "";
-    if (simMessageGenerators.length === 0) {
+    if (S.simMessageGenerators.length === 0) {
       list.innerHTML = '<div class="plan-empty">None yet — pick a sender above and add one.</div>';
       return;
     }
-    for (const g of simMessageGenerators) {
-      const node = simNodes[g.nodeIndex];
+    for (const g of S.simMessageGenerators) {
+      const node = S.simNodes[g.nodeIndex];
       const row = document.createElement("div");
       row.className = "plan-list-item";
       // Phase 3 — path-hash size is a property of the MESSAGE (the
@@ -891,7 +860,7 @@
           </span>
         `;
         row.querySelector('[data-act="remove"]').onclick = () => {
-          simMessageGenerators = simMessageGenerators.filter((x) => x.id !== g.id);
+          simMessageGenerators = S.simMessageGenerators.filter((x) => x.id !== g.id);
           renderMessageList();
         };
         list.appendChild(row);
@@ -907,8 +876,8 @@
       `;
       row.querySelector('[data-act="edit"]').onclick = () => editSender(g.id);
       row.querySelector('[data-act="remove"]').onclick = () => {
-        simMessageGenerators = simMessageGenerators.filter((x) => x.id !== g.id);
-        if (editingGeneratorId === g.id) cancelEditSender();
+        simMessageGenerators = S.simMessageGenerators.filter((x) => x.id !== g.id);
+        if (S.editingGeneratorId === g.id) cancelEditSender();
         renderMessageList();
       };
       list.appendChild(row);
@@ -933,10 +902,10 @@
   // clearNodes() already calls several of these in turn, so it updates
   // correctly without needing its own explicit call.
   const WORKFLOW_STEPS = [
-    { id: "sim-acc-nodes", done: () => simNodes.length > 0 },
-    { id: "sim-acc-links", done: () => simLinks.length > 0 },
-    { id: "sim-acc-senders", done: () => simMessageGenerators.length > 0 },
-    { id: "sim-acc-run", done: () => !!lastReport },
+    { id: "sim-acc-nodes", done: () => S.simNodes.length > 0 },
+    { id: "sim-acc-links", done: () => S.simLinks.length > 0 },
+    { id: "sim-acc-senders", done: () => S.simMessageGenerators.length > 0 },
+    { id: "sim-acc-run", done: () => !!S.lastReport },
   ];
 
   function updateWorkflowState() {
@@ -955,13 +924,13 @@
     });
 
     const badgeNodes = document.getElementById("sim-acc-badge-nodes");
-    if (badgeNodes) badgeNodes.textContent = simNodes.length === 0 ? "None loaded" : `${simNodes.length} loaded`;
+    if (badgeNodes) badgeNodes.textContent = S.simNodes.length === 0 ? "None loaded" : `${S.simNodes.length} loaded`;
     const badgeLinks = document.getElementById("sim-acc-badge-links");
-    if (badgeLinks) badgeLinks.textContent = simLinks.length === 0 ? "Not built" : `${simLinks.length} link${simLinks.length === 1 ? "" : "s"}`;
+    if (badgeLinks) badgeLinks.textContent = S.simLinks.length === 0 ? "Not built" : `${S.simLinks.length} link${S.simLinks.length === 1 ? "" : "s"}`;
     const badgeSenders = document.getElementById("sim-acc-badge-senders");
-    if (badgeSenders) badgeSenders.textContent = String(simMessageGenerators.length);
+    if (badgeSenders) badgeSenders.textContent = String(S.simMessageGenerators.length);
     const badgeRun = document.getElementById("sim-acc-badge-run");
-    if (badgeRun) badgeRun.textContent = lastReport ? "Done" : "Not run yet";
+    if (badgeRun) badgeRun.textContent = S.lastReport ? "Done" : "Not run yet";
   }
 
   // Clicking a rail step opens (without closing any sibling — several are
@@ -998,7 +967,7 @@
   // params (count/payload/gap/region) no longer means removing it and
   // re-adding a fresh one from scratch.
   function editSender(generatorId) {
-    const g = simMessageGenerators.find((x) => x.id === generatorId);
+    const g = S.simMessageGenerators.find((x) => x.id === generatorId);
     if (!g) return;
     editingGeneratorId = generatorId;
     document.getElementById("sim-message-node").value = String(g.nodeIndex);
@@ -1013,7 +982,7 @@
     document.getElementById("sim-message-add").textContent = "Save changes";
     document.getElementById("sim-message-cancel-edit").classList.remove("hidden");
     const hint = document.getElementById("sim-message-editing-hint");
-    hint.textContent = `Editing ${simNodes[g.nodeIndex] ? simNodes[g.nodeIndex].label : "this sender"}'s settings.`;
+    hint.textContent = `Editing ${S.simNodes[g.nodeIndex] ? S.simNodes[g.nodeIndex].label : "this sender"}'s settings.`;
     hint.classList.remove("hidden");
   }
 
@@ -1043,12 +1012,12 @@
     let maxGapMs = Math.max(0, parseInt(document.getElementById("sim-message-gap-max").value, 10) || minGapMs);
     if (maxGapMs < minGapMs) [minGapMs, maxGapMs] = [maxGapMs, minGapMs];
 
-    if (editingGeneratorId) {
-      const g = simMessageGenerators.find((x) => x.id === editingGeneratorId);
+    if (S.editingGeneratorId) {
+      const g = S.simMessageGenerators.find((x) => x.id === S.editingGeneratorId);
       if (g) Object.assign(g, { nodeIndex, region, direct, hashSize, count, minPayload, maxPayload, minGapMs, maxGapMs });
       cancelEditSender();
     } else {
-      simMessageGenerators.push({ id: randomId(), nodeIndex, region, direct, hashSize, count, minPayload, maxPayload, minGapMs, maxGapMs });
+      S.simMessageGenerators.push({ id: randomId(), nodeIndex, region, direct, hashSize, count, minPayload, maxPayload, minGapMs, maxGapMs });
     }
     renderMessageList();
   }
@@ -1057,7 +1026,7 @@
 
   function redrawNodeMarkers() {
     simNodesLayer.clearLayers();
-    simNodes.forEach((n, nodeIndex) => {
+    S.simNodes.forEach((n, nodeIndex) => {
       // Icon follows the behavioural type, not the provenance: a node
       // switched to companion should look like one. Anything not sourced
       // from CoreScope was positioned by hand, so it stays draggable —
@@ -1078,7 +1047,7 @@
         // via the toolbar's "Repeaters & settings" button (and its own
         // per-row "Packets" action once a report exists, see
         // renderNodesModalTable).
-        .on("click", () => (lastReport ? openPacketInspectorForNode(nodeIndex) : openNodesModal(n.id)))
+        .on("click", () => (S.lastReport ? openPacketInspectorForNode(nodeIndex) : openNodesModal(n.id)))
         .on("dragend", (e) => {
           const ll = e.target.getLatLng();
           n.lat = ll.lat;
@@ -1114,22 +1083,22 @@
   function renderNodesModalTable() {
     const tbody = document.getElementById("sim-nodes-modal-tbody");
     tbody.innerHTML = "";
-    document.getElementById("sim-results-col-duty").classList.toggle("hidden", !lastReport);
-    document.getElementById("sim-results-col-received").classList.toggle("hidden", !lastReport);
-    if (simNodes.length === 0) {
+    document.getElementById("sim-results-col-duty").classList.toggle("hidden", !S.lastReport);
+    document.getElementById("sim-results-col-received").classList.toggle("hidden", !S.lastReport);
+    if (S.simNodes.length === 0) {
       tbody.innerHTML = '<tr><td colspan="16" class="plan-empty">None yet — load or place some repeaters (or a companion location), then reopen this.</td></tr>';
       return;
     }
     // Read-only result columns (item 16) — computed once for the whole
     // table rather than per row; empty/unused unless a report exists.
-    const rankingByNode = lastReport ? computeRankings(lastReport) : null;
+    const rankingByNode = S.lastReport ? computeRankings(S.lastReport) : null;
     nodesSortedByLabel().forEach(({ n, i: nodeIndex }) => {
       const prefs = effectivePrefsFor(n);
       let predictedTitle = "";
-      if (lastTuneResult && lastTuneResult.suggestions.length && lastAttrsList && lastAttrsList[nodeIndex]) {
-        const best = lastTuneResult.suggestions[0];
-        if (ruleMatchesAttrs(best.rule, lastAttrsList[nodeIndex], nodeIndex)) {
-          const predicted = applyRule(defaultPrefs(), best.rule, lastAttrsList[nodeIndex]);
+      if (S.lastTuneResult && S.lastTuneResult.suggestions.length && S.lastAttrsList && S.lastAttrsList[nodeIndex]) {
+        const best = S.lastTuneResult.suggestions[0];
+        if (ruleMatchesAttrs(best.rule, S.lastAttrsList[nodeIndex], nodeIndex)) {
+          const predicted = applyRule(defaultPrefs(), best.rule, S.lastAttrsList[nodeIndex]);
           predictedTitle = `Predicted (${best.rule.name}): txdelay ${predicted.txDelayFactor.toFixed(2)} · rxdelay ${predicted.rxDelayBase.toFixed(1)}`;
         }
       }
@@ -1181,7 +1150,7 @@
         ${dutyCell}
         ${receivedCell}
         <td>
-          ${lastReport ? '<button data-act="packets" title="See packets received here">📨</button>' : ""}
+          ${S.lastReport ? '<button data-act="packets" title="See packets received here">📨</button>' : ""}
           ${n.source !== "real" ? '<button data-act="rename" title="Rename">✎</button>' : ""}
           <button data-act="remove" title="Remove">✕</button>
         </td>
@@ -1202,7 +1171,7 @@
         radioInputs.cr.value = preset.cr;
       });
       Object.values(radioInputs).forEach((el) => el.addEventListener("input", () => { presetSelect.value = ""; }));
-      if (lastReport) tr.querySelector('[data-act="packets"]').onclick = () => openPacketInspectorForNode(nodeIndex);
+      if (S.lastReport) tr.querySelector('[data-act="packets"]').onclick = () => openPacketInspectorForNode(nodeIndex);
       if (n.source !== "real") tr.querySelector('[data-act="rename"]').onclick = () => renameNode(n.id);
       tr.querySelector('[data-act="remove"]').onclick = () => {
         removeNode(n.id);
@@ -1217,7 +1186,7 @@
     let applied = 0;
     let radioChanged = false;
     tbody.querySelectorAll("tr[data-node-id]").forEach((tr) => {
-      const n = simNodes.find((x) => x.id === tr.dataset.nodeId);
+      const n = S.simNodes.find((x) => x.id === tr.dataset.nodeId);
       if (!n) return;
       const override = {};
       const beforePrefs = effectivePrefsFor(n);
@@ -1272,7 +1241,7 @@
         }
       });
       if (radioTouched) override.radio = radio;
-      simNodePrefsOverrides[n.id] = override;
+      S.simNodePrefsOverrides[n.id] = override;
       // A modelled link's baked-in SNR depends on the receiver's SF (see
       // receiverSf) and each node's own tx power (buildLinksFromModel's
       // txPowerDelta) — so those must invalidate the built links. But EVERY
@@ -1381,8 +1350,8 @@
     if (!report) return;
     for (const r of report.receptions) {
       if (!matchesViewFilter(r)) continue;
-      const from = simNodes[r.fromNode];
-      const to = simNodes[r.node];
+      const from = S.simNodes[r.fromNode];
+      const to = S.simNodes[r.node];
       if (!from || !to) continue;
       L.polyline(
         [
@@ -1486,7 +1455,7 @@
   // altitude lookups even when the last link build used pure "corescope"
   // connectivity (which never touches terrain at all).
   async function ensureGrid(nodes) {
-    if (cachedGrid) return cachedGrid;
+    if (S.cachedGrid) return S.cachedGrid;
     await Propagation.ready;
     const clustered = nodesWithInRangeNeighbor(nodes);
     if (clustered.length < 2) {
@@ -1503,7 +1472,7 @@
       throw new Error(`the involved area is too large to fetch terrain for (${estimateTileCount(bounds, zoom)} tiles even at the coarsest usable zoom)`);
     }
     cachedGrid = await Terrain.buildLocalGrid(cfg.demTileURLBase, zoom, bounds);
-    return cachedGrid;
+    return S.cachedGrid;
   }
 
   // The spreading factor a directed link's SNR must be anchored to is the
@@ -1669,16 +1638,16 @@
   }
 
   async function buildLinks() {
-    if (simNodes.length < 2) {
+    if (S.simNodes.length < 2) {
       setStatus("sim-links-status", "Load at least 2 nodes first.");
       return;
     }
-    const generation = ++linksGeneration;
+    const generation = ++S.linksGeneration;
     const source = document.getElementById("sim-connectivity-source").value;
     setStatus("sim-links-status", "Building connectivity…");
     document.getElementById("sim-build-links").disabled = true;
     try {
-      const nodesSnapshot = simNodes;
+      const nodesSnapshot = S.simNodes;
       let links;
       if (source === "model") {
         links = await buildLinksFromModel(nodesSnapshot);
@@ -1692,18 +1661,18 @@
         const observedPairs = new Set(observedLinks.map((l) => `${l.from}:${l.to}`));
         links = observedLinks.concat(modelLinks.filter((l) => !observedPairs.has(`${l.from}:${l.to}`)));
       }
-      if (generation !== linksGeneration) return; // node set changed mid-build; discard stale result
+      if (generation !== S.linksGeneration) return; // node set changed mid-build; discard stale result
       simLinks = links;
       setStatus(
         "sim-links-status",
-        `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(nodesSnapshot, simLinks)}`
+        `${S.simLinks.length} directed link${S.simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(nodesSnapshot, S.simLinks)}`
       );
       updateWorkflowState();
     } catch (err) {
-      if (generation !== linksGeneration) return;
+      if (generation !== S.linksGeneration) return;
       setStatus("sim-links-status", `Failed to build links: ${err.message || err}`);
     } finally {
-      if (generation === linksGeneration) document.getElementById("sim-build-links").disabled = false;
+      if (generation === S.linksGeneration) document.getElementById("sim-build-links").disabled = false;
     }
   }
 
@@ -1715,7 +1684,7 @@
   // object per node rather than a separate store, since they're set from
   // the exact same "Repeaters & settings" modal row.
   function effectiveLoopDetect(n) {
-    const override = simNodePrefsOverrides[n.id];
+    const override = S.simNodePrefsOverrides[n.id];
     return (override && override.loopDetect) || DEFAULT_LOOP_DETECT;
   }
 
@@ -1734,7 +1703,7 @@
   // side, since loop.detect is evaluated at the packet's own hash size,
   // not any relaying node's).
   function effectiveHashSize(n) {
-    const override = simNodePrefsOverrides[n.id];
+    const override = S.simNodePrefsOverrides[n.id];
     if (override && override.hashSize) return override.hashSize;
     return n.hashSize || DEFAULT_MESSAGE_HASH_SIZE;
   }
@@ -1749,7 +1718,7 @@
   // fire the 'change' event this is wired to.
   function syncMessageHashSizeToSelectedNode() {
     const sel = document.getElementById("sim-message-node");
-    const node = simNodes[Number(sel.value)];
+    const node = S.simNodes[Number(sel.value)];
     if (node) document.getElementById("sim-message-hash-size").value = String(effectiveHashSize(node));
   }
 
@@ -1758,25 +1727,25 @@
   // editable from the same "Repeaters & settings" modal row (see
   // renderNodesModalTable/applyNodesModalTable).
   function effectiveRegions(n) {
-    const override = simNodePrefsOverrides[n.id];
+    const override = S.simNodePrefsOverrides[n.id];
     if (override && override.regions !== undefined) return override.regions;
     return n.regions || [];
   }
 
   function effectiveDenyUnscoped(n) {
-    const override = simNodePrefsOverrides[n.id];
+    const override = S.simNodePrefsOverrides[n.id];
     if (override && override.denyUnscoped !== undefined) return override.denyUnscoped;
     return !!n.denyUnscoped;
   }
 
   function effectiveFloodMax(n) {
-    const override = simNodePrefsOverrides[n.id];
+    const override = S.simNodePrefsOverrides[n.id];
     if (override && override.floodMax) return override.floodMax;
     return n.floodMax || 0;
   }
 
   function effectiveFloodMaxUnscoped(n) {
-    const override = simNodePrefsOverrides[n.id];
+    const override = S.simNodePrefsOverrides[n.id];
     if (override && override.floodMaxUnscoped) return override.floodMaxUnscoped;
     return n.floodMaxUnscoped || 0;
   }
@@ -1819,7 +1788,7 @@
 
   function scenarioFromState() {
     return {
-      nodes: simNodes.map((n) => ({
+      nodes: S.simNodes.map((n) => ({
         prefs: effectivePrefsFor(n),
         canRelay: canRelay(n),
         regions: effectiveRegions(n),
@@ -1829,7 +1798,7 @@
         floodMax: effectiveFloodMax(n),
         floodMaxUnscoped: effectiveFloodMaxUnscoped(n),
       })),
-      links: simLinks,
+      links: S.simLinks,
       channel: { perWidthDb: CHANNEL_PER_WIDTH_DB, fadingSigmaDb: CHANNEL_FADING_SIGMA_DB },
     };
   }
@@ -1885,7 +1854,7 @@
   // radio isn't overridable here (only the delay/power fields the popup
   // exposes), so it always comes from the baseline.
   function effectivePrefsFor(node) {
-    const override = simNodePrefsOverrides[node.id];
+    const override = S.simNodePrefsOverrides[node.id];
     if (!override) return defaultPrefs();
     return { ...defaultPrefs(), ...override };
   }
@@ -1922,7 +1891,7 @@
   // determinism contract as the engine's own retransmit-delay draws.
   function messagesFromState(seed) {
     const messages = [];
-    simMessageGenerators.forEach((g, gi) => {
+    S.simMessageGenerators.forEach((g, gi) => {
       // A "fixed" generator is one reconstructed real transmission at an
       // absolute time — a real flood sender,
       // or a fixed background transmission of surrounding traffic. It expands
@@ -1957,18 +1926,17 @@
 
   // The sim duration the CURRENT lastReport was produced with — rankings
   // duty% must divide by this, not by whatever the input now says.
-  let lastRunMaxTimeMs = 60000;
-
+  
   async function runSimulation() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Load some nodes first.");
       return;
     }
-    if (simLinks.length === 0) {
+    if (S.simLinks.length === 0) {
       setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
       return;
     }
-    if (simMessageGenerators.length === 0) {
+    if (S.simMessageGenerators.length === 0) {
       setStatus("sim-status", "Add at least one message sender first.");
       return;
     }
@@ -1986,7 +1954,7 @@
       renderResults(report);
       renderSentMessagesList();
       renderRankings(report);
-      if (lastEpisode) renderEpisodeAnalysis(); // refresh actual-vs-predicted / before-after against this run
+      if (S.lastEpisode) renderEpisodeAnalysis(); // refresh actual-vs-predicted / before-after against this run
       startReplay();
       updateWorkflowState();
       setStatus("sim-status", "Done.");
@@ -2027,8 +1995,8 @@
     const capped = !showAll && all.length > LONG_LIST_ROW_CAP;
     const toRender = capped ? all.slice(0, LONG_LIST_ROW_CAP) : all;
     for (const r of toRender) {
-      const from = simNodes[r.fromNode];
-      const to = simNodes[r.node];
+      const from = S.simNodes[r.fromNode];
+      const to = S.simNodes[r.node];
       const row = document.createElement("div");
       row.className = `plan-list-item sim-list-item ${r.collided ? "sim-collided" : "sim-clean"}`;
       row.innerHTML = `
@@ -2092,22 +2060,22 @@
   function renderSentMessagesList() {
     const list = document.getElementById("sim-messages-sent-list");
     list.innerHTML = "";
-    if (!lastMessages || lastMessages.length === 0) return;
+    if (!S.lastMessages || S.lastMessages.length === 0) return;
     // packetId is lastMessages' own array index (Reception.packetId refers
     // back to it), which is insertion order — not necessarily time order
     // once multiple generators' sends interleave. Sort a copy for display,
     // keeping each row's real packetId for everything else (selection,
     // report lookups, the map path draw).
-    const order = lastMessages.map((m, packetId) => ({ m, packetId })).sort((a, b) => a.m.sendAtMs - b.m.sendAtMs);
+    const order = S.lastMessages.map((m, packetId) => ({ m, packetId })).sort((a, b) => a.m.sendAtMs - b.m.sendAtMs);
     order.forEach(({ m, packetId }) => {
-      const origin = simNodes[m.origin];
-      const receptions = lastReport ? lastReport.receptions.filter((r) => r.packetId === packetId) : [];
+      const origin = S.simNodes[m.origin];
+      const receptions = S.lastReport ? S.lastReport.receptions.filter((r) => r.packetId === packetId) : [];
       const reachedNodes = new Set(receptions.filter((r) => !r.collided).map((r) => r.node));
       const collidedNodes = new Set(receptions.filter((r) => r.collided).map((r) => r.node));
       const flood = floodTimeMs(packetId);
       const floodLabel = flood != null ? ` · flooding for ${flood}ms` : "";
       const row = document.createElement("div");
-      row.className = `plan-list-item sim-message-row${selectedPacketId === packetId ? " sim-message-row-selected" : ""}`;
+      row.className = `plan-list-item sim-message-row${S.selectedPacketId === packetId ? " sim-message-row-selected" : ""}`;
       row.dataset.packetId = String(packetId);
       row.innerHTML = `
         <span class="plan-item-label">${escapeHtml(origin ? origin.label : "?")}${m.region ? ` <span class="sim-node-badge sim-badge-region">${escapeHtml(m.region)}</span>` : ""}${m.direct ? ` <span class="sim-node-badge sim-badge-direct">direct</span>` : ""}</span>
@@ -2212,7 +2180,7 @@
       // scheduled instant lands past the sim's own end — WasRelayed
       // means "was eligible to relay," not "a transmission exists." Look
       // the real Transmission up rather than assume one.
-      relayTx = transmissionIndex.get(linkKey(r.packetId, r.node)) || null;
+      relayTx = S.transmissionIndex.get(linkKey(r.packetId, r.node)) || null;
       if (relayTx) {
         const delayMs = relayTx.atMs - r.atMs;
         label = `Relayed ⤵ +${delayMs}ms`;
@@ -2245,7 +2213,7 @@
   }
 
   function nodeLabel(nodeIndex) {
-    const n = simNodes[nodeIndex];
+    const n = S.simNodes[nodeIndex];
     return n ? n.label : `#${nodeIndex}`;
   }
 
@@ -2253,11 +2221,11 @@
   // producing activity anywhere in the network (last reception's AtMs
   // minus the send time), i.e. how long until it stopped flooding.
   function floodTimeMs(packetId) {
-    if (!lastReport || !lastMessages || !lastMessages[packetId]) return null;
-    const receptions = lastReport.receptions.filter((r) => r.packetId === packetId);
+    if (!S.lastReport || !S.lastMessages || !S.lastMessages[packetId]) return null;
+    const receptions = S.lastReport.receptions.filter((r) => r.packetId === packetId);
     if (receptions.length === 0) return 0;
     const lastAtMs = Math.max(...receptions.map((r) => r.atMs));
-    return lastAtMs - lastMessages[packetId].sendAtMs;
+    return lastAtMs - S.lastMessages[packetId].sendAtMs;
   }
 
   // The unified TX+RX activity events currently loaded into the packet
@@ -2267,9 +2235,7 @@
   // modal's own title) — set by openPacketInspectorForNode/
   // openPacketDetails, read by applyPacketModalFilters whenever the
   // filter controls change.
-  let currentPacketModalEvents = [];
-  let currentPacketModalShowOpts = { showAt: false };
-
+    
   // linkKey is the shared identity a reception and the transmission it
   // caused — or a relay transmission and the reception it triggered —
   // render with as data-link-key, so hovering/clicking one can find its
@@ -2285,24 +2251,22 @@
   // (see runSimulation/hideResults) — every RX row's "was this relayed, and
   // when" lookup goes through this rather than a linear scan of
   // lastReport.transmissions per row.
-  let transmissionIndex = new Map();
-  // packetId:node -> the Reception that triggered this node's relay of
+    // packetId:node -> the Reception that triggered this node's relay of
   // that packet — the mirror of transmissionIndex, letting a relay TX row
   // show "relaying what arrived at Xms" without a linear scan. Only ever
   // has one entry per key: a node relays a packet based on exactly one
   // decoded reception of it (hasSeen dedup — see Transmission's own Go doc
   // comment), so wasRelayed is true on at most one Reception per
   // (packetId, node).
-  let relayCauseIndex = new Map();
-
+  
   function rebuildLinkIndexes(report) {
     transmissionIndex = new Map();
     relayCauseIndex = new Map();
     for (const tx of (report && report.transmissions) || []) {
-      transmissionIndex.set(linkKey(tx.packetId, tx.node), tx);
+      S.transmissionIndex.set(linkKey(tx.packetId, tx.node), tx);
     }
     for (const r of (report && report.receptions) || []) {
-      if (r.wasRelayed) relayCauseIndex.set(linkKey(r.packetId, r.node), r);
+      if (r.wasRelayed) S.relayCauseIndex.set(linkKey(r.packetId, r.node), r);
     }
   }
 
@@ -2322,11 +2286,11 @@
   // scheduled is not the same as actual.
   function buildNodeActivityEvents(nodeIndex) {
     const events = [];
-    if (lastReport) {
-      for (const tx of lastReport.transmissions) {
+    if (S.lastReport) {
+      for (const tx of S.lastReport.transmissions) {
         if (tx.node === nodeIndex) events.push(buildTxEvent(tx));
       }
-      for (const r of lastReport.receptions) {
+      for (const r of S.lastReport.receptions) {
         if (r.node === nodeIndex) events.push(buildRxEvent(r));
       }
     }
@@ -2339,11 +2303,11 @@
   // see openPacketDetails.
   function buildPacketActivityEvents(packetId) {
     const events = [];
-    if (lastReport) {
-      for (const tx of lastReport.transmissions) {
+    if (S.lastReport) {
+      for (const tx of S.lastReport.transmissions) {
         if (tx.packetId === packetId) events.push(buildTxEvent(tx));
       }
-      for (const r of lastReport.receptions) {
+      for (const r of S.lastReport.receptions) {
         if (r.packetId === packetId) events.push(buildRxEvent(r));
       }
     }
@@ -2399,7 +2363,7 @@
   function applyPacketModalFilters() {
     const outcomeFilter = document.getElementById("sim-packet-filter-outcome").value;
     const search = document.getElementById("sim-packet-filter-search").value.trim().toLowerCase();
-    let filtered = currentPacketModalEvents.filter((e) => matchesOutcomeFilter(e, outcomeFilter));
+    let filtered = S.currentPacketModalEvents.filter((e) => matchesOutcomeFilter(e, outcomeFilter));
     if (search) {
       filtered = filtered.filter((e) => {
         const parts = [`packet #${e.packetId}`, nodeLabel(e.node)];
@@ -2410,8 +2374,8 @@
       });
     }
     const countEl = document.getElementById("sim-packet-filter-count");
-    countEl.textContent = filtered.length === currentPacketModalEvents.length ? "" : `Showing ${filtered.length} of ${currentPacketModalEvents.length}.`;
-    renderNodeActivityRows(document.getElementById("sim-packet-modal-list"), filtered, currentPacketModalShowOpts);
+    countEl.textContent = filtered.length === S.currentPacketModalEvents.length ? "" : `Showing ${filtered.length} of ${S.currentPacketModalEvents.length}.`;
+    renderNodeActivityRows(document.getElementById("sim-packet-modal-list"), filtered, S.currentPacketModalShowOpts);
   }
 
   // Renders one unified, timestamp-ordered table of TX (sent) and RX
@@ -2448,13 +2412,13 @@
 
       if (e.kind === "tx") {
         const tx = e.transmission;
-        const own = lastReport ? lastReport.receptions.filter((r) => r.packetId === e.packetId) : [];
+        const own = S.lastReport ? S.lastReport.receptions.filter((r) => r.packetId === e.packetId) : [];
         const reachedCount = new Set(own.filter((r) => !r.collided).map((r) => r.node)).size;
         const collidedCount = new Set(own.filter((r) => r.collided).map((r) => r.node)).size;
         // Every relay's own Reception (the one it decided to relay based
         // on) is looked up here rather than re-derived — see
         // relayCauseIndex's own doc comment.
-        const cause = tx.isRelay ? relayCauseIndex.get(key) : null;
+        const cause = tx.isRelay ? S.relayCauseIndex.get(key) : null;
         const relayInfo = !tx.isRelay
           ? ""
           : cause
@@ -2536,8 +2500,8 @@
   // reached at all (out of range / no link).
   function renderPacketChecklist(container, packetId, originIndex) {
     container.innerHTML = "";
-    if (simNodes.length === 0) return;
-    const receptions = lastReport ? lastReport.receptions.filter((r) => r.packetId === packetId) : [];
+    if (S.simNodes.length === 0) return;
+    const receptions = S.lastReport ? S.lastReport.receptions.filter((r) => r.packetId === packetId) : [];
     const byNode = new Map();
     for (const r of receptions) {
       const list = byNode.get(r.node) || [];
@@ -2597,9 +2561,7 @@
   // from — a "fresh" open (marker click, the 📨 action, a Details button
   // elsewhere) resets the trail; drilling within the modal itself pushes
   // the view being left so "← Back" can return to it.
-  let packetModalHistory = [];
-  let packetModalCurrent = null;
-
+    
   // mode: "fresh" (a new entry point — marker click, the 📨 action, a
   // Details button elsewhere — resets the trail), "drill" (navigating to
   // another view from within the modal — pushes the view being left so
@@ -2608,16 +2570,16 @@
   function enterPacketModalView(mode, next) {
     if (mode === "fresh") {
       packetModalHistory = [];
-    } else if (mode === "drill" && packetModalCurrent) {
-      packetModalHistory.push(packetModalCurrent);
+    } else if (mode === "drill" && S.packetModalCurrent) {
+      S.packetModalHistory.push(S.packetModalCurrent);
     }
     packetModalCurrent = next;
     const backBtn = document.getElementById("sim-packet-modal-back");
-    backBtn.classList.toggle("hidden", packetModalHistory.length === 0);
+    backBtn.classList.toggle("hidden", S.packetModalHistory.length === 0);
   }
 
   function goBackPacketModal() {
-    const prev = packetModalHistory.pop();
+    const prev = S.packetModalHistory.pop();
     if (!prev) return;
     if (prev.kind === "node") openPacketInspectorForNode(prev.nodeIndex, "back");
     else openPacketDetails(prev.packetId, "back");
@@ -2628,7 +2590,7 @@
   // be an empty box.
   function renderObservedSection(nodeIndex, obs) {
     const section = document.getElementById("sim-packet-modal-observed-section");
-    if (replayObservations.size === 0) {
+    if (S.replayObservations.size === 0) {
       section.classList.add("hidden");
       return;
     }
@@ -2652,7 +2614,7 @@
     }
     hint.textContent = `${rows.length} real CoreScope observation${rows.length === 1 ? "" : "s"}, timed from the start of the window. These are measurements; everything below is our model's own simulation of the same window.`;
     for (const r of rows) {
-      const offsetS = ((r.tMs - replayWindowStartMs) / 1000).toFixed(1);
+      const offsetS = ((r.tMs - S.replayWindowStartMs) / 1000).toFixed(1);
       const row = document.createElement("div");
       row.className = "plan-list-item sim-list-item sim-packet-row sim-clean";
       const label = r.kind === "sent" ? "SENT" : "HEARD";
@@ -2664,7 +2626,7 @@
         <div class="sim-packet-row-top">
           <span class="sim-txrx-badge ${r.kind === "sent" ? "sim-txrx-relay" : "sim-txrx-rx"}">${label}</span>
           <span class="sim-node-badge sim-badge-observed">observed</span>
-          <span class="plan-item-label">${escapeHtml(r.hash === replayTargetHash ? "the replayed packet" : `packet ${String(r.hash).slice(0, 8)}`)}</span>
+          <span class="plan-item-label">${escapeHtml(r.hash === S.replayTargetHash ? "the replayed packet" : `packet ${String(r.hash).slice(0, 8)}`)}</span>
         </div>
         <div class="sim-packet-row-bottom">
           <span class="sim-packet-context">${detail}</span>
@@ -2676,9 +2638,9 @@
   }
 
   function openPacketInspectorForNode(nodeIndex, mode = "fresh") {
-    if (!lastReport) return;
+    if (!S.lastReport) return;
     enterPacketModalView(mode, { kind: "node", nodeIndex });
-    const n = simNodes[nodeIndex];
+    const n = S.simNodes[nodeIndex];
     document.getElementById("sim-packet-modal-title").textContent = `Packets at ${n ? n.label : "this node"}`;
     const events = buildNodeActivityEvents(nodeIndex);
     const txEvents = events.filter((e) => e.kind === "tx").map((e) => e.transmission);
@@ -2713,8 +2675,8 @@
     // With a replay loaded, every figure above is a *prediction* — so put
     // what was actually observed at this repeater right beside it rather
     // than leaving the reader to assume the model's numbers are measurements.
-    const obs = replayObservations.get(nodeIndex);
-    if (replayObservations.size > 0) {
+    const obs = S.replayObservations.get(nodeIndex);
+    if (S.replayObservations.size > 0) {
       stats.push({ label: "observed sending", value: obs ? obs.sent.length : 0 });
       stats.push({ label: "observed receiving", value: obs ? obs.heard.length : 0 });
     }
@@ -2727,7 +2689,7 @@
     document.getElementById("sim-packet-modal-checklist-section").classList.add("hidden");
 
     document.getElementById("sim-packet-modal-received-title").textContent =
-      replayObservations.size > 0 ? "Predicted activity — our model (TX/RX, time order)" : "Activity (TX/RX, time order)";
+      S.replayObservations.size > 0 ? "Predicted activity — our model (TX/RX, time order)" : "Activity (TX/RX, time order)";
     resetPacketModalFilters();
     currentPacketModalEvents = events;
     currentPacketModalShowOpts = { showAt: false, drillTo: "packet", emptyHtml: nodeActivityEmptyExplanation(nodeIndex) };
@@ -2741,11 +2703,11 @@
   // reality already confirmed, so plenty of them legitimately have no
   // predicted activity at all. Answer the question in place instead.
   function nodeActivityEmptyExplanation(nodeIndex) {
-    if (simLinks.length === 0) {
+    if (S.simLinks.length === 0) {
       return "No connectivity has been built for this node set yet, so nothing could propagate anywhere — build links, then run again.";
     }
-    const inbound = simLinks.filter((l) => l.to === nodeIndex).length;
-    const outbound = simLinks.filter((l) => l.from === nodeIndex).length;
+    const inbound = S.simLinks.filter((l) => l.to === nodeIndex).length;
+    const outbound = S.simLinks.filter((l) => l.from === nodeIndex).length;
     if (inbound === 0) {
       return outbound === 0
         ? "Our model gives this repeater no links at all — nothing else is within decodable range of it under the current propagation assumptions, so no flood could ever reach it. That's a statement about the model's assumptions (range, antenna heights, terrain), not proof the real repeater is isolated."
@@ -2755,10 +2717,10 @@
   }
 
   function openPacketDetails(packetId, mode = "fresh") {
-    if (!lastMessages || !lastMessages[packetId]) return;
+    if (!S.lastMessages || !S.lastMessages[packetId]) return;
     enterPacketModalView(mode, { kind: "packet", packetId });
-    const m = lastMessages[packetId];
-    const origin = simNodes[m.origin];
+    const m = S.lastMessages[packetId];
+    const origin = S.simNodes[m.origin];
     document.getElementById("sim-packet-modal-title").textContent = `Packet #${packetId} details`;
     const flood = floodTimeMs(packetId);
     const summaryEl = document.getElementById("sim-packet-modal-summary");
@@ -2790,7 +2752,7 @@
   }
 
   function selectSentMessage(packetId) {
-    if (selectedPacketId === packetId) {
+    if (S.selectedPacketId === packetId) {
       clearSentMessageSelection();
       return;
     }
@@ -2807,10 +2769,10 @@
   // selectSentMessage's own toggle-off-if-already-selected behaviour.
   function drawSelectedMessagePath() {
     simMessagePathLayer.clearLayers();
-    if (selectedPacketId == null || !lastReport) return;
-    for (const r of lastReport.receptions.filter((rec) => rec.packetId === selectedPacketId && matchesViewFilter(rec))) {
-      const from = simNodes[r.fromNode];
-      const to = simNodes[r.node];
+    if (S.selectedPacketId == null || !S.lastReport) return;
+    for (const r of S.lastReport.receptions.filter((rec) => rec.packetId === S.selectedPacketId && matchesViewFilter(rec))) {
+      const from = S.simNodes[r.fromNode];
+      const to = S.simNodes[r.node];
       if (!from || !to) continue;
       const color = r.collided ? "#f87171" : "#4ade80";
       L.polyline([[from.lat, from.lon], [to.lat, to.lon]], { color, weight: r.collided ? 3 : 2, opacity: 0.85 }).addTo(simMessagePathLayer);
@@ -2872,7 +2834,7 @@
     lastPolicyProfiles = null;
     lastOptimizeDeviations = [];
     optimizeCancelled = true; // stop any in-flight optimize loop from rendering stale results
-    clearTimeout(optimizeCancelTimeout);
+    clearTimeout(S.optimizeCancelTimeout);
     lastOptimizeSnapshot = [];
     document.getElementById("sim-policy-profile-detail").classList.add("hidden");
     document.getElementById("sim-policy-section").classList.add("hidden");
@@ -2977,15 +2939,7 @@
   // `render(srcMs, prevSrcMs)` draws the world at srcMs (prevSrcMs null means
   // "rebuild from scratch" — a seek or a backwards jump); `format(srcMs)`
   // renders the readout; `label` names it in the bar.
-  let transportSource = null;
-  let transportWarp = null;
-  let transportPlayMs = 0;
-  let transportPlaying = false;
-  let transportRate = 1;
-  let transportRaf = null;
-  let transportLastFrameTs = 0;
-  let transportLastSrcMs = null;
-
+                
   function transportEl(id) {
     return document.getElementById(id);
   }
@@ -3006,7 +2960,7 @@
     transportPlayMs = 0;
     transportLastSrcMs = null;
     const bar = transportEl("sim-transport");
-    const hasTimeline = !!(source && transportWarp && source.times.length > 0);
+    const hasTimeline = !!(source && S.transportWarp && source.times.length > 0);
     bar.classList.toggle("hidden", !hasTimeline);
     if (!hasTimeline) {
       syncBottomClearances();
@@ -3016,7 +2970,7 @@
     seek.min = "0";
     // A single-instant timeline (every event at the same ms) has zero play
     // duration; give the scrubber a nonzero range so it isn't a dead control.
-    seek.max = String(Math.max(1, Math.round(transportWarp.durationPlayMs)));
+    seek.max = String(Math.max(1, Math.round(S.transportWarp.durationPlayMs)));
     seek.value = "0";
     transportEl("sim-transport-label").textContent = source.label || "";
     transportRender(false);
@@ -3037,25 +2991,25 @@
   // while scrubbing — dragging the bar across a hundred hops shouldn't fire a
   // hundred overlapping pulse animations.
   function transportRender(animate) {
-    if (!transportSource || !transportWarp) return;
-    const srcMs = playToSrc(transportWarp, transportPlayMs);
-    const prev = animate && transportLastSrcMs != null && srcMs >= transportLastSrcMs ? transportLastSrcMs : null;
-    transportSource.render(srcMs, prev);
+    if (!S.transportSource || !S.transportWarp) return;
+    const srcMs = playToSrc(S.transportWarp, S.transportPlayMs);
+    const prev = animate && S.transportLastSrcMs != null && srcMs >= S.transportLastSrcMs ? S.transportLastSrcMs : null;
+    S.transportSource.render(srcMs, prev);
     transportLastSrcMs = srcMs;
     const seek = transportEl("sim-transport-seek");
-    if (document.activeElement !== seek) seek.value = String(Math.round(transportPlayMs));
-    transportEl("sim-transport-time").textContent = transportSource.format(srcMs);
+    if (document.activeElement !== seek) seek.value = String(Math.round(S.transportPlayMs));
+    transportEl("sim-transport-time").textContent = S.transportSource.format(srcMs);
   }
 
   function transportFrame(ts) {
-    if (!transportPlaying) return;
-    const dt = transportLastFrameTs ? ts - transportLastFrameTs : 0;
+    if (!S.transportPlaying) return;
+    const dt = S.transportLastFrameTs ? ts - S.transportLastFrameTs : 0;
     transportLastFrameTs = ts;
     // Clamp the frame delta so a backgrounded tab (which stops firing rAF)
     // doesn't resume by jumping the whole elapsed wall-clock at once.
-    transportPlayMs += Math.min(250, dt) * transportRate;
-    if (transportPlayMs >= transportWarp.durationPlayMs) {
-      transportPlayMs = transportWarp.durationPlayMs;
+    transportPlayMs += Math.min(250, dt) * S.transportRate;
+    if (S.transportPlayMs >= S.transportWarp.durationPlayMs) {
+      transportPlayMs = S.transportWarp.durationPlayMs;
       transportRender(true);
       transportPause();
       return;
@@ -3065,10 +3019,10 @@
   }
 
   function transportPlay() {
-    if (!transportSource || !transportWarp) return;
+    if (!S.transportSource || !S.transportWarp) return;
     // Playing from the very end restarts, rather than sitting there doing
     // nothing — the common case after watching one through.
-    if (transportPlayMs >= transportWarp.durationPlayMs) {
+    if (S.transportPlayMs >= S.transportWarp.durationPlayMs) {
       transportPlayMs = 0;
       transportLastSrcMs = null;
       transportRender(false);
@@ -3082,7 +3036,7 @@
 
   function transportPause() {
     transportPlaying = false;
-    if (transportRaf) cancelAnimationFrame(transportRaf);
+    if (S.transportRaf) cancelAnimationFrame(S.transportRaf);
     transportRaf = null;
     const btn = transportEl("sim-transport-play");
     if (btn) {
@@ -3092,27 +3046,25 @@
   }
 
   function transportSeekTo(playMs) {
-    if (!transportWarp) return;
-    transportPlayMs = Math.max(0, Math.min(transportWarp.durationPlayMs, playMs));
+    if (!S.transportWarp) return;
+    transportPlayMs = Math.max(0, Math.min(S.transportWarp.durationPlayMs, playMs));
     transportLastSrcMs = null; // a seek can go backwards, so always rebuild
     transportRender(false);
   }
 
   function transportToEnd() {
-    if (!transportWarp) return;
+    if (!S.transportWarp) return;
     transportPause();
-    transportSeekTo(transportWarp.durationPlayMs);
+    transportSeekTo(S.transportWarp.durationPlayMs);
   }
 
   function transportRestart() {
-    if (!transportWarp) return;
+    if (!S.transportWarp) return;
     transportSeekTo(0);
     transportPlay();
   }
 
-  let replayWaves = [];
-  let replayIndex = 0;
-
+    
   function buildWaves(report) {
     const groups = new Map();
     for (const r of report.receptions) {
@@ -3177,7 +3129,7 @@
   function ensureGrowthMarker(nodeIndex) {
     let marker = growthMarkers.get(nodeIndex);
     if (!marker) {
-      const n = simNodes[nodeIndex];
+      const n = S.simNodes[nodeIndex];
       if (!n) return null;
       marker = L.circleMarker([n.lat, n.lon], { radius: GROWTH_BASE_RADIUS, color: "rgb(100,116,139)", weight: 2, fillOpacity: 0.15, interactive: false }).addTo(simResultsLayer);
       growthMarkers.set(nodeIndex, marker);
@@ -3186,10 +3138,10 @@
   }
 
   function growNode(nodeIndex) {
-    nodeGrowthCounts[nodeIndex] = (nodeGrowthCounts[nodeIndex] || 0) + 1;
+    S.nodeGrowthCounts[nodeIndex] = (S.nodeGrowthCounts[nodeIndex] || 0) + 1;
     const marker = ensureGrowthMarker(nodeIndex);
     if (!marker) return;
-    const { color, radius } = growthColorAndRadius(nodeGrowthCounts[nodeIndex]);
+    const { color, radius } = growthColorAndRadius(S.nodeGrowthCounts[nodeIndex]);
     marker.setStyle({ color, fillColor: color });
     marker.setRadius(radius);
   }
@@ -3219,9 +3171,9 @@
     nodeGrowthCounts = [];
     for (const r of report.receptions) {
       if (!matchesGrowBy(r)) continue;
-      nodeGrowthCounts[r.node] = (nodeGrowthCounts[r.node] || 0) + 1;
+      S.nodeGrowthCounts[r.node] = (S.nodeGrowthCounts[r.node] || 0) + 1;
     }
-    nodeGrowthCounts.forEach((count, nodeIndex) => {
+    S.nodeGrowthCounts.forEach((count, nodeIndex) => {
       if (!count) return;
       const marker = ensureGrowthMarker(nodeIndex);
       if (!marker) return;
@@ -3233,14 +3185,14 @@
 
   function playWave(wave) {
     if (!simViewMode.keepAllPaths) {
-      currentWaveLines.forEach((line) => simResultsLayer.removeLayer(line));
+      S.currentWaveLines.forEach((line) => simResultsLayer.removeLayer(line));
       currentWaveLines = [];
     }
-    const from = simNodes[wave.fromNode];
+    const from = S.simNodes[wave.fromNode];
     if (from) pulseAt([from.lat, from.lon], "#a855f7");
     for (const r of wave.receptions) {
       if (!matchesViewFilter(r)) continue;
-      const to = simNodes[r.node];
+      const to = S.simNodes[r.node];
       if (!from || !to) continue;
       const line = L.polyline(
         [
@@ -3249,7 +3201,7 @@
         ],
         { color: r.collided ? "#f87171" : "#4ade80", weight: r.collided ? 3 : 2, opacity: 0.85 }
       ).addTo(simResultsLayer);
-      currentWaveLines.push(line);
+      S.currentWaveLines.push(line);
       if (r.collided) pulseAt([to.lat, to.lon], "#f87171");
       if (matchesGrowBy(r)) growNode(r.node);
     }
@@ -3268,34 +3220,34 @@
   // either way, since simResultsLayer.clearLayers() drops them alongside
   // the lines (see skipToEnd's own note on this).
   function redrawPathsForKeepAllPaths() {
-    if (!lastReport) return;
+    if (!S.lastReport) return;
     // No waves built yet (a report exists but Replay was never started —
     // startReplay is what populates replayWaves) means there's no "most
     // recent wave" to narrow down to, so the accumulated view is the only
     // meaningful one regardless of the toggle. Without this, unticking
     // Keep all paths in that state would blank the map entirely.
-    if (replayWaves.length === 0) {
-      redrawResultLines(lastReport);
+    if (S.replayWaves.length === 0) {
+      redrawResultLines(S.lastReport);
       currentWaveLines = [];
       growthMarkers.clear();
-      applyFinalGrowth(lastReport);
+      applyFinalGrowth(S.lastReport);
       return;
     }
-    const finished = replayIndex >= replayWaves.length;
+    const finished = S.replayIndex >= S.replayWaves.length;
 
     if (simViewMode.keepAllPaths) {
       if (finished) {
-        redrawResultLines(lastReport);
+        redrawResultLines(S.lastReport);
         currentWaveLines = [];
         growthMarkers.clear();
-        applyFinalGrowth(lastReport);
+        applyFinalGrowth(S.lastReport);
         return;
       }
       // Mid-replay: accumulate everything played SO FAR (waves
       // 0..replayIndex-1), not the whole report — the run hasn't got to
       // the rest yet, and showing it would be a different view than the
       // one being watched.
-      renderWaveRange(0, replayIndex);
+      renderWaveRange(0, S.replayIndex);
       return;
     }
 
@@ -3303,7 +3255,7 @@
     // Nothing has played yet (replayIndex 0, replay not started) means
     // there's no "most recent wave"; a finished replay's most recent one
     // is the last.
-    const lastPlayed = finished ? replayWaves.length - 1 : replayIndex - 1;
+    const lastPlayed = finished ? S.replayWaves.length - 1 : S.replayIndex - 1;
     if (lastPlayed < 0) {
       simResultsLayer.clearLayers();
       currentWaveLines = [];
@@ -3324,13 +3276,13 @@
     growthMarkers.clear();
     nodeGrowthCounts = [];
     for (let i = startIndex; i < endIndex; i++) {
-      const wave = replayWaves[i];
+      const wave = S.replayWaves[i];
       if (!wave) continue;
-      const from = simNodes[wave.fromNode];
+      const from = S.simNodes[wave.fromNode];
       if (!from) continue;
       for (const r of wave.receptions) {
         if (!matchesViewFilter(r)) continue;
-        const to = simNodes[r.node];
+        const to = S.simNodes[r.node];
         if (!to) continue;
         const line = L.polyline(
           [
@@ -3339,7 +3291,7 @@
           ],
           { color: r.collided ? "#f87171" : "#4ade80", weight: r.collided ? 3 : 2, opacity: 0.85 }
         ).addTo(simResultsLayer);
-        currentWaveLines.push(line);
+        S.currentWaveLines.push(line);
         if (matchesGrowBy(r)) growNode(r.node);
       }
     }
@@ -3349,10 +3301,10 @@
   // so this is a binary search — it runs on every animation frame.
   function countWavesUpTo(srcMs) {
     let lo = 0;
-    let hi = replayWaves.length;
+    let hi = S.replayWaves.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (replayWaves[mid].atMs <= srcMs) lo = mid + 1;
+      if (S.replayWaves[mid].atMs <= srcMs) lo = mid + 1;
       else hi = mid;
     }
     return lo;
@@ -3366,10 +3318,10 @@
     return {
       kind: "sim",
       label: "Simulated flood",
-      times: replayWaves.map((w) => w.atMs),
+      times: S.replayWaves.map((w) => w.atMs),
       format: (srcMs) => {
         const k = countWavesUpTo(srcMs);
-        return `t=${Math.max(0, Math.round(srcMs))}ms · ${k}/${replayWaves.length}`;
+        return `t=${Math.max(0, Math.round(srcMs))}ms · ${k}/${S.replayWaves.length}`;
       },
       render: (srcMs, prevSrcMs) => {
         const k = countWavesUpTo(srcMs);
@@ -3378,9 +3330,9 @@
           if (k === prevK) return; // nothing new happened this frame
           // playWave already honours keepAllPaths (clearing the previous
           // wave's lines when it's off), so this one path covers both views.
-          for (let i = prevK; i < k; i++) playWave(replayWaves[i]);
+          for (let i = prevK; i < k; i++) playWave(S.replayWaves[i]);
           replayIndex = k;
-          setReplayStatus(k >= replayWaves.length ? "Replay finished — showing final state." : `Playing… t=${replayWaves[k - 1].atMs}ms (${k}/${replayWaves.length})`);
+          setReplayStatus(k >= S.replayWaves.length ? "Replay finished — showing final state." : `Playing… t=${S.replayWaves[k - 1].atMs}ms (${k}/${S.replayWaves.length})`);
           updateMapLiveStats(k);
           return;
         }
@@ -3390,7 +3342,7 @@
         // keeps scrubbing and toggling in perfect agreement about what should
         // be on screen.
         replayIndex = k;
-        if (lastReport) redrawPathsForKeepAllPaths();
+        if (S.lastReport) redrawPathsForKeepAllPaths();
         else {
           simResultsLayer.clearLayers();
           growthMarkers.clear();
@@ -3398,7 +3350,7 @@
           nodeGrowthCounts = [];
         }
         setReplayStatus(
-          replayWaves.length === 0 ? "" : k >= replayWaves.length ? "Showing final state." : `t=${Math.round(srcMs)}ms (${k}/${replayWaves.length})`
+          S.replayWaves.length === 0 ? "" : k >= S.replayWaves.length ? "Showing final state." : `t=${Math.round(srcMs)}ms (${k}/${S.replayWaves.length})`
         );
         updateMapLiveStats(k);
       },
@@ -3410,13 +3362,13 @@
   }
 
   function startReplay() {
-    replayWaves = lastReport ? buildWaves(lastReport) : [];
+    replayWaves = S.lastReport ? buildWaves(S.lastReport) : [];
     replayIndex = 0;
     simResultsLayer.clearLayers();
     growthMarkers.clear();
     nodeGrowthCounts = [];
     currentWaveLines = [];
-    if (replayWaves.length === 0) {
+    if (S.replayWaves.length === 0) {
       clearTransportSource();
       setReplayStatus("");
       return;
@@ -3428,14 +3380,14 @@
   function skipToEnd() {
     // Skipping to the end before ever pressing play still needs the waves
     // built and the transport pointed at them.
-    if (replayWaves.length === 0 && lastReport) {
-      replayWaves = buildWaves(lastReport);
-      if (replayWaves.length > 0) setTransportSource(simTransportSource());
+    if (S.replayWaves.length === 0 && S.lastReport) {
+      replayWaves = buildWaves(S.lastReport);
+      if (S.replayWaves.length > 0) setTransportSource(simTransportSource());
     }
-    if (!transportSource || transportSource.kind !== "sim") {
-      if (replayWaves.length > 0) setTransportSource(simTransportSource());
+    if (!S.transportSource || S.transportSource.kind !== "sim") {
+      if (S.replayWaves.length > 0) setTransportSource(simTransportSource());
     }
-    if (replayWaves.length === 0) {
+    if (S.replayWaves.length === 0) {
       simResultsLayer.clearLayers();
       growthMarkers.clear();
       currentWaveLines = [];
@@ -3448,15 +3400,15 @@
   }
 
   async function predictSettings() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Load some nodes first.");
       return;
     }
-    if (simLinks.length === 0) {
+    if (S.simLinks.length === 0) {
       setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
       return;
     }
-    if (simMessageGenerators.length === 0) {
+    if (S.simMessageGenerators.length === 0) {
       setStatus("sim-status", "Add at least one message sender first.");
       return;
     }
@@ -3471,16 +3423,16 @@
     // conditional rules), not a hard requirement — a failed terrain fetch
     // shouldn't block prediction, just fall back to neighbour-count-only/
     // global rules (attrsFromState tolerates a null grid).
-    const grid = await ensureGrid(simNodes).catch(() => null);
-    const attrs = attrsFromState(simNodes, grid);
+    const grid = await ensureGrid(S.simNodes).catch(() => null);
+    const attrs = attrsFromState(S.simNodes, grid);
 
-    const generation = ++predictGeneration;
+    const generation = ++S.predictGeneration;
     const worker = ensurePredictWorker();
 
     function onMessage(e) {
       const msg = e.data;
       if (msg.generation !== generation) return;
-      if (generation !== predictGeneration) {
+      if (generation !== S.predictGeneration) {
         // A newer search superseded this one — detach silently instead of
         // re-enabling buttons / popping stale results over the live search
         // (SIMULATION_REVIEW.md B5).
@@ -3528,11 +3480,11 @@
   // is finding the network's own ceiling, not replaying one specific
   // scenario at increasing multiples of itself.
   async function runStressTest() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Load some nodes first.");
       return;
     }
-    if (simLinks.length === 0) {
+    if (S.simLinks.length === 0) {
       setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
       return;
     }
@@ -3553,13 +3505,13 @@
     setStressProgress(0, loadLevels.length);
     document.getElementById("sim-stress-run").disabled = true;
 
-    const generation = ++predictGeneration; // shares the worker + its generation guard with predictSettings — only one search of either kind is ever live at once
+    const generation = ++S.predictGeneration; // shares the worker + its generation guard with predictSettings — only one search of either kind is ever live at once
     const worker = ensurePredictWorker();
 
     function onMessage(e) {
       const msg = e.data;
       if (msg.generation !== generation) return;
-      if (generation !== predictGeneration) {
+      if (generation !== S.predictGeneration) {
         // A newer search superseded this one — detach silently instead of
         // re-enabling buttons / popping stale results over the live search
         // (SIMULATION_REVIEW.md B5).
@@ -3665,21 +3617,17 @@
 
   // --- item 15c/15d: composite policy search + action list ---------------
 
-  let lastPolicyResult = null;
-  let lastPolicyAltitudeAttrs = null; // AltitudeM per node, as sent to SuggestPolicy — merged with computeTopologyAttrsJs() when rendering the action list
-  let lastPolicyActions = []; // for CSV export — see exportPolicyActionsCsv
-  let lastPolicyProfiles = null; // Map<label, [{nodeIndex, others}]> for the currently-displayed policy — see renderPolicyProfileSummary/openPolicyProfileDetail
-
+        
   async function runSuggestPolicy() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Load some nodes first.");
       return;
     }
-    if (simLinks.length === 0) {
+    if (S.simLinks.length === 0) {
       setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
       return;
     }
-    if (simMessageGenerators.length === 0) {
+    if (S.simMessageGenerators.length === 0) {
       setStatus("sim-status", "Add at least one message sender first.");
       return;
     }
@@ -3690,17 +3638,17 @@
     setPredictProgress(0, 1);
     document.getElementById("sim-suggest-policy").disabled = true;
 
-    const grid = await ensureGrid(simNodes).catch(() => null);
-    const attrs = attrsFromState(simNodes, grid); // only altitudeM is actually read server-side — see PolicyTuneRequest's own doc comment
+    const grid = await ensureGrid(S.simNodes).catch(() => null);
+    const attrs = attrsFromState(S.simNodes, grid); // only altitudeM is actually read server-side — see PolicyTuneRequest's own doc comment
     lastPolicyAltitudeAttrs = attrs;
 
-    const generation = ++predictGeneration; // shares the same worker + generation guard as predictSettings/runStressTest
+    const generation = ++S.predictGeneration; // shares the same worker + generation guard as predictSettings/runStressTest
     const worker = ensurePredictWorker();
 
     function onMessage(e) {
       const msg = e.data;
       if (msg.generation !== generation) return;
-      if (generation !== predictGeneration) {
+      if (generation !== S.predictGeneration) {
         // A newer search superseded this one — detach silently instead of
         // re-enabling buttons / popping stale results over the live search
         // (SIMULATION_REVIEW.md B5).
@@ -3783,13 +3731,12 @@
   // lifetime of the page (see internal/meshsim.BuiltinMeshMethods), so
   // there's no reason to re-cross the WASM boundary for it every time a
   // search result renders.
-  let meshMethodsCache = null;
-  async function meshMethodByName(name) {
-    if (!meshMethodsCache) {
+    async function meshMethodByName(name) {
+    if (!S.meshMethodsCache) {
       await MeshSim.ready;
       meshMethodsCache = MeshSim.meshMethods();
     }
-    return meshMethodsCache.find((m) => m.name === name) || null;
+    return S.meshMethodsCache.find((m) => m.name === name) || null;
   }
 
   // A community-method suggestion's name is prefixed "community: " by
@@ -3842,7 +3789,7 @@
     detailEl.classList.add("hidden");
     summaryEl.innerHTML = "";
     lastPolicyProfiles = null;
-    if (simNodes.length === 0) return;
+    if (S.simNodes.length === 0) return;
 
     await MeshSim.ready;
     const scenario = scenarioFromState();
@@ -3870,8 +3817,8 @@
     // in exactly one group,
     // including "No profile."
     const totalGrouped = Array.from(groups.values()).reduce((sum, arr) => sum + arr.length, 0);
-    if (totalGrouped !== simNodes.length) {
-      console.error(`Policy profile breakdown: grouped ${totalGrouped} of ${simNodes.length} loaded repeaters — some were dropped. This is a bug.`);
+    if (totalGrouped !== S.simNodes.length) {
+      console.error(`Policy profile breakdown: grouped ${totalGrouped} of ${S.simNodes.length} loaded repeaters — some were dropped. This is a bug.`);
     }
 
     // "No profile" last; everything else in the order it first appears
@@ -3901,8 +3848,8 @@
   // that actually caused the match, so a mis-tiered repeater is
   // immediately explainable, not just visible.
   function openPolicyProfileDetail(label) {
-    if (!lastPolicyProfiles || !lastPolicyProfiles.has(label)) return;
-    const nodes = lastPolicyProfiles.get(label);
+    if (!S.lastPolicyProfiles || !S.lastPolicyProfiles.has(label)) return;
+    const nodes = S.lastPolicyProfiles.get(label);
     const attrsArray = attrsArrayForPolicy();
 
     document.getElementById("sim-policy-profile-detail").classList.remove("hidden");
@@ -3911,7 +3858,7 @@
     const list = document.getElementById("sim-policy-profile-detail-list");
     list.innerHTML = "";
     nodes.forEach(({ nodeIndex, others }) => {
-      const n = simNodes[nodeIndex];
+      const n = S.simNodes[nodeIndex];
       const attrs = attrsArray[nodeIndex] || {};
       const criteria = [`${attrs.neighborCount || 0} neighbour${attrs.neighborCount === 1 ? "" : "s"}`];
       if (attrs.altitudeM) criteria.push(`altitude ${Math.round(attrs.altitudeM)}m`);
@@ -3939,8 +3886,8 @@
   // attrs a node has.
   function attrsArrayForPolicy() {
     const topologyAttrs = computeTopologyAttrsJs();
-    return simNodes.map((n, i) => ({
-      altitudeM: (lastPolicyAltitudeAttrs && lastPolicyAltitudeAttrs[i] && lastPolicyAltitudeAttrs[i].altitudeM) || 0,
+    return S.simNodes.map((n, i) => ({
+      altitudeM: (S.lastPolicyAltitudeAttrs && S.lastPolicyAltitudeAttrs[i] && S.lastPolicyAltitudeAttrs[i].altitudeM) || 0,
       ...(topologyAttrs[i] || { neighborCount: 0, isArticulation: false, marginalCoverage: 0 }),
     }));
   }
@@ -3956,7 +3903,7 @@
   function renderPolicyActionList(best) {
     const attrsArray = attrsArrayForPolicy();
     const actions = [];
-    simNodes.forEach((n, i) => {
+    S.simNodes.forEach((n, i) => {
       const attrs = attrsArray[i];
       const { prefs: recPrefs, floodMax: recFloodMax } = applyPolicyToNodeState(defaultPrefs(), 0, best.policy, attrs, i);
       const curPrefs = effectivePrefsFor(n);
@@ -3983,10 +3930,10 @@
     const actionsList = document.getElementById("sim-policy-actions-list");
     actionsList.innerHTML = "";
     if (actions.length === 0) {
-      actionsList.innerHTML = `<div class="plan-hint">No changes — every repeater the policy covers is already at the recommended settings; ${simNodes.length} repeater${simNodes.length === 1 ? "" : "s"} left untouched.</div>`;
+      actionsList.innerHTML = `<div class="plan-hint">No changes — every repeater the policy covers is already at the recommended settings; ${S.simNodes.length} repeater${S.simNodes.length === 1 ? "" : "s"} left untouched.</div>`;
       return;
     }
-    const untouched = simNodes.length - actions.length;
+    const untouched = S.simNodes.length - actions.length;
     const headerHint = document.createElement("div");
     headerHint.className = "plan-hint";
     headerHint.textContent = `${actions.length} repeater${actions.length === 1 ? "" : "s"} need a change${untouched > 0 ? ` — ${untouched} left at defaults` : ""}.`;
@@ -4003,12 +3950,12 @@
   }
 
   function exportPolicyActionsCsv() {
-    if (lastPolicyActions.length === 0) {
+    if (S.lastPolicyActions.length === 0) {
       setStatus("sim-status", "Nothing to export — no repeater needs a change under the current best policy.");
       return;
     }
     const rows = [["Repeater", "Change", "CLI command"]];
-    for (const { label, changed } of lastPolicyActions) {
+    for (const { label, changed } of S.lastPolicyActions) {
       for (const c of changed) rows.push([label, c.label, c.cli]);
     }
     const csv = rows.map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -4041,11 +3988,7 @@
   // this). Driving it from here means every single round is its own
   // postMessage round-trip, so control genuinely returns to this loop
   // (and Cancel can actually take effect) between every round.
-  let optimizeCancelled = false;
-  let optimizeCancelTimeout = null;
-  let lastOptimizeDeviations = []; // for CSV export — see exportOptimizeDeviationsCsv
-  let lastOptimizeSnapshot = []; // per-repeater table rows — see renderOptimizeNodesTable/openOptimizeNodeDetail
-
+        
   // MIN_IMPROVEMENT is in contention-SCORE units (see
   // internal/meshsim.nodeContentionScore), not a percentage.
   //
@@ -4087,19 +4030,19 @@
   }
 
   async function runOptimizeAdaptive() {
-    if (simNodes.length === 0) {
+    if (S.simNodes.length === 0) {
       setStatus("sim-status", "Load some nodes first.");
       return;
     }
-    if (simLinks.length === 0) {
+    if (S.simLinks.length === 0) {
       setStatus("sim-status", 'No connectivity built yet — click "Build links" first.');
       return;
     }
-    if (simMessageGenerators.length === 0) {
+    if (S.simMessageGenerators.length === 0) {
       setStatus("sim-status", "Add at least one message sender first.");
       return;
     }
-    if (!lastPolicyResult || !lastPolicyResult.suggestions || lastPolicyResult.suggestions.length === 0) {
+    if (!S.lastPolicyResult || !S.lastPolicyResult.suggestions || S.lastPolicyResult.suggestions.length === 0) {
       setStatus("sim-status", 'Run "Search policies" first — the optimizer starts from its own best result rather than searching from nothing.');
       return;
     }
@@ -4120,8 +4063,8 @@
     const optimizeRequest = {
       scenario: scenarioFromState(),
       messages: messagesFromState(seed),
-      attrs: lastPolicyAltitudeAttrs || [],
-      basePolicy: lastPolicyResult.suggestions[0].policy,
+      attrs: S.lastPolicyAltitudeAttrs || [],
+      basePolicy: S.lastPolicyResult.suggestions[0].policy,
       maxSimTimeMs,
       trials,
       // ConfirmTrials deliberately larger than the screening pass's own
@@ -4158,7 +4101,7 @@
     };
 
     optimizeCancelled = false;
-    const generation = ++predictGeneration;
+    const generation = ++S.predictGeneration;
     const worker = ensurePredictWorker();
 
     document.getElementById("sim-optimize-adaptive").disabled = true;
@@ -4181,12 +4124,12 @@
           "optimize-step-result",
           "optimize-step-error"
         );
-        if (generation !== predictGeneration) return; // superseded by a newer search/optimize run
+        if (generation !== S.predictGeneration) return; // superseded by a newer search/optimize run
         setOptimizeProgress(state);
-        if (state.done || optimizeCancelled) break;
+        if (state.done || S.optimizeCancelled) break;
       }
 
-      setStatus("sim-status", optimizeCancelled ? "Cancelled — validating the best result found so far…" : "Validating…");
+      setStatus("sim-status", S.optimizeCancelled ? "Cancelled — validating the best result found so far…" : "Validating…");
       const holdout = await workerRequest(
         worker,
         generation,
@@ -4194,17 +4137,17 @@
         "optimize-validate-result",
         "optimize-validate-error"
       );
-      if (generation !== predictGeneration) return;
-      renderOptimizeResult(state, holdout, optimizeCancelled, optimizeRequest);
+      if (generation !== S.predictGeneration) return;
+      renderOptimizeResult(state, holdout, S.optimizeCancelled, optimizeRequest);
       openModal("sim-optimize-modal");
       setStatus("sim-status", "Done.");
     } catch (err) {
-      if (generation === predictGeneration) {
+      if (generation === S.predictGeneration) {
         setStatus("sim-status", `Optimization failed: ${err.message || err}`);
       }
     } finally {
-      if (generation === predictGeneration) {
-        clearTimeout(optimizeCancelTimeout);
+      if (generation === S.predictGeneration) {
+        clearTimeout(S.optimizeCancelTimeout);
         document.getElementById("sim-optimize-adaptive").disabled = false;
         document.getElementById("sim-optimize-cancel").classList.add("hidden");
         hideOptimizeProgress();
@@ -4223,12 +4166,12 @@
   // never come; ensurePredictWorker() transparently creates a fresh
   // instance the next time anything needs it.
   function cancelOptimizeAdaptive() {
-    if (optimizeCancelled) return; // already cancelling — let the force-timeout run its course
+    if (S.optimizeCancelled) return; // already cancelling — let the force-timeout run its course
     optimizeCancelled = true;
     setStatus("sim-status", "Cancelling — finishing the in-flight round…");
     optimizeCancelTimeout = setTimeout(() => {
-      if (predictWorker) {
-        predictWorker.terminate();
+      if (S.predictWorker) {
+        S.predictWorker.terminate();
         predictWorker = null;
       }
       document.getElementById("sim-optimize-adaptive").disabled = false;
@@ -4311,7 +4254,7 @@
       return;
     }
     state.deviations.forEach((d) => {
-      const n = simNodes[d.node];
+      const n = S.simNodes[d.node];
       const row = document.createElement("div");
       row.className = "plan-list-item";
       row.innerHTML = `
@@ -4366,7 +4309,7 @@
       return;
     }
     snapshot.forEach((s) => {
-      const n = simNodes[s.node];
+      const n = S.simNodes[s.node];
       const st = s.stats || {};
       const tr = document.createElement("tr");
       tr.className = "sim-optimize-node-row";
@@ -4386,9 +4329,9 @@
   }
 
   function openOptimizeNodeDetail(nodeIndex) {
-    const s = lastOptimizeSnapshot.find((x) => x.node === nodeIndex);
+    const s = S.lastOptimizeSnapshot.find((x) => x.node === nodeIndex);
     if (!s) return;
-    const n = simNodes[nodeIndex];
+    const n = S.simNodes[nodeIndex];
     document.getElementById("sim-optimize-node-detail").classList.remove("hidden");
     document.getElementById("sim-optimize-node-detail-title").textContent = `${n ? n.label : `#${nodeIndex}`} — ${(s.diagnosis && s.diagnosis.headline) || ""}`;
     const list = document.getElementById("sim-optimize-node-detail-list");
@@ -4437,7 +4380,7 @@
       return;
     }
     history.forEach((h) => {
-      const target = simNodes[h.targetNode];
+      const target = S.simNodes[h.targetNode];
       const targetLabel = h.moveKind === "spsa_warm_start" ? "(every repeater)" : target ? target.label : h.targetNode >= 0 ? `#${h.targetNode}` : "—";
       const tr = document.createElement("tr");
       tr.innerHTML = `
@@ -4455,13 +4398,13 @@
   }
 
   function exportOptimizeDeviationsCsv() {
-    if (lastOptimizeDeviations.length === 0) {
+    if (S.lastOptimizeDeviations.length === 0) {
       setStatus("sim-status", "Nothing to export — no repeater was adjusted.");
       return;
     }
     const rows = [["Repeater", "Round", "Move kind", "Reason", "Old value", "New value", "CLI command", "Warning"]];
-    for (const d of lastOptimizeDeviations) {
-      const n = simNodes[d.node];
+    for (const d of S.lastOptimizeDeviations) {
+      const n = S.simNodes[d.node];
       rows.push([
         n ? n.label : `#${d.node}`,
         d.round,
@@ -4498,19 +4441,18 @@
   // ever tells you who *did* hear it, never why someone who should have
   // didn't).
 
-  let nodeDirectoryCache = null; // lowercase pubkey -> {name, lat, lon, role}
-
+  
   async function ensureNodeDirectory() {
-    if (nodeDirectoryCache) return nodeDirectoryCache;
+    if (S.nodeDirectoryCache) return S.nodeDirectoryCache;
     const resp = await fetch(`${MeshApi.BASE}/nodes?limit=5000`);
     if (!resp.ok) throw new Error(`CoreScope node directory fetch failed: HTTP ${resp.status}`);
     const data = await resp.json();
     nodeDirectoryCache = new Map();
     for (const n of data.nodes || []) {
       if (n.lat == null || n.lon == null || !n.public_key) continue; // can't place a node with no known position
-      nodeDirectoryCache.set(n.public_key.toLowerCase(), { name: n.name || n.public_key.slice(0, 8), lat: n.lat, lon: n.lon, role: n.role });
+      S.nodeDirectoryCache.set(n.public_key.toLowerCase(), { name: n.name || n.public_key.slice(0, 8), lat: n.lat, lon: n.lon, role: n.role });
     }
-    return nodeDirectoryCache;
+    return S.nodeDirectoryCache;
   }
 
   function addProvenEdge(edges, from, to, tMs) {
@@ -5021,8 +4963,8 @@
   // table and the before/after delta render from. Returns null unless an
   // episode is loaded and its target flood is present in this run.
   function computeEpisodeStats(report, messages) {
-    if (!lastEpisode || !lastEpisode.target) return null;
-    const t = lastEpisode.target;
+    if (!S.lastEpisode || !S.lastEpisode.target) return null;
+    const t = S.lastEpisode.target;
     let targetPid = -1;
     for (let i = 0; i < messages.length; i++) {
       if (!messages[i].background && messages[i].origin === t.nodeIndex && messages[i].sendAtMs === t.atMs) {
@@ -5045,7 +4987,7 @@
     const indexByRefId = episodeIndexByRefId();
     const curIdx = (o) => (indexByRefId.has(o.pubkey) ? indexByRefId.get(o.pubkey) : -1);
 
-    const realObservers = (lastEpisode.targetObservers || []).filter((o) => curIdx(o) >= 0);
+    const realObservers = (S.lastEpisode.targetObservers || []).filter((o) => curIdx(o) >= 0);
     const realHeard = new Set(realObservers.map((o) => curIdx(o)));
     const observerRows = realObservers.map((o) => ({ name: o.name, simDelivered: delivered.has(curIdx(o)) }));
     const reached = observerRows.filter((o) => o.simDelivered).length;
@@ -5055,14 +4997,14 @@
     // list does NOT include — classified by what they were doing at the
     // target's transit (public/evidence.js): busy observers could simply have
     // missed it; a silent-active observer is proof the packet never arrived.
-    const evidenceByPubkey = new Map((lastEpisode.observerEvidence || []).map((o) => [o.pubkey, o]));
+    const evidenceByPubkey = new Map((S.lastEpisode.observerEvidence || []).map((o) => [o.pubkey, o]));
     // Legacy saved setups predate observerEvidence — degrade their deaf list
     // to "busy" so old episodes keep rendering sensibly.
     if (evidenceByPubkey.size === 0) {
-      for (const pk of lastEpisode.deafObservers || []) evidenceByPubkey.set(pk, { pubkey: pk, state: "busy", reason: "was transmitting at the time (legacy episode)" });
+      for (const pk of S.lastEpisode.deafObservers || []) evidenceByPubkey.set(pk, { pubkey: pk, state: "busy", reason: "was transmitting at the time (legacy episode)" });
     }
     const overPredicted = [];
-    for (const info of lastEpisode.allObservers || []) {
+    for (const info of S.lastEpisode.allObservers || []) {
       const idx = curIdx(info);
       if (idx < 0 || realHeard.has(idx) || !delivered.has(idx)) continue;
       const ev = evidenceByPubkey.get(info.pubkey);
@@ -5082,7 +5024,7 @@
     });
 
     const evidenceCounts = { heard: 0, busy: 0, "silent-active": 0, "silent-unknown": 0 };
-    for (const o of lastEpisode.observerEvidence || []) if (evidenceCounts[o.state] != null) evidenceCounts[o.state]++;
+    for (const o of S.lastEpisode.observerEvidence || []) if (evidenceCounts[o.state] != null) evidenceCounts[o.state]++;
 
     const collisions = (report.receptions || []).filter((r) => r.collided).length;
     // Ring overlay set: pruned deliveries PLUS contradicted nodes the sim
@@ -5116,15 +5058,15 @@
   }
 
   function renderEpisodeAnalysis() {
-    if (!lastEpisode) return;
+    if (!S.lastEpisode) return;
     document.getElementById("sim-episode-provenance").innerHTML =
-      `Reconstructed from packet <code>${escapeHtml(lastEpisode.hash)}</code> · ±${lastEpisode.windowSecs}s window · fetched ${escapeHtml(new Date(lastEpisode.fetchedAt).toLocaleString())}.`;
+      `Reconstructed from packet <code>${escapeHtml(S.lastEpisode.hash)}</code> · ±${S.lastEpisode.windowSecs}s window · fetched ${escapeHtml(new Date(S.lastEpisode.fetchedAt).toLocaleString())}.`;
 
-    const stats = lastReport ? computeEpisodeStats(lastReport, lastMessages || []) : null;
+    const stats = S.lastReport ? computeEpisodeStats(S.lastReport, S.lastMessages || []) : null;
     episodeEvidenceLayer.clearLayers();
     if (stats && (stats.ringNodes || stats.prunedNodes).length) {
       for (const idx of stats.ringNodes || stats.prunedNodes) {
-        const n = simNodes[idx];
+        const n = S.simNodes[idx];
         if (!n) continue;
         L.circleMarker([n.lat, n.lon], {
           radius: 14,
@@ -5146,9 +5088,9 @@
 
     renderFrontierAnalysis(null);
     if (!stats) {
-      recallEl.textContent = lastEpisode.target
+      recallEl.textContent = S.lastEpisode.target
         ? "Run the simulation to compare it against what really happened."
-        : lastEpisode.targetNote || "No target packet to compare — the surrounding traffic is still reconstructed and tunable.";
+        : S.lastEpisode.targetNote || "No target packet to compare — the surrounding traffic is still reconstructed and tunable.";
       return;
     }
 
@@ -5161,7 +5103,7 @@
       (contradictedCount
         ? ` (<span class="sim-episode-worse">${contradictedCount} contradicted</span> — healthy observers on those paths heard nothing, so reality says the packet did not spread there this time; contradicted nodes are ✕-ringed on the map).`
         : ".") +
-      (lastEpisode.originInferred ? " <em>Origin approximated at the first observed relay (true sender is one RF hop upstream and unpositioned).</em>" : "");
+      (S.lastEpisode.originInferred ? " <em>Origin approximated at the first observed relay (true sender is one RF hop upstream and unpositioned).</em>" : "");
     const evEl = document.getElementById("sim-episode-evidence");
     if (evEl) {
       const c = stats.evidenceCounts;
@@ -5206,7 +5148,7 @@
 
     // Before/after problem delta.
     const now = stats.problems;
-    const base = episodeBaseline;
+    const base = S.episodeBaseline;
     const keys = Object.keys(now);
     for (const k of keys) {
       const nowVal = now[k];
@@ -5235,7 +5177,7 @@
   // case-sensitive map silently dropped observers from recall AND from
   // the contradicted set (SIMULATION_REVIEW.md C5).
   function episodeIndexByRefId() {
-    return new Map(simNodes.map((n, i) => [String(n.refId || "").toLowerCase(), i]));
+    return new Map(S.simNodes.map((n, i) => [String(n.refId || "").toLowerCase(), i]));
   }
 
   // Node indices reality contradicts, from the FULL observer evidence
@@ -5245,10 +5187,10 @@
   // missing upload never contradicts delivery (C6).
   function episodeContradictedNodes(indexByRefId) {
     const out = new Set();
-    if (!lastEpisode) return out;
+    if (!S.lastEpisode) return out;
     const provenPk = new Set();
-    for (const path of lastEpisode.targetPaths || []) for (const pk of path) provenPk.add(pk);
-    for (const o of lastEpisode.observerEvidence || []) {
+    for (const path of S.lastEpisode.targetPaths || []) for (const pk of path) provenPk.add(pk);
+    for (const o of S.lastEpisode.observerEvidence || []) {
       if (o.state !== "silent-active" || provenPk.has(o.pubkey)) continue;
       const idx = indexByRefId.get(o.pubkey);
       if (idx != null) out.add(idx);
@@ -5264,30 +5206,30 @@
   function renderFrontierAnalysis(ensembleVerdict) {
     const el = document.getElementById("sim-episode-frontier");
     if (!el) return;
-    if (!lastEpisode || !lastEpisode.target || !(lastEpisode.targetPaths || []).length) {
+    if (!S.lastEpisode || !S.lastEpisode.target || !(S.lastEpisode.targetPaths || []).length) {
       el.textContent = "No observed relay chains to anchor a frontier analysis.";
       return;
     }
-    const indexByRefId = new Map(simNodes.map((n, i) => [String(n.refId || "").toLowerCase(), i]));
-    const proven = new Set([lastEpisode.target.nodeIndex]);
-    for (const path of lastEpisode.targetPaths) {
+    const indexByRefId = new Map(S.simNodes.map((n, i) => [String(n.refId || "").toLowerCase(), i]));
+    const proven = new Set([S.lastEpisode.target.nodeIndex]);
+    for (const path of S.lastEpisode.targetPaths) {
       for (const pk of path) {
         const idx = indexByRefId.get(pk);
         if (idx != null) proven.add(idx);
       }
     }
     const stateByIndex = new Map();
-    for (const o of lastEpisode.observerEvidence || []) {
+    for (const o of S.lastEpisode.observerEvidence || []) {
       const idx = indexByRefId.get(o.pubkey);
       if (idx != null) stateByIndex.set(idx, o.state);
     }
     const fa = HopReachEvidence.frontierAnalysis({
       provenTransmitters: [...proven],
-      links: simLinks,
+      links: S.simLinks,
       stateOf: (n) => stateByIndex.get(n) || null,
     });
-    const silentActiveTotal = (lastEpisode.observerEvidence || []).filter((o) => o.state === "silent-active" && indexByRefId.has(o.pubkey)).length;
-    const nameOf = (i) => (simNodes[i] ? simNodes[i].label : `#${i}`);
+    const silentActiveTotal = (S.lastEpisode.observerEvidence || []).filter((o) => o.state === "silent-active" && indexByRefId.has(o.pubkey)).length;
+    const nameOf = (i) => (S.simNodes[i] ? S.simNodes[i].label : `#${i}`);
     const rows = fa.frontier
       .map((f) => {
         const bits = [];
@@ -5306,8 +5248,8 @@
   }
 
   function setEpisodeBaseline() {
-    if (!lastEpisode || !lastReport) return;
-    const stats = computeEpisodeStats(lastReport, lastMessages || []);
+    if (!S.lastEpisode || !S.lastReport) return;
+    const stats = computeEpisodeStats(S.lastReport, S.lastMessages || []);
     if (!stats) return;
     episodeBaseline = { ...stats.problems };
     renderEpisodeAnalysis();
@@ -5321,12 +5263,12 @@
   // target got through, instead of presenting one arbitrary ordering as
   // fact.
   async function runEpisodeProbability() {
-    if (!lastEpisode || !lastEpisode.target) {
+    if (!S.lastEpisode || !S.lastEpisode.target) {
       setStatus("sim-episode-probability-status", "Load an episode with a flood target first.");
       return;
     }
-    const usingEpisodeMessages = !!(lastEpisodeMessages && lastEpisodeTargetPid >= 0);
-    if (!usingEpisodeMessages && (simMessageGenerators.length === 0 || simLinks.length === 0)) {
+    const usingEpisodeMessages = !!(S.lastEpisodeMessages && S.lastEpisodeTargetPid >= 0);
+    if (!usingEpisodeMessages && (S.simMessageGenerators.length === 0 || S.simLinks.length === 0)) {
       setStatus("sim-episode-probability-status", "Reconstruct the episode (nodes/links/senders) first.");
       return;
     }
@@ -5338,7 +5280,7 @@
       await MeshSim.ready;
       const baseSeed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
       const maxSimTimeMs = parseInt(document.getElementById("sim-max-time").value, 10) || 60000;
-      const t = lastEpisode.target;
+      const t = S.lastEpisode.target;
       const scenario = scenarioFromState();
       const deliveredCount = new Map(); // node -> runs delivered (raw model)
       const keptCount = new Map(); // node -> runs delivered after evidence pruning
@@ -5346,7 +5288,7 @@
 
       // Contradicted node set is timing-independent (it's reality's verdict)
       // — same source of truth as every other consumer (C3/C5/C6).
-      const evidenceByPubkey = new Map((lastEpisode.observerEvidence || []).map((o) => [o.pubkey, o]));
+      const evidenceByPubkey = new Map((S.lastEpisode.observerEvidence || []).map((o) => [o.pubkey, o]));
       const indexByRefId = episodeIndexByRefId();
       const contradictedNodes = episodeContradictedNodes(indexByRefId);
       // Joint-silence counting (C2): the per-run outcome we actually need.
@@ -5359,15 +5301,15 @@
         // Replay flow: re-run the episode's OWN messages (generators are
         // never populated there). Reconstruct flow: expand the generators.
         const messages = usingEpisodeMessages
-          ? lastEpisodeMessages.map((m) => ({ ...m }))
+          ? S.lastEpisodeMessages.map((m) => ({ ...m }))
           : messagesFromState(seed);
         // Find the target BEFORE jittering — by identity (sourceHash) when
         // available; (origin, sendAtMs) confuses same-second re-sends (M5).
-        let targetPid = usingEpisodeMessages ? lastEpisodeTargetPid : -1;
+        let targetPid = usingEpisodeMessages ? S.lastEpisodeTargetPid : -1;
         if (targetPid < 0) {
           for (let i = 0; i < messages.length; i++) {
             if (messages[i].background) continue;
-            if (messages[i].sourceHash === lastEpisode.hash) {
+            if (messages[i].sourceHash === S.lastEpisode.hash) {
               targetPid = i;
               break;
             }
@@ -5429,7 +5371,7 @@
 
       // Render: per-observer delivery frequency plus the reach distribution.
       const rows = [];
-      for (const info of lastEpisode.allObservers || []) {
+      for (const info of S.lastEpisode.allObservers || []) {
         const idx = indexByRefId.has(info.pubkey) ? indexByRefId.get(info.pubkey) : -1;
         if (idx < 0) continue;
         const ev = evidenceByPubkey.get(info.pubkey);
@@ -5450,7 +5392,7 @@
       // collided arrival logs nothing, so only clean deliveries count
       // against silence.
       const silentNames = [];
-      for (const info of lastEpisode.allObservers || []) {
+      for (const info of S.lastEpisode.allObservers || []) {
         const ev = evidenceByPubkey.get(info.pubkey);
         const idx = indexByRefId.has(info.pubkey) ? indexByRefId.get(info.pubkey) : -1;
         if (ev && ev.state === "silent-active" && contradictedNodes.has(idx)) silentNames.push(info.name);
@@ -5550,10 +5492,7 @@
   // "reach" is the honest middle ground these floods need: a broadcast went
   // out, our model says this repeater could decode it, and no observer was
   // positioned to confirm either way.
-  let replayObservations = new Map();
-  let replayWindowStartMs = 0;
-  let replayTargetHash = "";
-
+      
   function buildReplayObservations(events) {
     const byNode = new Map();
     const at = (idx) => {
@@ -5616,21 +5555,16 @@
     return items;
   }
 
-  let realTimelineEvents = [];
-  let realTimelineIndex = 0;
-  let realTimelineWindowStartMs = 0;
-  // The actual ± window (seconds) used for the most recent replay — read
+        // The actual ± window (seconds) used for the most recent replay — read
   // from the "Surrounding activity window" control in replayFromHash, kept
   // here so the status strings below can report the real figure used
   // rather than a stale hardcoded "±30s" (item 8).
-  let lastRealTimelineWindowSecs = 30;
-
+  
   // The real-activity replay's status shows in two places at once — the
   // bottleneck modal and the map-docked control (see
   // ensureBottleneckLegendControl) — so everything goes through here rather
   // than setStatus directly, same pattern as setReplayStatus.
-  let lastRealReplayStatusText = "";
-
+  
   function setRealReplayStatus(text) {
     lastRealReplayStatusText = text;
     setStatus("sim-bottleneck-replay-status", text);
@@ -5662,7 +5596,7 @@
   }
 
   function playRealTimelineEvent(e, animate) {
-    const from = simNodes[e.from];
+    const from = S.simNodes[e.from];
     if (!from) return;
 
     if (e.kind === "predicted") {
@@ -5674,7 +5608,7 @@
         // not the other, so the map showed hundreds of clean predicted hops
         // while claiming to be showing collisions only.
         if (!matchesViewFilter(r)) continue;
-        const to = simNodes[r.node];
+        const to = S.simNodes[r.node];
         if (!to) continue;
         // Predicted collisions are worth seeing — they're the whole reason
         // to simulate the surrounding traffic rather than the target alone.
@@ -5697,7 +5631,7 @@
     if (simViewMode.filter === "collisions") return;
     const color = e.isTarget ? REAL_TARGET_COLOR : REAL_CONTEXT_COLOR;
     for (const toIdx of e.tos) {
-      const to = simNodes[toIdx];
+      const to = S.simNodes[toIdx];
       if (!to) continue;
       L.polyline(
         [
@@ -5717,10 +5651,10 @@
   // by tMs) — the real replay's equivalent of countWavesUpTo.
   function countRealEventsUpTo(srcMs) {
     let lo = 0;
-    let hi = realTimelineEvents.length;
+    let hi = S.realTimelineEvents.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (realTimelineEvents[mid].tMs <= srcMs) lo = mid + 1;
+      if (S.realTimelineEvents[mid].tMs <= srcMs) lo = mid + 1;
       else hi = mid;
     }
     return lo;
@@ -5729,8 +5663,8 @@
   function realTransportSource() {
     return {
       kind: "real",
-      label: `Real traffic ±${lastRealTimelineWindowSecs}s`,
-      times: realTimelineEvents.map((e) => e.tMs),
+      label: `Real traffic ±${S.lastRealTimelineWindowSecs}s`,
+      times: S.realTimelineEvents.map((e) => e.tMs),
       // The readout stays in real seconds relative to the window's start,
       // even though the scrubber moves through compressed play time — the
       // offset into the real window is the number that actually means
@@ -5738,52 +5672,52 @@
       format: (srcMs) => {
         // Clamped at zero: the timeline's lead-in instant sits 1ms before
         // the first event, which would otherwise render as "+-0.0s".
-        const offsetS = Math.max(0, (srcMs - realTimelineWindowStartMs) / 1000);
+        const offsetS = Math.max(0, (srcMs - S.realTimelineWindowStartMs) / 1000);
         const k = countRealEventsUpTo(srcMs);
-        return `+${offsetS.toFixed(1)}s · ${k}/${realTimelineEvents.length}`;
+        return `+${offsetS.toFixed(1)}s · ${k}/${S.realTimelineEvents.length}`;
       },
       render: (srcMs, prevSrcMs) => {
         const k = countRealEventsUpTo(srcMs);
         if (prevSrcMs != null) {
           const prevK = countRealEventsUpTo(prevSrcMs);
           if (k === prevK) return;
-          for (let i = prevK; i < k; i++) playRealTimelineEvent(realTimelineEvents[i], realTimelineEvents[i].isTarget);
+          for (let i = prevK; i < k; i++) playRealTimelineEvent(S.realTimelineEvents[i], S.realTimelineEvents[i].isTarget);
           realTimelineIndex = k;
-          const e = realTimelineEvents[k - 1];
-          const offsetS = ((e.tMs - realTimelineWindowStartMs) / 1000).toFixed(1);
+          const e = S.realTimelineEvents[k - 1];
+          const offsetS = ((e.tMs - S.realTimelineWindowStartMs) / 1000).toFixed(1);
           setRealReplayStatus(
-            k >= realTimelineEvents.length
-              ? `Replay finished — showing the full ±${lastRealTimelineWindowSecs}s window.`
-              : `Playing… t=+${offsetS}s (${k}/${realTimelineEvents.length})${e.kind === "predicted" ? " · simulated" : e.isTarget ? " · this is the replayed packet" : " · observed"}`
+            k >= S.realTimelineEvents.length
+              ? `Replay finished — showing the full ±${S.lastRealTimelineWindowSecs}s window.`
+              : `Playing… t=+${offsetS}s (${k}/${S.realTimelineEvents.length})${e.kind === "predicted" ? " · simulated" : e.isTarget ? " · this is the replayed packet" : " · observed"}`
           );
           return;
         }
         // Seek: rebuild the window's state at this instant from scratch.
         simRealActivityLayer.clearLayers();
-        for (let i = 0; i < k; i++) playRealTimelineEvent(realTimelineEvents[i], false);
+        for (let i = 0; i < k; i++) playRealTimelineEvent(S.realTimelineEvents[i], false);
         realTimelineIndex = k;
-        const offsetS = ((srcMs - realTimelineWindowStartMs) / 1000).toFixed(1);
+        const offsetS = ((srcMs - S.realTimelineWindowStartMs) / 1000).toFixed(1);
         setRealReplayStatus(
-          realTimelineEvents.length === 0
-            ? `No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`
-            : k >= realTimelineEvents.length
-              ? `Showing the full ±${lastRealTimelineWindowSecs}s window.`
-              : `t=+${offsetS}s (${k}/${realTimelineEvents.length})`
+          S.realTimelineEvents.length === 0
+            ? `No other real activity found in this packet's ±${S.lastRealTimelineWindowSecs}s window.`
+            : k >= S.realTimelineEvents.length
+              ? `Showing the full ±${S.lastRealTimelineWindowSecs}s window.`
+              : `t=+${offsetS}s (${k}/${S.realTimelineEvents.length})`
         );
       },
     };
   }
 
   function stopRealTimelineReplay() {
-    if (transportSource && transportSource.kind === "real") transportPause();
+    if (S.transportSource && S.transportSource.kind === "real") transportPause();
   }
 
   function startRealTimelineReplay() {
-    if (realTimelineEvents.length === 0) {
-      setRealReplayStatus(`No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`);
+    if (S.realTimelineEvents.length === 0) {
+      setRealReplayStatus(`No other real activity found in this packet's ±${S.lastRealTimelineWindowSecs}s window.`);
       return;
     }
-    realTimelineWindowStartMs = realTimelineEvents[0].tMs;
+    realTimelineWindowStartMs = S.realTimelineEvents[0].tMs;
     simRealActivityLayer.clearLayers();
     realTimelineIndex = 0;
     setTransportSource(realTransportSource());
@@ -5791,12 +5725,12 @@
   }
 
   function skipRealTimelineToEnd() {
-    if (realTimelineEvents.length === 0) {
-      setRealReplayStatus(`No other real activity found in this packet's ±${lastRealTimelineWindowSecs}s window.`);
+    if (S.realTimelineEvents.length === 0) {
+      setRealReplayStatus(`No other real activity found in this packet's ±${S.lastRealTimelineWindowSecs}s window.`);
       return;
     }
-    realTimelineWindowStartMs = realTimelineEvents[0].tMs;
-    if (!transportSource || transportSource.kind !== "real") setTransportSource(realTransportSource());
+    realTimelineWindowStartMs = S.realTimelineEvents[0].tMs;
+    if (!S.transportSource || S.transportSource.kind !== "real") setTransportSource(realTransportSource());
     transportToEnd();
   }
 
@@ -5813,12 +5747,11 @@
   // replay from it meant never being able to see the replay it was
   // driving. Both copies call the same functions and share one status
   // string (setRealReplayStatus), so they can't drift.
-  let bottleneckLegendControl = null;
-
+  
   function ensureBottleneckLegendControl() {
-    if (bottleneckLegendControl) return;
+    if (S.bottleneckLegendControl) return;
     bottleneckLegendControl = L.control({ position: "bottomleft" });
-    bottleneckLegendControl.onAdd = function () {
+    S.bottleneckLegendControl.onAdd = function () {
       const div = L.DomUtil.create("div", "sim-bottleneck-legend");
       // Item 14 — a real collapsible header, replacing the old static one.
       // Kept expanded by default (the shared helper's own normal default)
@@ -5862,7 +5795,7 @@
       // affecting the next play — same live-lens principle as "Keep all
       // paths" (see redrawPathsForKeepAllPaths).
       div.querySelector("#sim-map-show-flood-reach").addEventListener("change", () => {
-        if (transportSource && transportSource.kind === "real") transportSeekTo(transportPlayMs);
+        if (S.transportSource && S.transportSource.kind === "real") transportSeekTo(S.transportPlayMs);
       });
       div.querySelector("#sim-map-show-proven").addEventListener("change", (e) => {
         if (e.target.checked) simProvenLayer.addTo(map);
@@ -5871,7 +5804,7 @@
       div.querySelector("#sim-map-open-bottleneck").addEventListener("click", () => openModal("sim-bottleneck-modal"));
       return div;
     };
-    bottleneckLegendControl.addTo(map);
+    S.bottleneckLegendControl.addTo(map);
   }
 
   // Shows/hides the map-docked transport controls and labels them with the
@@ -5880,19 +5813,19 @@
   function syncRealReplayControls() {
     const wrap = document.getElementById("sim-map-real-replay-controls");
     if (!wrap) return;
-    wrap.classList.toggle("hidden", realTimelineEvents.length === 0);
+    wrap.classList.toggle("hidden", S.realTimelineEvents.length === 0);
     const btn = document.getElementById("sim-map-real-replay");
-    if (btn) btn.textContent = `▶ Play real ±${lastRealTimelineWindowSecs}s`;
+    if (btn) btn.textContent = `▶ Play real ±${S.lastRealTimelineWindowSecs}s`;
     // Also called after the control is rebuilt from scratch (reopening the
     // simulator panel tears it down), so the status has to be restored onto
     // the fresh DOM rather than left blank.
     const mapStatus = document.getElementById("sim-map-real-replay-status");
-    if (mapStatus) mapStatus.textContent = lastRealReplayStatusText;
+    if (mapStatus) mapStatus.textContent = S.lastRealReplayStatusText;
   }
 
   function removeBottleneckLegendControl() {
-    if (bottleneckLegendControl) {
-      map.removeControl(bottleneckLegendControl);
+    if (S.bottleneckLegendControl) {
+      map.removeControl(S.bottleneckLegendControl);
       bottleneckLegendControl = null;
     }
   }
@@ -5983,7 +5916,7 @@
       // confirmed OR refuted from this packet's observations — see its
       // unconfirmable split).
       const pubkeyToIndex = new Map();
-      simNodes.forEach((n, i) => {
+      S.simNodes.forEach((n, i) => {
         // Real repeaters carry their pubkey as refId, but the node directory
         // and CoreScope's path data are lowercased — match case-insensitively
         // or an already-loaded repeater gets silently duplicated.
@@ -6008,8 +5941,8 @@
         for (const r of aliveThen) {
           const pk = String(r.id).toLowerCase();
           if (pubkeyToIndex.has(pk)) continue;
-          pubkeyToIndex.set(pk, simNodes.length);
-          simNodes.push({
+          pubkeyToIndex.set(pk, S.simNodes.length);
+          S.simNodes.push({
             id: randomId(), source: "real", refId: r.id, label: r.label, lat: r.lat, lon: r.lon,
             antennaHeightM: r.antennaHeightM ?? null,
             regions: r.scopes || [], hashSize: r.hashSize || null, denyUnscoped: r.observedUnscopedKnown ? !r.observedUnscoped : false,
@@ -6023,7 +5956,7 @@
         if (pubkeyToIndex.has(pk)) continue; // already on the map
         const info = nodeDir.get(pk);
         if (!info) continue; // CoreScope knows the key but has no position for it — can't place it
-        pubkeyToIndex.set(pk, simNodes.length);
+        pubkeyToIndex.set(pk, S.simNodes.length);
         // role (see ensureNodeDirectory) governs canRelay below — a
         // CoreScope-labelled "listener" only ever receives in real life
         // and should never appear as a predicted relay hop, regardless of
@@ -6035,7 +5968,7 @@
         // doesn't carry one — and defaulting to "holds no region key" would
         // have the model refuse traffic reality shows it carrying. Load the
         // real repeaters first if you want their actual observed scopes.
-        simNodes.push({ id: randomId(), source: "real", refId: pk, label: info.name, lat: info.lat, lon: info.lon, role: info.role, regions: ["*"], address: shortAddressFromPubkey(pk) });
+        S.simNodes.push({ id: randomId(), source: "real", refId: pk, label: info.name, lat: info.lat, lon: info.lon, role: info.role, regions: ["*"], address: shortAddressFromPubkey(pk) });
         placedForReplay++;
       }
       if (!pubkeyToIndex.has(originPubkey)) {
@@ -6058,24 +5991,24 @@
       document.getElementById("sim-bottleneck-replay-title").textContent = `Replay real activity (±${windowSecs}s)`;
       const capNote = hitCap ? ` — CoreScope's recent-packet cap was reached before the window's oldest edge, so this may be partial` : "";
       setRealReplayStatus(
-        realTimelineEvents.length
+        S.realTimelineEvents.length
           ? `${windowPackets.length} real packet${windowPackets.length === 1 ? "" : "s"} observed within ±${windowSecs}s${capNote} — ready to replay.`
           : ""
       );
 
-      setStatus("sim-replay-hash-status", `Building predicted connectivity for ${simNodes.length} involved node${simNodes.length === 1 ? "" : "s"}…`);
+      setStatus("sim-replay-hash-status", `Building predicted connectivity for ${S.simNodes.length} involved node${S.simNodes.length === 1 ? "" : "s"}…`);
       const source = document.getElementById("sim-connectivity-source").value;
-      if (source === "model") simLinks = await buildLinksFromModel(simNodes);
-      else if (source === "corescope") simLinks = await buildLinksFromCorescope(simNodes);
+      if (source === "model") simLinks = await buildLinksFromModel(S.simNodes);
+      else if (source === "corescope") simLinks = await buildLinksFromCorescope(S.simNodes);
       else {
-        const [modelLinks, observedLinks] = await Promise.all([buildLinksFromModel(simNodes), buildLinksFromCorescope(simNodes)]);
+        const [modelLinks, observedLinks] = await Promise.all([buildLinksFromModel(S.simNodes), buildLinksFromCorescope(S.simNodes)]);
         const observedPairs = new Set(observedLinks.map((l) => `${l.from}:${l.to}`));
         simLinks = observedLinks.concat(modelLinks.filter((l) => !observedPairs.has(`${l.from}:${l.to}`)));
       }
-      linksGeneration++;
+      S.linksGeneration++;
       setStatus(
         "sim-links-status",
-        `${simLinks.length} directed link${simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(simNodes, simLinks)}`
+        `${S.simLinks.length} directed link${S.simLinks.length === 1 ? "" : "s"} built (${source}).${isolatedNodeHint(S.simNodes, S.simLinks)}`
       );
       updateWorkflowState();
       replayObservations = buildReplayObservations(observedTransmissions);
@@ -6100,7 +6033,7 @@
       // the channel with the target instead of the target flooding a mesh
       // that's implausibly silent.
       const knownRegions = await MeshApi.scopes().catch(() => []);
-      let predictedMessages = await buildWindowFloodMessages(windowPackets, pubkeyToIndex, replayWindowStartMs);
+      let predictedMessages = await buildWindowFloodMessages(windowPackets, pubkeyToIndex, S.replayWindowStartMs);
       // The target itself may be missing from the window list (it's fetched
       // separately, and its own row can fall outside what /api/packets
       // returned) — add it from the detail fetch so there's always something
@@ -6108,7 +6041,7 @@
       if (!predictedMessages.some((m) => m.sourceHash === hash)) {
         predictedMessages.push({
           origin: originIndex,
-          sendAtMs: Math.max(0, targetMs - replayWindowStartMs),
+          sendAtMs: Math.max(0, targetMs - S.replayWindowStartMs),
           payloadLen,
           hashSize: targetPacket.hash_size || DEFAULT_MESSAGE_HASH_SIZE,
           region: regionOfPacket(targetPacket),
@@ -6199,7 +6132,7 @@
       // what was observed and what was predicted — on the one clock. The
       // predicted half is evidence-constrained: target deliveries reality
       // contradicts don't animate as if they happened.
-      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, replayWindowStartMs, {
+      realTimelineEvents = buildReplayTimeline(observedTransmissions, predictedReport, S.replayWindowStartMs, {
         targetPid,
         prunedNodes: new Set(constrained.prunedNodes),
         excludedNodes: new Set([...constrained.prunedNodes, ...contradictedNodes]),
@@ -6254,7 +6187,7 @@
       setStatus(
         "sim-replay-hash-status",
         `Loaded ${observations.length} real observation${observations.length === 1 ? "" : "s"} of packet ${hash}. ` +
-          `Predicting over ${simNodes.length} repeaters (${alreadyLoaded} already loaded, ${aliveAdded} alive at the packet's time, ${placedForReplay} added from this packet's observations${aliveSkippedDead ? `; ${aliveSkippedDead} known repeaters skipped — dead or not yet seen back then` : ""})` +
+          `Predicting over ${S.simNodes.length} repeaters (${alreadyLoaded} already loaded, ${aliveAdded} alive at the packet's time, ${placedForReplay} added from this packet's observations${aliveSkippedDead ? `; ${aliveSkippedDead} known repeaters skipped — dead or not yet seen back then` : ""})` +
           `${scopedCount ? `, ${scopedCount} scoped flood(s) decoded` : ""}.${regionNote} ` +
           `Press "▶ Play real ±${windowSecs}s" on the map to watch it, or open the bottleneck analysis for the full breakdown.` +
           (isDirect ? " Note: our model only predicts flood relaying, but this packet used direct (addressed) routing — the prediction side won't be meaningful." : "")
@@ -6329,7 +6262,7 @@
     // defaults just didn't anticipate that link. Distinguishing this from
     // direction 1 matters: it points at the model's own assumptions
     // (range, antenna heights, terrain), not at the real network.
-    const modeledPairIndices = new Set(simLinks.map((l) => `${l.from}:${l.to}`));
+    const modeledPairIndices = new Set(S.simLinks.map((l) => `${l.from}:${l.to}`));
     const unmodeled = Array.from(provenEdges.values())
       .map((e) => ({ from: pubkeyToIndex.get(e.from), to: pubkeyToIndex.get(e.to), firstMs: e.firstMs }))
       .filter((e) => e.from != null && e.to != null && !modeledPairIndices.has(`${e.from}:${e.to}`))
@@ -6349,7 +6282,7 @@
       `${unconfirmable.length} predicted into repeaters this packet's observations say nothing about (can't be judged either way), ` +
       `${unmodeled.length} proven but not even predicted possible.` +
       constrainedNote;
-    const refutedNames = [...new Set(refuted.map((r) => `${simNodes[r.fromNode] ? simNodes[r.fromNode].label : r.fromNode} → ${simNodes[r.node] ? simNodes[r.node].label : r.node}`))];
+    const refutedNames = [...new Set(refuted.map((r) => `${S.simNodes[r.fromNode] ? S.simNodes[r.fromNode].label : r.fromNode} → ${S.simNodes[r.node] ? S.simNodes[r.node].label : r.node}`))];
     document.getElementById("sim-bottleneck-unconfirmable-note").textContent =
       (refuted.length
         ? `REFUTED (healthy observers were alive, idle and silent — the packet demonstrably never got there): ${refutedNames.join("; ")}. `
@@ -6364,8 +6297,8 @@
       list.innerHTML = `<div class="plan-empty">Every predicted relay into a repeater this packet's observations cover was confirmed by a real observation.</div>`;
     }
     for (const r of unconfirmed) {
-      const from = simNodes[r.fromNode];
-      const to = simNodes[r.node];
+      const from = S.simNodes[r.fromNode];
+      const to = S.simNodes[r.node];
       const row = document.createElement("div");
       row.className = "plan-list-item sim-list-item sim-collided";
       row.innerHTML = `
@@ -6381,8 +6314,8 @@
       unmodeledList.innerHTML = '<div class="plan-empty">Every real observed hop is at least within our model\'s own connectivity assumptions.</div>';
     }
     for (const e of unmodeled) {
-      const from = simNodes[e.from];
-      const to = simNodes[e.to];
+      const from = S.simNodes[e.from];
+      const to = S.simNodes[e.to];
       const row = document.createElement("div");
       row.className = "plan-list-item sim-list-item";
       row.innerHTML = `
@@ -6404,8 +6337,8 @@
     for (const e of provenEdges.values()) {
       const fIdx = pubkeyToIndex.get(e.from);
       const tIdx = pubkeyToIndex.get(e.to);
-      const from = simNodes[fIdx];
-      const to = simNodes[tIdx];
+      const from = S.simNodes[fIdx];
+      const to = S.simNodes[tIdx];
       if (!from || !to) continue;
       const isUnmodeled = unmodeledPairs.has(`${fIdx}:${tIdx}`);
       L.polyline(
@@ -6417,8 +6350,8 @@
       ).addTo(simProvenLayer);
     }
     for (const r of unconfirmed) {
-      const from = simNodes[r.fromNode];
-      const to = simNodes[r.node];
+      const from = S.simNodes[r.fromNode];
+      const to = S.simNodes[r.node];
       if (!from || !to) continue;
       L.polyline(
         [
@@ -6429,8 +6362,8 @@
       ).addTo(simProvenLayer);
     }
     for (const r of unconfirmable) {
-      const from = simNodes[r.fromNode];
-      const to = simNodes[r.node];
+      const from = S.simNodes[r.fromNode];
+      const to = S.simNodes[r.node];
       if (!from || !to) continue;
       L.polyline(
         [
@@ -6470,8 +6403,7 @@
   // Where focus was before a modal opened — restored on close so keyboard/
   // screen-reader users land back where they were, not at the top of the
   // document (see openModal/closeModals).
-  let modalReturnFocusEl = null;
-
+  
   const MODAL_FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
   function openModal(id) {
@@ -6487,7 +6419,7 @@
   function closeModals() {
     document.getElementById("sim-modal-backdrop").classList.add("hidden");
     document.querySelectorAll(".sim-modal").forEach((m) => m.classList.add("hidden"));
-    if (modalReturnFocusEl && document.body.contains(modalReturnFocusEl)) modalReturnFocusEl.focus({ preventScroll: true });
+    if (S.modalReturnFocusEl && document.body.contains(S.modalReturnFocusEl)) S.modalReturnFocusEl.focus({ preventScroll: true });
     modalReturnFocusEl = null;
   }
 
@@ -6498,7 +6430,7 @@
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (document.getElementById("sim-modal-backdrop").classList.contains("hidden")) return;
-    if (packetModalHistory.length > 0) goBackPacketModal();
+    if (S.packetModalHistory.length > 0) goBackPacketModal();
     else closeModals();
   });
 
@@ -6531,12 +6463,11 @@
   // dimension a growth marker tracks, whether old wave lines stay on the
   // map as a trail or only the latest wave shows, and which half of what
   // happened (successes/collisions) is shown at all.
-  let simViewControl = null;
-
+  
   function ensureSimViewControl() {
-    if (simViewControl) return;
+    if (S.simViewControl) return;
     simViewControl = L.control({ position: "topright" });
-    simViewControl.onAdd = function () {
+    S.simViewControl.onAdd = function () {
       const div = L.DomUtil.create("div", "position-mode-control sim-view-control");
       const body = `
         <label class="plan-checkbox-row"><input type="checkbox" id="sim-view-keep-paths" checked> Keep all paths</label>
@@ -6566,7 +6497,7 @@
         // filter-driven, not keepAllPaths-driven, so it's untouched here.)
         // Leaves a loaded packet replay alone: it accumulates its window by
         // design, and this used to wipe the analysis overlay it had drawn.
-        if (transportSource && transportSource.kind === "real") return;
+        if (S.transportSource && S.transportSource.kind === "real") return;
         redrawPathsForKeepAllPaths();
       });
       div.querySelector("#sim-view-filter").addEventListener("change", (e) => {
@@ -6583,9 +6514,9 @@
         // has to re-render — filtering only ever touched the simulation's
         // layer, so changing it while watching a packet replay appeared to
         // do nothing at all.
-        if (transportSource && transportSource.kind === "real") {
-          transportSeekTo(transportPlayMs);
-        } else if (lastReport && replayIndex >= replayWaves.length) {
+        if (S.transportSource && S.transportSource.kind === "real") {
+          transportSeekTo(S.transportPlayMs);
+        } else if (S.lastReport && S.replayIndex >= S.replayWaves.length) {
           redrawPathsForKeepAllPaths();
         }
         drawSelectedMessagePath();
@@ -6595,16 +6526,16 @@
         growthMarkers.forEach((marker) => simResultsLayer.removeLayer(marker));
         growthMarkers.clear();
         nodeGrowthCounts = [];
-        if (lastReport) applyFinalGrowth(lastReport);
+        if (S.lastReport) applyFinalGrowth(S.lastReport);
       });
       return div;
     };
-    simViewControl.addTo(map);
+    S.simViewControl.addTo(map);
   }
 
   function removeSimViewControl() {
-    if (simViewControl) {
-      map.removeControl(simViewControl);
+    if (S.simViewControl) {
+      map.removeControl(S.simViewControl);
       simViewControl = null;
     }
   }
@@ -6625,12 +6556,11 @@
   // step with the scrubber, so watching a replay answers "is this actually
   // going well" without opening the modal that would cover the map you're
   // watching it play out on.
-  let simPlaybackControl = null;
-
+  
   function ensureSimPlaybackControl() {
-    if (simPlaybackControl) return;
+    if (S.simPlaybackControl) return;
     simPlaybackControl = L.control({ position: "bottomleft" });
-    simPlaybackControl.onAdd = function () {
+    S.simPlaybackControl.onAdd = function () {
       const div = L.DomUtil.create("div", "sim-playback-control");
       div.innerHTML = `
         <div class="map-control-header-static">Run so far</div>
@@ -6639,13 +6569,13 @@
       L.DomEvent.disableClickPropagation(div);
       return div;
     };
-    simPlaybackControl.addTo(map);
+    S.simPlaybackControl.addTo(map);
     updateMapLiveStats(0);
   }
 
   function removeSimPlaybackControl() {
-    if (simPlaybackControl) {
-      map.removeControl(simPlaybackControl);
+    if (S.simPlaybackControl) {
+      map.removeControl(S.simPlaybackControl);
       simPlaybackControl = null;
     }
   }
@@ -6658,7 +6588,7 @@
   function updateMapLiveStats(wavesPlayed) {
     const el = document.getElementById("sim-map-live-stats");
     if (!el) return;
-    const receptions = replayWaves.slice(0, wavesPlayed).flatMap((w) => w.receptions);
+    const receptions = S.replayWaves.slice(0, wavesPlayed).flatMap((w) => w.receptions);
     const collided = receptions.filter((r) => r.collided).length;
     const total = receptions.length;
     const rate = total > 0 ? (collided / total) * 100 : 0;
@@ -6692,13 +6622,13 @@
       // map, looking exactly like a replay that had found no traffic.
       simRealActivityLayer.addTo(map);
       ensureSimViewControl();
-      if (lastReport) ensureSimPlaybackControl(); // reopening Simulate mode with a report already computed
+      if (S.lastReport) ensureSimPlaybackControl(); // reopening Simulate mode with a report already computed
       // Same for a replay already loaded: closing the panel tears the
       // control down, and the replay's own state (realTimelineEvents, the
       // drawn overlay) survives, so reopening has to put the transport
       // controls and the map key back rather than leaving a loaded replay
       // with no way to play it.
-      if (realTimelineEvents.length > 0) {
+      if (S.realTimelineEvents.length > 0) {
         ensureBottleneckLegendControl();
         syncRealReplayControls();
       }
@@ -6806,7 +6736,7 @@
 
   // --- transport wiring ---
   document.getElementById("sim-transport-play").addEventListener("click", () => {
-    if (transportPlaying) transportPause();
+    if (S.transportPlaying) transportPause();
     else transportPlay();
   });
   document.getElementById("sim-transport-seek").addEventListener("input", (e) => {
@@ -6820,13 +6750,13 @@
   // other media transport does — but not while typing in a field, and not
   // when a button has focus (space is that button's own activation key).
   document.addEventListener("keydown", (e) => {
-    if (e.code !== "Space" || !transportSource) return;
+    if (e.code !== "Space" || !S.transportSource) return;
     if (document.getElementById("sim-transport").classList.contains("hidden")) return;
     const el = document.activeElement;
     const tag = el ? el.tagName : "";
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || (el && el.isContentEditable)) return;
     e.preventDefault();
-    if (transportPlaying) transportPause();
+    if (S.transportPlaying) transportPause();
     else transportPlay();
   });
   document.getElementById("sim-replay-hash-go").addEventListener("click", replayFromHash);
@@ -6878,22 +6808,22 @@
 
   // Test-only introspection hook.
   window.__hopreachSimulatorDebug = {
-    getNodeCount: () => simNodes.length,
+    getNodeCount: () => S.simNodes.length,
     // Opens a node's inspector without needing to hit its map marker —
     // markers overlap heavily on a real mesh, which makes a click-based test
     // flaky for reasons that have nothing to do with what it's asserting.
     openNodeInspector: (i) => openPacketInspectorForNode(i),
-    getLinkCount: () => simLinks.length,
+    getLinkCount: () => S.simLinks.length,
     // The directed link between two node indices (or undefined) — lets a
     // test confirm a built link's SNR actually responds to per-node
     // antenna height / tx power (see buildLinksFromModel).
-    getLink: (from, to) => simLinks.find((l) => l.from === from && l.to === to),
-    getEpisode: () => lastEpisode,
+    getLink: (from, to) => S.simLinks.find((l) => l.from === from && l.to === to),
+    getEpisode: () => S.lastEpisode,
     getMessageCount: () => messagesFromState(parseInt(document.getElementById("sim-seed").value, 10) || 0).length,
-    getMessageGeneratorCount: () => simMessageGenerators.length,
-    getLastReport: () => lastReport,
-    getLastMessages: () => lastMessages,
-    getWaveCount: () => replayWaves.length,
+    getMessageGeneratorCount: () => S.simMessageGenerators.length,
+    getLastReport: () => S.lastReport,
+    getLastMessages: () => S.lastMessages,
+    getWaveCount: () => S.replayWaves.length,
     // Polylines currently drawn on the results layer — how many paths are
     // actually visible on the map right now, as opposed to how many the
     // report contains. Lets a test tell the "Keep all paths" accumulated
@@ -6937,7 +6867,7 @@
       });
       return out;
     },
-    getNodes: () => simNodes,
+    getNodes: () => S.simNodes,
     // The scenario exactly as handed to the engine — the only way to check
     // what a node's settings actually resolved to, rather than what the
     // node object happens to carry before overrides are applied.
@@ -6946,7 +6876,7 @@
     // backend's now, so a test cross-checks /mesh-api/'s answer rather than
     // a second implementation living here.
     regionOfPacket: (packet) => regionOfPacket(packet),
-    getLinks: () => simLinks,
+    getLinks: () => S.simLinks,
     panBy: (dx, dy) => map.panBy([dx, dy], { animate: false }),
     getSavedSetups: () => loadAllSetups(),
   };
