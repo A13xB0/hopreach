@@ -4,22 +4,46 @@ Enforces Rule 1 of `CLAUDE.md` (< 400 lines per file, one responsibility) on
 the files that currently violate it. Ordered by **risk, lowest first** — build
 confidence on the moves with airtight nets before touching the ones without.
 
-## Status
+## Status — done
 
-| Stage | State | Result |
-|---|---|---|
-| 1 — Go splits | **done** | `optimize.go` 1854→1254, `engine.go` 1439→856, five new files |
-| 2 — CSS | **done** | `style.css` 2248→1363, three new sheets |
-| 3a — `mesh-frame.js` | **done** | 199 lines out, 12 unit tests |
-| 3b — `sim-topology.js` | **done** | 223 lines out, 22 unit tests; found and fixed a real Go/JS divergence |
-| 3c — `sim-rankings.js` | todo | |
-| 4 — episode | blocked on fixtures | |
-| 5 — planner.js | todo | |
-| 6 — gpucompute | todo | |
+**No file in the repo exceeds 1000 lines.** The largest is
+`internal/meshsim/optimize_test.go` at 985.
 
-`public/simulator.js` is **7527 → 7201**. The unit suite went from 11 tests
-to 45, which is the more important number: before this, none of the extracted
-logic had a single assertion that runs on a quiet mesh.
+| File | Before | After | Split into |
+|---|---:|---:|---|
+| `public/simulator.js` | 7582 | **981** | 18 modules + `sim-state.js` + `sim-constants.js` |
+| `public/planner.js` | 1930 | **925** | 5 modules + `plan-state.js` |
+| `internal/meshsim/engine_test.go` | 1997 | **803** | 6 files, mirroring engine.go's own split |
+| `tests/simulator.spec.js` | 1748 | **529** | 3 specs + `sim-helpers.js` |
+| `internal/meshsim/optimize.go` | 1854 | **844** | score, spsa, moves, types |
+| `internal/meshsim/engine.go` | 1439 | **853** | types, capture, airtime |
+| `public/style.css` | 2248 | **590** | simulator, planner, sim-panel, leaflet, mobile |
+| `public/app.js` | 1172 | **799** | `map-responsive.js` + `map-state.js` |
+
+### What made it possible
+
+Not line-counting — the blocker was that `simulator.js` held 64 mutable
+variables in one closure, read and reassigned across 211 functions. Any
+extraction meant threading a getter per piece of state. Lifting state into a
+plain object first (`sim-state.js`, then `plan-state.js`, `map-state.js`)
+turned every later split into a mechanical move.
+
+### What caught the mistakes
+
+Three static checks and one dynamic, all under `npm test`:
+
+- `tools/check_module_refs.mjs` — identifiers that resolve to nothing.
+- `tests/unit/module-contracts.test.mjs` — the init()/return handshake in both
+  directions, plus "no module pins shared state into a load-time const".
+- `tests/unit/simulator-boot.test.mjs` — evaluates every script `index.html`
+  loads, in order, against a stub DOM.
+
+The boot test is the one that mattered. Load-order faults are invisible to a
+syntax check and to the static checks — the names exist, they just aren't
+initialised yet — and they break the whole page rather than one feature. It
+found five: two modules keeping top-level `map.on(...)` registrations, two
+wiring blocks sitting below the code that depended on them, and a `<script>`
+tag pointing at a module that was never created.
 
 ## The offenders
 
