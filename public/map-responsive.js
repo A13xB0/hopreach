@@ -86,7 +86,11 @@
   const savedBasemap = localStorage.getItem(BASEMAP_STORAGE_KEY);
   const initialBasemap = baseLayers[savedBasemap] ? savedBasemap : "Dark";
 
-  const layersControl = L.control.layers(baseLayers, {}, { collapsed: true, position: "topright" }).addTo(map);
+  // Declared here, created in init(). `.addTo(map)` is a side effect that
+  // needs the real Leaflet map, which arrives with the context — building it
+  // at module load throws inside Leaflet before this module ever registers
+  // itself, taking app.js and everything downstream of it with it.
+  let layersControl;
 
   // Everything docked along the bottom of the map has to stack without
   // overlapping, and none of the heights are knowable up front: the
@@ -415,6 +419,8 @@
 
   function init(context) {
     ({ NARROW_VIEWPORT_PX, map } = context);
+    layersControl = L.control.layers(
+      baseLayers, {}, { collapsed: true, position: "topright" }).addTo(map);
     bindDom();
     return api;
   }

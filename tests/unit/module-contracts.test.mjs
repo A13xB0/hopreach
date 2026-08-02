@@ -22,15 +22,23 @@ import { ancestor } from "acorn-walk";
 
 const require = createRequire(import.meta.url);
 
-const SIM = "public/simulator.js";
-const simSrc = readFileSync(SIM, "utf8");
-const simAst = parse(simSrc, { ecmaVersion: "latest", locations: true, ranges: true });
+// The three files that own extracted modules. Checking only simulator.js is
+// how map-responsive.js — wired from app.js — escaped every check here.
+const HOSTS = ["public/simulator.js", "public/planner.js", "public/app.js"];
+const hostSrc = Object.fromEntries(HOSTS.map((f) => [f, readFileSync(f, "utf8")]));
+const allHostSrc = HOSTS.map((f) => hostSrc[f]).join("\n");
 
 // Every `window.X.init({...})` call in simulator.js, with what it passes and
 // what it destructures back.
 function initCallSites() {
   const sites = new Map();
-  ancestor(simAst, {
+  for (const host of HOSTS) collectSites(sites, host);
+  return sites;
+}
+
+function collectSites(sites, host) {
+  const ast = parse(hostSrc[host], { ecmaVersion: "latest", locations: true, ranges: true });
+  ancestor(ast, {
     CallExpression(node, _s, ancestors) {
       const callee = node.callee;
       if (callee.type !== "MemberExpression" || callee.property.name !== "init") return;
@@ -58,10 +66,9 @@ function initCallSites() {
           break;
         }
       }
-      sites.set(globalName, { provides, takes, line: node.loc.start.line });
+      sites.set(globalName, { provides, takes, host, line: node.loc.start.line });
     },
   });
-  return sites;
 }
 
 // What a module destructures out of its context, and what it returns.
@@ -100,8 +107,17 @@ function moduleContract(file) {
   return { globalName, needs, returns };
 }
 
+// Every extracted module, not just the simulator's. The planner and map ones
+// were outside this glob for a while, which is exactly how map-responsive.js
+// shipped a module-scope `.addTo(map)` that blanked the whole page.
+//
+// The *-state.js files are plain data with no init() handshake to check.
+const MODULE_PREFIXES = ["sim-", "plan-", "map-", "mesh-"];
+const STATE_FILES = new Set(["sim-state.js", "plan-state.js", "map-state.js"]);
+
 const moduleFiles = readdirSync("public")
-  .filter((f) => f.startsWith("sim-") && f.endsWith(".js") && f !== "sim-state.js")
+  .filter((f) => f.endsWith(".js") && !STATE_FILES.has(f) &&
+    MODULE_PREFIXES.some((p) => f.startsWith(p)))
   .map((f) => `public/${f}`);
 
 const sites = initCallSites();
@@ -114,12 +130,14 @@ test("every extracted simulator module is actually wired up", () => {
     // Two shapes are in use. A module that needs simulator helpers takes them
     // through init(); a pure one (sim-topology.js) is called directly. Either
     // is fine — being referenced by nothing is not.
+    // A module taking helpers is wired through init(); a pure one is simply
+    // called by name, with or without the window. prefix.
     const wired = returns.has("init")
       ? sites.has(globalName)
-      : simSrc.includes(`window.${globalName}`);
+      : new RegExp(`\\b${globalName}\\b`).test(allHostSrc);
     assert.ok(
       wired,
-      `${file}: nothing in simulator.js references window.${globalName} — the ` +
+      `${file}: no host file references window.${globalName} — the ` +
         `module is dead code, or the page still expects it on the old path`
     );
   }
@@ -134,7 +152,7 @@ test("simulator.js passes every context key each module destructures", () => {
       assert.ok(
         site.provides.has(key),
         `${file} destructures "${key}" out of its context, but the init() call ` +
-          `at ${SIM}:${site.line} doesn't pass it. That is undefined at call ` +
+          `at ${site.host}:${site.line} doesn't pass it. That is undefined at call ` +
           `time, not load time — it would only surface when a user hits that path.`
       );
     }
@@ -149,7 +167,7 @@ test("every module returns the names simulator.js destructures from it", () => {
     for (const key of site.takes) {
       assert.ok(
         returns.has(key),
-        `${SIM}:${site.line} destructures "${key}" from window.${globalName}, ` +
+        `${site.host}:${site.line} destructures "${key}" from window.${globalName}, ` +
           `but ${file}'s api doesn't include it.`
       );
     }
@@ -168,7 +186,7 @@ test("modules don't take context they never use", () => {
       if (key === "...spread") continue;
       assert.ok(
         needs.has(key),
-        `${SIM}:${site.line} passes "${key}" to window.${globalName}, but ${file} ` +
+        `${site.host}:${site.line} passes "${key}" to window.${globalName}, but ${file} ` +
           `never destructures it — stale context entry.`
       );
     }
@@ -226,4 +244,66 @@ test("the reference checker catches an implicit global", async () => {
   const badRun = run(bad);
   assert.ok(!badRun.ok, "an assignment to an undeclared name must fail the check");
   assert.match(badRun.out, /oopsUndeclared/);
+});
+
+test("no module touches its context at load time", () => {
+  // The bug this exists for: map-responsive.js had
+  //
+  //   const layersControl = L.control.layers(...).addTo(map);
+  //
+  // at module scope. `map` arrives with the context, so at load time it is
+  // undefined and Leaflet throws *inside the factory* — the module never
+  // registers itself, and app.js, planner.js and simulator.js all fail after
+  // it. A blank page from one `const`.
+  //
+  // Neither static check caught it (the name exists, it is simply not set
+  // yet) and neither did the boot smoke test, whose permissive stubs make
+  // `undefined.addTo(...)` succeed. The rule that does catch it is simple:
+  // anything a module receives through init() may only be used from inside a
+  // function, never while the file is being evaluated.
+  for (const file of moduleFiles) {
+    const src = readFileSync(file, "utf8");
+    const ast = parse(src, { ecmaVersion: "latest", locations: true });
+    const factory = ast.body[0]?.expression?.arguments?.[1];
+    if (!factory?.body) continue;
+
+    const { needs } = moduleContract(file);
+    if (needs.size === 0) continue;
+
+    const offenders = [];
+    // Walk only the factory's own top level: descend into nested statements
+    // (if/for/try) but never into a function, since that body runs later.
+    const scan = (node) => {
+      if (!node || typeof node.type !== "string") return;
+      if (node.type === "FunctionDeclaration" || node.type === "FunctionExpression" ||
+          node.type === "ArrowFunctionExpression") {
+        return;
+      }
+      if (node.type === "Identifier" && needs.has(node.name)) {
+        offenders.push(`${node.name} at ${file}:${node.loc.start.line}`);
+        return;
+      }
+      for (const key of Object.keys(node)) {
+        if (key === "loc" || key === "start" || key === "end") continue;
+        // `let map, escapeHtml;` declares the context slots — that is where
+        // they are supposed to appear, and it is not a use.
+        if (node.type === "VariableDeclarator" && key === "id") continue;
+        // Nor is a property NAME that happens to match a context name.
+        if (node.type === "MemberExpression" && key === "property" && !node.computed) continue;
+        if (node.type === "Property" && key === "key" && !node.computed) continue;
+        const child = node[key];
+        if (Array.isArray(child)) child.forEach(scan);
+        else if (child && typeof child.type === "string") scan(child);
+      }
+    };
+    factory.body.body.forEach(scan);
+
+    assert.deepEqual(
+      offenders, [],
+      `${file} uses context at module-evaluation time:\n  ${offenders.join("\n  ")}\n` +
+        `Move it into init() (or a function init() calls). At load time these ` +
+        `are undefined, and throwing here stops the module registering itself ` +
+        `at all — which takes down every file loaded after it.`
+    );
+  }
 });
