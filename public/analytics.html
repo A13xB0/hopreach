@@ -4,7 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HopReach Analytics</title>
+<!-- The four halves of what used to be style.css, in the order index.html
+     loads them. This page has no simulator, but it loads that sheet too so
+     both pages resolve identical cascades — analytics.css still comes last
+     and still overrides everything. -->
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style-simulator.css">
+<link rel="stylesheet" href="style-leaflet.css">
+<link rel="stylesheet" href="style-mobile.css">
 <link rel="stylesheet" href="analytics.css">
 </head>
 <body>

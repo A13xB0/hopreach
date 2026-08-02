@@ -1,0 +1,334 @@
+/* ======================================================================
+   MOBILE (<= 700px)
+   ----------------------------------------------------------------------
+   Below this width the app stops being "the desktop layout, narrower" and
+   switches to a phone layout: a compact header, a full-width bottom tab
+   bar, and bottom SHEETS instead of right-edge sidebars. The old model
+   docked #plan-panel/#sim-panel to the right at up to 92vw, which left a
+   33px slice of visible map on a 412px phone — a sidebar in name only,
+   and useless for a tool whose whole point is looking at the map while
+   you change things. A sheet leaves the top half of the map live and
+   visible, and can be dragged between two heights or flicked away.
+   ====================================================================== */
+@media (max-width: 700px) {
+  /* --- header: 136px of title/subtitle/stats down to a single row ---- */
+  header { padding: 0.4rem 0.75rem; flex-wrap: nowrap; gap: 0.5rem; }
+  /* min-width:0 lets the title block actually shrink inside the flex row
+     (a flex item's default min-width:auto refuses to go below its content
+     and forces the wrap instead). */
+  header > div:first-child { min-width: 0; }
+  header h1 {
+    font-size: 0.95rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  header .subtitle { display: none; }
+  #stats { gap: 0.55rem; font-size: 0.72rem; flex-wrap: nowrap; }
+  #stats .stat { gap: 0.25rem; }
+  /* Keep the counts (the at-a-glance value) but drop the words and the
+     timestamp — the dot colours already say which is which, and the
+     words are still there for screen readers. */
+  #stats .stat-word {
+    position: absolute;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+  /* Scoped #stats #id (2,0,0): a bare #last-updated is 1,0,0 and loses to
+     the #stats .stat (1,1,0) rule that makes every stat a flex row. */
+  #stats #last-updated { display: none; }
+
+  /* --- bottom stack ------------------------------------------------- */
+  /* Bottom to top: tab bar (pinned to the very bottom), then the replay
+     transport, then any sheet, then Leaflet's own bottom controls. Each
+     layer clears the one below it using heights app.js measures live, so
+     nothing here assumes a fixed row height. */
+  #map-tools {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    gap: 0.2rem;
+    padding: 0.25rem 0.3rem;
+    flex-wrap: nowrap;
+    background: rgba(10, 25, 41, 0.94);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border);
+    z-index: 1250;
+  }
+  #map-tools button {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.12rem;
+    min-height: 50px;
+    padding: 0.3rem 0.1rem;
+    background: transparent;
+    color: var(--text-muted);
+    box-shadow: none;
+    border-radius: 10px;
+    font-size: 0.62rem;
+    font-weight: 600;
+  }
+  #map-tools .tool-icon { font-size: 1.1rem; line-height: 1; }
+  #map-tools .tool-label { display: none; }
+  #map-tools .tool-label-short { display: inline; }
+  #map-tools .alpha-badge { display: none; }
+  /* Decluttering the map is exactly what the Map sheet does here, so the
+     button has nothing left to do; the sheet toggle takes its slot.
+     Both scoped #map-tools #id (2,0,0) to beat the #map-tools button
+     (1,0,1) display rule above. */
+  #map-tools #map-declutter-toggle { display: none; }
+  #map-tools #map-options-toggle { display: flex; }
+  #map-tools button.active,
+  #map-wrap.plan-open #plan-toggle,
+  #map-wrap.sim-open #sim-toggle {
+    background: rgba(0, 119, 182, 0.3);
+    color: var(--text);
+  }
+  #companion-pin-toggle.active { background: rgba(249, 115, 22, 0.3); color: var(--text); }
+
+  .sim-transport { bottom: var(--tools-h, 0px); }
+  #map-wrap .leaflet-bottom.leaflet-left {
+    bottom: calc(var(--tools-h, 0px) + var(--transport-clearance, 0px) + 6px);
+  }
+
+  /* The credits used to float as their own strip in the gap just above the
+     tab bar, which read as a second, half-height bar and cost the map a
+     line of height for something nobody looks at. On a phone the only
+     thing left in this corner is the attribution (the legend moved into
+     the Map options sheet), so the corner becomes the bar's own bottom
+     line instead: one solid piece of bottom chrome rather than two
+     stacked ones. #map-tools reserves the room for it below the buttons,
+     and it draws on top of the bar's background (z-index above the bar,
+     transparent, no border of its own). */
+  #map-wrap .leaflet-bottom.leaflet-right {
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1260;
+    /* Only the credits themselves should take taps; the rest of this strip
+       is the tab bar's background showing through. */
+    pointer-events: none;
+  }
+  #map-tools { padding-bottom: 15px; }
+  .leaflet-container .leaflet-control-attribution {
+    pointer-events: auto;
+    width: 100%;
+    max-width: 100%;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    backdrop-filter: none;
+    padding: 0 0.6rem 2px;
+    text-align: center;
+    font-size: 0.55rem;
+    line-height: 1.1;
+    white-space: nowrap;
+    overflow-x: auto;
+  }
+
+  /* A sheet is bottom-docked and full-width, so the side-panel offsets
+     that shift Leaflet's corners and the transport bar out from under a
+     right-edge sidebar no longer apply — and at <=500px the old rules
+     pushed them 90vw off-screen. Later in the file than those rules, so
+     this wins at equal specificity. */
+  #map-wrap.plan-open .leaflet-top.leaflet-right,
+  #map-wrap.plan-open .leaflet-bottom.leaflet-right,
+  #map-wrap.sim-open .leaflet-top.leaflet-right,
+  #map-wrap.sim-open .leaflet-bottom.leaflet-right,
+  #map-wrap.plan-open .sim-transport,
+  #map-wrap.sim-open .sim-transport {
+    right: 0;
+  }
+
+  /* --- panels as bottom sheets -------------------------------------- */
+  #plan-panel,
+  #sim-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--tools-h, 0px) + var(--transport-clearance, 0px));
+    width: auto;
+    max-width: none;
+    height: var(--sheet-h, 58vh);
+    max-height: calc(100% - var(--tools-h, 0px) - var(--transport-clearance, 0px));
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.6);
+    padding: 0 0.85rem 1rem;
+    z-index: 1200;
+    overscroll-behavior: contain;
+  }
+
+  .panel-grab {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    height: 22px;
+    margin: 0 -0.85rem;
+    background: var(--card-bg);
+    border-radius: 18px 18px 0 0;
+    cursor: grab;
+    /* The drag is handled by pointer events in app.js; without this the
+       browser claims the gesture for scrolling first. */
+    touch-action: none;
+  }
+  .panel-grab::after {
+    content: "";
+    display: block;
+    width: 42px;
+    height: 4px;
+    margin: 9px auto 0;
+    border-radius: 999px;
+    background: var(--text-muted);
+    opacity: 0.5;
+  }
+  .panel-grab.dragging { cursor: grabbing; }
+
+  /* The close × has to stay reachable however far the body is scrolled. */
+  #plan-panel .plan-panel-header,
+  #sim-panel .plan-panel-header {
+    position: sticky;
+    top: 22px;
+    z-index: 2;
+    margin: 0 -0.85rem 0.5rem;
+    padding: 0.1rem 0.85rem 0.5rem;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+  }
+  #plan-panel-close,
+  #sim-panel-close,
+  .panel-minimise {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .panel-minimise { display: block; }
+
+  /* Minimised to the title strip: the body is clipped rather than
+     scrollable, so the strip can't be scrolled out of view leaving an
+     unlabelled stub with no way back up. */
+  #plan-panel.sheet-minimised,
+  #sim-panel.sheet-minimised {
+    overflow: hidden;
+  }
+  #plan-panel.sheet-minimised .plan-panel-header,
+  #sim-panel.sheet-minimised .plan-panel-header {
+    border-bottom: none;
+    margin-bottom: 0;
+  }
+
+  /* --- the Map options sheet ---------------------------------------- */
+  .mobile-sheet {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--tools-h, 0px) + var(--transport-clearance, 0px));
+    max-height: 78%;
+    background: var(--card-bg);
+    border-top: 1px solid var(--border);
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.6);
+    z-index: 1200;
+  }
+  .mobile-sheet.hidden { display: none; }
+  .mobile-sheet-grab { height: 22px; flex-shrink: 0; }
+  .mobile-sheet-grab::after {
+    content: "";
+    display: block;
+    width: 42px;
+    height: 4px;
+    margin: 9px auto 0;
+    border-radius: 999px;
+    background: var(--text-muted);
+    opacity: 0.5;
+  }
+  .mobile-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.1rem 0.85rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .mobile-sheet-title { font-weight: 700; font-size: 0.9rem; }
+  .mobile-sheet-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1rem;
+    min-width: 44px;
+    min-height: 44px;
+    cursor: pointer;
+  }
+  .mobile-sheet-body {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.7rem 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    /* These controls normally sit inside .leaflet-container, which is
+       where they inherit Leaflet's own 12px type from. The sheet is a
+       sibling of the map, not a descendant, so without this they'd render
+       at the page's 16px base and tower over everything around them. */
+    font-size: 0.78rem;
+    line-height: 1.4;
+  }
+
+  /* Controls moved in here from Leaflet's corners (see app.js's
+     syncMapOptionsSheet) are no longer inside .leaflet-right, so Leaflet's
+     own float/margin rules stop applying on their own — what's left is to
+     let them fill the sheet's width instead of hugging a map edge. */
+  #map-options-body > * {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    float: none !important;
+    box-shadow: none !important;
+  }
+  #map-options-body .leaflet-control-layers-expanded { width: 100%; }
+  /* The basemap list is collapsed-to-an-icon on the map, which makes no
+     sense in a sheet — show it expanded. */
+  #map-options-body .leaflet-control-layers-toggle { display: none; }
+  #map-options-body .leaflet-control-layers-list { display: block; }
+  #map-options-body label { display: flex; align-items: center; gap: 0.4rem; min-height: 34px; }
+  /* These controls are sized for a cramped corner of the map on desktop
+     (down to 0.68rem); in a sheet there's room to read them, and 11px
+     labels next to Leaflet's own 13.5px ones just looked inconsistent. */
+  #map-options-body .map-control-header,
+  #map-options-body .plan-checkbox-row,
+  #map-options-body .legend { font-size: 0.8rem; }
+  #map-options-body .map-control-header { min-height: 44px; }
+
+  /* --- panel content at phone width --------------------------------- */
+  /* .plan-row lets its select flex down to min-width:0, which on a 412px
+     screen crushed the region filter to 48px — "All regions" rendered as
+     "All re…". The row already wraps, so giving the field a floor makes it
+     drop to its own line instead of being squeezed to illegibility. */
+  .plan-row select,
+  .plan-row input[type="text"] { min-width: 9rem; }
+
+  /* The four workflow steps overflow a phone by ~20px, which left "Run"
+     sliced in half at the edge. It still scrolls if it needs to, but at
+     these paddings it fits outright. */
+  .sim-rail { padding: 0.4rem 0.35rem; margin: 0.5rem 0; }
+  .sim-rail-step { gap: 0.25rem; font-size: 0.68rem; }
+  .sim-rail-link { width: 0.5rem; margin: 0 0.15rem; }
+
+  /* The hint is advisory and bottom-left docked; with a sheet open there's
+     nowhere for it to go that isn't underneath one. */
+  #map-wrap.plan-open #companion-pin-hint,
+  #map-wrap.sim-open #companion-pin-hint {
+    display: none;
+  }
+}

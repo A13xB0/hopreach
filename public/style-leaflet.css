@@ -1,0 +1,113 @@
+/* ======================================================================
+   Leaflet's own controls, themed
+   ----------------------------------------------------------------------
+   Leaflet ships these white, which reads as three bright rectangles
+   pasted onto a dark map — most obviously the attribution bar, which is
+   full-width and the brightest thing on the page. Leaflet's own rules are
+   `.leaflet-container .leaflet-control-*` (specificity 0,2,0), so these
+   have to be scoped the same way to win rather than relying on load
+   order alone.
+   ====================================================================== */
+.leaflet-container .leaflet-control-attribution {
+  background: rgba(13, 33, 55, 0.85);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-bottom: none;
+  border-top-left-radius: 8px;
+  padding: 2px 8px;
+  font-size: 0.65rem;
+  backdrop-filter: blur(6px);
+}
+.leaflet-container .leaflet-control-attribution a { color: var(--text-muted); }
+.leaflet-container .leaflet-control-attribution a:hover { color: var(--accent); }
+
+@media (min-width: 701px) {
+  /* The credits belong on the page's bottom edge, not floating partway up
+     the map. Leaflet keeps them in the bottom-right control corner, and
+     that whole corner is lifted by --map-tools-clearance so the coverage
+     legend clears the floating #map-tools cluster — which lifted the
+     credits along with it. Pinning them to the viewport corner decouples
+     the two: the legend still sits above the buttons, the credits sit at
+     the bottom. (The phone layout folds them into the tab bar instead —
+     see the mobile section.) */
+  .leaflet-container .leaflet-control-attribution {
+    position: fixed;
+    bottom: 0;
+    right: 0;
+    margin: 0;
+    z-index: 1200;
+  }
+
+  /* #map-tools spans the full width (it needs a `right` bound so a wrapped
+     row can't widen the page — see its own comment), but only the buttons
+     at the left actually draw anything. The rest was still a hit target:
+     an invisible full-width strip along the map's bottom edge that
+     swallowed map drags and, now, sat over the credits. Only the buttons
+     should take pointer events. The phone tab bar is a real opaque bar and
+     deliberately keeps capturing everything, so this is desktop-only. */
+  #map-tools { pointer-events: none; }
+  #map-tools button { pointer-events: auto; }
+}
+
+.leaflet-container .leaflet-control-layers,
+.leaflet-container .leaflet-bar {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.leaflet-container .leaflet-bar a,
+.leaflet-container .leaflet-bar a:hover {
+  background: var(--card-bg);
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+.leaflet-container .leaflet-bar a:hover { background: var(--nav-bg-2); }
+.leaflet-container .leaflet-bar a.leaflet-disabled {
+  background: var(--card-bg);
+  color: var(--status-silent);
+}
+.leaflet-container .leaflet-control-layers-toggle {
+  /* Leaflet's is a dark glyph on white; invert it for a dark tile. */
+  filter: invert(1) hue-rotate(180deg);
+}
+.leaflet-container .leaflet-control-layers-expanded {
+  color: var(--text);
+  padding: 0.5rem 0.65rem;
+}
+.leaflet-container .leaflet-control-layers-separator { border-top-color: var(--border); }
+
+/* Verdict from running a proposed connect-repeaters route through the
+   flood simulator (see planner-worker.js's checkRoute). Colour carries the
+   same three states the text does — delivered every trial, delivered
+   sometimes, never got through — so a glance is enough. */
+.plan-route-check {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  margin: 0.4rem 0 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.72rem;
+}
+.plan-route-check.hidden { display: none; }
+.plan-route-check.good { border-left-color: var(--status-active); }
+.plan-route-check.warn { border-left-color: var(--status-degraded); }
+.plan-route-check.bad { border-left-color: #f87171; }
+.plan-route-check-head { font-weight: 700; color: var(--text); }
+.plan-route-check.good .plan-route-check-head { color: var(--status-active); }
+.plan-route-check.warn .plan-route-check-head { color: var(--status-degraded); }
+.plan-route-check.bad .plan-route-check-head { color: #f87171; }
+.plan-route-check-detail { color: var(--text-muted); line-height: 1.35; }
+
+/* The phone-only furniture: a bottom sheet and the grabber that drags it.
+   Both are in the markup at every width, so they need switching off
+   explicitly above the breakpoint — otherwise the Map options sheet
+   renders as a stray "Map options ✕" block in the middle of the desktop
+   map. The mobile block below turns them back on. */
+.mobile-sheet { display: none; }
+.panel-grab { display: none; }
+
