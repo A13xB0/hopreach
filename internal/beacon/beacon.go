@@ -309,6 +309,13 @@ func (c *Client) iataParam() string { return strings.Join(c.IATAs, ",") }
 // FetchRepeaters pages through the node list, keeping repeaters, and records
 // the pubkey→UUID mapping the neighbour calls need (node paths take UUIDs).
 func (c *Client) FetchRepeaters(ctx context.Context) ([]meshsource.Node, error) {
+	return c.fetchNodes(ctx, url.Values{"type": []string{"2"}}) // 2 = repeater
+}
+
+// fetchNodes pages /nodes with an optional filter, recording each node's
+// Beacon UUID against its public key on the way past — FetchReach needs that
+// mapping and there is no endpoint to look one up directly.
+func (c *Client) fetchNodes(ctx context.Context, filter url.Values) ([]meshsource.Node, error) {
 	const limit = 500
 	var (
 		nodes  []meshsource.Node
@@ -316,7 +323,11 @@ func (c *Client) FetchRepeaters(ctx context.Context) ([]meshsource.Node, error) 
 	)
 	for {
 		q := url.Values{}
-		q.Set("type", "2") // 2 = repeater
+		for k, vs := range filter {
+			for _, v := range vs {
+				q.Set(k, v)
+			}
+		}
 		q.Set("iatas", c.iataParam())
 		q.Set("limit", fmt.Sprint(limit))
 		if cursor != nil {
@@ -340,6 +351,12 @@ func (c *Client) FetchRepeaters(ctx context.Context) ([]meshsource.Node, error) 
 		cursor = pg.NextCursor
 	}
 	return nodes, nil
+}
+
+// FetchAllNodes returns every node Beacon knows in the configured IATAs,
+// any role — relay paths run through room servers and companions too.
+func (c *Client) FetchAllNodes(ctx context.Context) ([]meshsource.Node, error) {
+	return c.fetchNodes(ctx, nil)
 }
 
 func (c *Client) uuidFor(pubkey string) (string, bool) {
@@ -424,10 +441,24 @@ func (c *Client) FetchScopes(ctx context.Context) ([]string, error) {
 func (c *Client) FetchPacketsBetween(
 	ctx context.Context, from, to time.Time, limit int,
 ) ([]meshsource.Packet, error) {
+	return c.fetchPacketList(ctx, from, to, limit, nil)
+}
+
+// fetchPacketList is the shared window query. extra carries any additional
+// server-side filter — participation asks for one route type, which is far
+// cheaper than pulling every packet and discarding most of them here.
+func (c *Client) fetchPacketList(
+	ctx context.Context, from, to time.Time, limit int, extra url.Values,
+) ([]meshsource.Packet, error) {
 	if limit <= 0 {
 		limit = 500
 	}
 	q := url.Values{}
+	for k, vs := range extra {
+		for _, v := range vs {
+			q.Set(k, v)
+		}
+	}
 	q.Set("iatas", c.iataParam())
 	q.Set("since", fmt.Sprint(from.UnixMilli()))
 	q.Set("until", fmt.Sprint(to.UnixMilli()))

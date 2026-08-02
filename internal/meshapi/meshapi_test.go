@@ -41,6 +41,14 @@ func (f *fakeSource) FetchPacketsBetween(
 func (f *fakeSource) FetchPacketDetail(context.Context, string) (meshsource.Packet, error) {
 	return f.detail, nil
 }
+func (f *fakeSource) FetchAllNodes(context.Context) ([]meshsource.Node, error) {
+	return f.nodes, nil
+}
+func (f *fakeSource) FetchRegionParticipation(
+	context.Context, time.Time, []string,
+) (meshsource.Participation, error) {
+	return meshsource.Participation{}, nil
+}
 
 func serve(t *testing.T, src meshsource.Source, path string) map[string]any {
 	t.Helper()

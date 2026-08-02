@@ -21,7 +21,12 @@ import (
 // it. Selection is deliberately explicit rather than "whichever URL is set",
 // so a half-filled config can't silently swap the data underneath a map.
 func FromConfig(cfg config.Config) (meshsource.Source, error) {
-	if cfg.Beacon.Enabled {
+	kind, err := cfg.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case config.SourceBeacon:
 		timeout := time.Duration(cfg.Beacon.RequestTimeoutSeconds * float64(time.Second))
 		if timeout <= 0 {
 			timeout = 30 * time.Second
@@ -38,13 +43,28 @@ func FromConfig(cfg config.Config) (meshsource.Source, error) {
 		}
 		c.DetailConcurrency = cfg.Beacon.DetailConcurrency
 		return c, nil
-	}
 
-	timeout := time.Duration(cfg.CoreScope.RequestTimeoutSeconds * float64(time.Second))
-	if timeout <= 0 {
-		timeout = 30 * time.Second
+	case config.SourceCoreScope:
+		timeout := time.Duration(cfg.CoreScope.RequestTimeoutSeconds * float64(time.Second))
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		if cfg.CoreScope.APIURL == "" {
+			return nil, fmt.Errorf("corescope data source: corescope.api_url is required")
+		}
+		return meshsource.NewCoreScopeSource(
+			corescope.NewClient(cfg.CoreScope.APIURL, &http.Client{Timeout: timeout}),
+		), nil
+
+	default:
+		return nil, fmt.Errorf("unknown source type %q", kind)
 	}
-	return meshsource.NewCoreScopeSource(
-		corescope.NewClient(cfg.CoreScope.APIURL, &http.Client{Timeout: timeout}),
-	), nil
 }
+
+// Both backends must satisfy the whole interface. Without these, a missing
+// method only surfaces at the call site that needed it — which for the render
+// pipeline meant discovering the gap during a live run.
+var (
+	_ meshsource.Source = (*meshsource.CoreScopeSource)(nil)
+	_ meshsource.Source = (*beacon.Client)(nil)
+)

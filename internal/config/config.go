@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,6 +39,7 @@ type Config struct {
 	Region      RegionConfig      `yaml:"region"`
 	CoreScope   CoreScopeConfig   `yaml:"corescope"`
 	Beacon      BeaconConfig      `yaml:"beacon"`
+	Source      SourceConfig      `yaml:"source"`
 	Terrain     TerrainConfig     `yaml:"terrain"`
 	Propagation PropagationConfig `yaml:"propagation"`
 	Coverage    CoverageConfig    `yaml:"coverage"`
@@ -102,7 +104,50 @@ type RegionConfig struct {
 // repeater nodes, observed links and packets
 // (docs/BEACON_COMPATIBILITY_PLAN.md). Disabled unless Enabled is set, in
 // which case it replaces CoreScope as the data source.
+// SourceConfig selects which observation backend HopReach reads from.
+//
+// One explicit choice, rather than a flag on one of the two backends: an
+// `enabled` bool inside `beacon:` made an either/or read like an add-on, and
+// left "both configured" meaning something only the factory's ordering
+// decided.
+type SourceConfig struct {
+	// Type is "corescope" or "beacon". Empty means corescope, which is what
+	// every deployment predating this key is running.
+	Type string `yaml:"type"`
+}
+
+// SourceType names a backend. Kept as constants so a typo in config.yaml is
+// rejected at load rather than silently selecting the default.
+const (
+	SourceCoreScope = "corescope"
+	SourceBeacon    = "beacon"
+)
+
+// Resolve returns the effective backend name, applying the default and the
+// deprecated beacon.enabled alias.
+func (c Config) Resolve() (string, error) {
+	t := strings.ToLower(strings.TrimSpace(c.Source.Type))
+	if t == "" {
+		// Deprecated: beacon.enabled predates source.type. Honour it so a
+		// deployed config keeps working, but source.type wins if both are set.
+		if c.Beacon.Enabled {
+			return SourceBeacon, nil
+		}
+		return SourceCoreScope, nil
+	}
+	switch t {
+	case SourceCoreScope, SourceBeacon:
+		return t, nil
+	default:
+		return "", fmt.Errorf(
+			"config: source.type %q is not a known backend (want %q or %q)",
+			c.Source.Type, SourceCoreScope, SourceBeacon)
+	}
+}
+
 type BeaconConfig struct {
+	// Deprecated: use source.type: beacon. Still honoured when source.type
+	// is unset so an existing config.yaml keeps working — see Config.Resolve.
 	Enabled bool   `yaml:"enabled"`
 	APIURL  string `yaml:"api_url"`
 

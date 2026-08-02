@@ -13,6 +13,7 @@ package meshsource
 
 import (
 	"context"
+	"sort"
 	"time"
 )
 
@@ -32,9 +33,15 @@ type Node struct {
 	LastHeard time.Time
 	FirstSeen time.Time
 
+	// Activity counters. The pipeline renders these in the map popup, so
+	// "backend didn't say" and "genuinely zero" both arrive as 0 — a
+	// distinction no consumer currently makes.
+	AdvertCount   int
+	RelayCount1h  int
 	RelayCount24h int
-	HashSize      int    // path-hash width this node adverts with (1..3), 0 = unknown
-	DefaultScope  string // region/scope name, "" = unknown
+
+	HashSize     int    // path-hash width this node adverts with (1..3), 0 = unknown
+	DefaultScope string // region/scope name, "" = unknown
 }
 
 // ReachLink is an *observed* link from one node to another — evidence, never
@@ -155,4 +162,60 @@ type Source interface {
 
 	// FetchPacketDetail returns one packet with *every* observation of it.
 	FetchPacketDetail(ctx context.Context, hash string) (Packet, error)
+
+	// FetchAllNodes returns every node the backend knows, any role — not
+	// just repeaters. A flood's relay path runs through room servers and
+	// companions too, so anything resolving a path needs the full directory.
+	FetchAllNodes(ctx context.Context) ([]Node, error)
+
+	// FetchRegionParticipation observes, over a window, which regions each
+	// node is actually seen relaying in — and which are seen relaying plain
+	// unscoped traffic.
+	//
+	// This is deliberately a backend capability rather than something
+	// derived here from FetchPacketsBetween. Both backends can answer it far
+	// more cheaply than a generic caller could: CoreScope decodes each
+	// packet's transport code as it walks its own history, and Beacon
+	// already stores the scope per packet. Doing it generically would mean
+	// pulling every packet in the window across the network to recompute
+	// what the backend already knows.
+	FetchRegionParticipation(ctx context.Context, since time.Time, regionNames []string) (Participation, error)
+}
+
+// Participation is one window's worth of observed region membership.
+//
+// Scoped is pubkey -> region name -> observation count: which regions this
+// node was actually seen relaying in, confirmed from real traffic rather
+// than from its own self-reported default_scope (empty for ~76% of real
+// repeaters, so not something a map can be built on).
+//
+// Unscoped is pubkey -> how many plain, unscoped floods it was seen
+// relaying. Absence means "never observed relaying unscoped traffic in this
+// window", which is weaker evidence than Scoped's cryptographic confirmation
+// — see ObservedUnscoped.
+type Participation struct {
+	Scoped   map[string]map[string]int
+	Unscoped map[string]int
+}
+
+// ObservedScopes lists every region a node has at least one confirmed
+// observation in, sorted. A repeater can genuinely run more than one region
+// at once, so this is not "the most-observed region".
+func ObservedScopes(counts map[string]int) []string {
+	if len(counts) == 0 {
+		return nil
+	}
+	regions := make([]string, 0, len(counts))
+	for r := range counts {
+		regions = append(regions, r)
+	}
+	sort.Strings(regions)
+	return regions
+}
+
+// ObservedUnscoped reports whether a node was seen relaying unscoped traffic.
+// Unlike ObservedScopes this is an absence-based signal: never having been
+// observed is suggestive, not proof, that the node denies unscoped traffic.
+func ObservedUnscoped(count int) bool {
+	return count > 0
 }

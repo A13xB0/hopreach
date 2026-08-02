@@ -10,20 +10,18 @@ import (
 	"time"
 
 	"hopreach/internal/calibration"
-	"hopreach/internal/corescope"
 	"hopreach/internal/coverage"
+	"hopreach/internal/meshsource"
 	"hopreach/internal/propagation"
 )
 
-func classifyStatus(lastHeard *string, cfg appConfig) string {
-	if lastHeard == nil {
+func classifyStatus(lastHeard time.Time, cfg appConfig) string {
+	// Zero means the backend has never heard this node — silent by
+	// definition, and distinct from "heard a long time ago".
+	if lastHeard.IsZero() {
 		return "silent"
 	}
-	t, err := time.Parse(time.RFC3339, *lastHeard)
-	if err != nil {
-		return "silent"
-	}
-	age := time.Since(t)
+	age := time.Since(lastHeard)
 	switch {
 	case age <= time.Duration(cfg.activeHours*float64(time.Hour)):
 		return "active"
@@ -62,13 +60,13 @@ type featureCollection struct {
 // observed_unscoped, but only when scopeObservationEnabled — a repeater
 // simply not present because scope observation never ran at all must not
 // be indistinguishable from one genuinely observed-and-absent (see
-// corescope.ObservedUnscoped's own doc comment).
-func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults []calibration.Result, observedScopes map[string][]string, observedUnscoped map[string]int, scopeObservationEnabled bool, cfg appConfig) []feature {
+// meshsource.ObservedUnscoped's own doc comment).
+func buildFeatures(nodes []meshsource.Node, sites []propagation.Site, calResults []calibration.Result, observedScopes map[string][]string, observedUnscoped map[string]int, scopeObservationEnabled bool, cfg appConfig) []feature {
 	features := make([]feature, 0, len(nodes))
 	for i, n := range nodes {
 		name := "Unnamed repeater"
-		if n.Name != nil && *n.Name != "" {
-			name = *n.Name
+		if n.Name != "" {
+			name = n.Name
 		}
 		props := map[string]any{
 			"name": name,
@@ -76,10 +74,13 @@ func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults 
 			// already exposed openly by its own API, and the planning
 			// tools need the full key to query /api/nodes/:pubkey/reach
 			// for real observed neighbour data.
-			"public_key":      n.PublicKey,
-			"status":          classifyStatus(n.LastHeard, cfg),
-			"last_heard":      n.LastHeard,
-			"first_seen":      n.FirstSeen,
+			"public_key": n.PublicKey,
+			"status":     classifyStatus(n.LastHeard, cfg),
+			// Serialised as RFC3339 or null, never as the epoch: "never
+			// heard" and "heard in 1970" mean very different things to the
+			// map's status colouring.
+			"last_heard":      isoOrNil(n.LastHeard),
+			"first_seen":      isoOrNil(n.FirstSeen),
 			"advert_count":    n.AdvertCount,
 			"relay_count_1h":  n.RelayCount1h,
 			"relay_count_24h": n.RelayCount24h,
@@ -111,10 +112,10 @@ func buildFeatures(nodes []corescope.Node, sites []propagation.Site, calResults 
 			props["inferred_scopes"] = scopes
 		}
 		if scopeObservationEnabled {
-			// See corescope.ObservedUnscoped: this is "not observed
+			// See meshsource.ObservedUnscoped: this is "not observed
 			// relaying unscoped traffic in the window", not a confirmed
 			// negative — the frontend should present it that way.
-			props["observed_unscoped"] = corescope.ObservedUnscoped(observedUnscoped[strings.ToLower(n.PublicKey)])
+			props["observed_unscoped"] = meshsource.ObservedUnscoped(observedUnscoped[strings.ToLower(n.PublicKey)])
 		}
 		if calResults != nil {
 			cr := calResults[i]
@@ -354,4 +355,13 @@ func previousScopeCoverage(outputDir string) map[string]*coverageMeta {
 type imageResult struct {
 	raster *image.NRGBA
 	bounds propagation.Bounds
+}
+
+// isoOrNil renders a timestamp for the GeoJSON, keeping "never" as null.
+func isoOrNil(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
 }

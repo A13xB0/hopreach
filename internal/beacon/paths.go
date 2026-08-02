@@ -2,6 +2,8 @@ package beacon
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -34,7 +36,28 @@ func (c *Client) FetchPacketsWithPaths(
 	if err != nil {
 		return nil, 0, err
 	}
+	return c.resolvePaths(ctx, list)
+}
 
+// fetchUnscopedWithPaths is the same window query narrowed to plain floods —
+// the traffic that carries no transport code at all. Region participation
+// needs their relay paths and nothing else.
+func (c *Client) fetchUnscopedWithPaths(
+	ctx context.Context, from, to time.Time,
+) (packets []meshsource.Packet, failed int, err error) {
+	list, err := c.fetchPacketList(ctx, from, to, unscopedPacketCap,
+		url.Values{"routeType": []string{fmt.Sprint(unscopedRouteType)}})
+	if err != nil {
+		return nil, 0, err
+	}
+	return c.resolvePaths(ctx, list)
+}
+
+// resolvePaths fills in each packet's relay path from the per-packet detail
+// endpoint, bounded by DetailConcurrency.
+func (c *Client) resolvePaths(
+	ctx context.Context, list []meshsource.Packet,
+) (packets []meshsource.Packet, failed int, err error) {
 	conc := c.DetailConcurrency
 	if conc <= 0 {
 		conc = defaultDetailConcurrency

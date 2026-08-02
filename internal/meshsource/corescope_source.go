@@ -33,22 +33,7 @@ func (s *CoreScopeSource) FetchRepeaters(ctx context.Context) ([]Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Node, 0, len(raw))
-	for _, n := range raw {
-		out = append(out, Node{
-			PublicKey:     strings.ToLower(n.PublicKey),
-			Name:          derefString(n.Name),
-			Role:          n.Role,
-			Lat:           n.Lat,
-			Lon:           n.Lon,
-			LastHeard:     parseTime(n.LastHeard),
-			FirstSeen:     parseTime(n.FirstSeen),
-			RelayCount24h: derefInt(n.RelayCount24h),
-			HashSize:      derefInt(n.HashSize),
-			DefaultScope:  derefString(n.DefaultScope),
-		})
-	}
-	return out, nil
+	return nodesFromCoreScope(raw), nil
 }
 
 func (s *CoreScopeSource) FetchReach(ctx context.Context, pubkey string, days int) ([]ReachLink, error) {
@@ -72,6 +57,55 @@ func (s *CoreScopeSource) FetchReach(ctx context.Context, pubkey string, days in
 
 func (s *CoreScopeSource) FetchScopes(ctx context.Context) ([]string, error) {
 	return s.Client.FetchKnownRegionNames(ctx)
+}
+
+func (s *CoreScopeSource) FetchAllNodes(ctx context.Context) ([]Node, error) {
+	raw, err := s.Client.FetchAllNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return nodesFromCoreScope(raw), nil
+}
+
+// FetchRegionParticipation walks CoreScope's packet history, decoding each
+// packet's own transport code. The node directory is needed to resolve the
+// short hop-hashes in each relay path back to full public keys, so it is
+// fetched here rather than asked of the caller.
+func (s *CoreScopeSource) FetchRegionParticipation(
+	ctx context.Context, since time.Time, regionNames []string,
+) (Participation, error) {
+	allNodes, err := s.Client.FetchAllNodes(ctx)
+	if err != nil {
+		return Participation{}, err
+	}
+	p, err := s.Client.FetchRegionParticipation(ctx, since, allNodes, regionNames)
+	if err != nil {
+		return Participation{}, err
+	}
+	return Participation{Scoped: p.Scoped, Unscoped: p.Unscoped}, nil
+}
+
+// nodesFromCoreScope is the one place CoreScope's node shape becomes the
+// canonical one, shared by FetchRepeaters and FetchAllNodes.
+func nodesFromCoreScope(raw []corescope.Node) []Node {
+	out := make([]Node, 0, len(raw))
+	for _, n := range raw {
+		out = append(out, Node{
+			PublicKey:     strings.ToLower(n.PublicKey),
+			Name:          derefString(n.Name),
+			Role:          n.Role,
+			Lat:           n.Lat,
+			Lon:           n.Lon,
+			LastHeard:     parseTime(n.LastHeard),
+			FirstSeen:     parseTime(n.FirstSeen),
+			AdvertCount:   derefInt(n.AdvertCount),
+			RelayCount1h:  derefInt(n.RelayCount1h),
+			RelayCount24h: derefInt(n.RelayCount24h),
+			HashSize:      derefInt(n.HashSize),
+			DefaultScope:  derefString(n.DefaultScope),
+		})
+	}
+	return out
 }
 
 func (s *CoreScopeSource) FetchPacketsBetween(

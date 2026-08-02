@@ -11,6 +11,10 @@ import (
 )
 
 type appConfig struct {
+	// source is the whole backend selection, carried through so run() can
+	// build the Source without knowing which backend it got.
+	source yconfig.Config
+
 	apiURL        string
 	activeHours   float64
 	degradedHours float64
@@ -112,6 +116,7 @@ type appConfig struct {
 // their concern.
 func toAppConfig(yc yconfig.Config) appConfig {
 	return appConfig{
+		source:        yc,
 		apiURL:        yc.CoreScope.APIURL,
 		activeHours:   yc.Site.ActiveHours,
 		degradedHours: yc.Site.DegradedHours,
