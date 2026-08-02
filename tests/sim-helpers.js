@@ -6,6 +6,11 @@
 // file by feature meant every part needed them, so they moved here rather
 // than being copied — a drifted copy of openAccordion would fail in ways
 // that look like a UI regression.
+// expect is used by clickUntilVisible below. It was dropped when these
+// helpers moved out of simulator.spec.js, where the spec's own import had
+// covered it — which broke 21 tests at RUN time while `--list` still
+// collected all 46 happily.
+const { expect } = require("@playwright/test");
 const { gotoReady } = require("./helpers");
 
 const TEST_PLAN = {

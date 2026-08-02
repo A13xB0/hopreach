@@ -18,10 +18,11 @@
 
 # HopReach
 
-HopReach turns a [CoreScope](https://github.com/Kpa-clawbot/CoreScope)
-instance into an interactive coverage map for your
-[MeshCore](https://meshcore.co.uk/) repeater network — then lets you plan
-changes to it and simulate how traffic would actually flow.
+HopReach turns a [MeshCore](https://meshcore.co.uk/) observation backend —
+[CoreScope](https://github.com/Kpa-clawbot/CoreScope) or
+[MeshCore Beacon](https://github.com/MeshCore-Beacon/beacon-server) — into an
+interactive coverage map for your repeater network, then lets you plan changes
+to it and simulate how traffic would actually flow.
 
 It reads every `role=repeater` node, keeps the ones inside your region, and
 computes a **terrain-aware coverage estimate** from real elevation data with
@@ -29,6 +30,37 @@ line-of-sight and diffraction analysis on every path. Not a distance circle
 around each site — the actual hills in the way.
 
 Everything runs from **one Docker container** that refreshes itself daily.
+
+## Bring your own observation backend
+
+HopReach does not watch the mesh itself — it reads someone else's record of
+what was heard. Which one is a single config key:
+
+```yaml
+source:
+  type: corescope   # or: beacon
+```
+
+Both are first-class: same map, same coverage rasters, same planner and
+simulator, same packet replay. Everything the app needs goes through one
+internal interface, so the browser never sees a vendor's API and adding a
+third backend means implementing that interface — not touching the front end.
+
+One difference is worth knowing before you choose. Beacon scopes its region
+list to the observers in your configured IATAs, so it answers *"regions
+somebody local was heard on"* rather than *"every region on this mesh"*.
+Region-wide features need the complete set to be truthful — a region missing
+from a filter looks like a region with no repeaters in it — so on Beacon the
+per-region coverage rasters and the map's region filter are **switched off
+rather than drawn from a partial list**. Everything keyed to a *specific*
+scope still works: a packet's own region, observed region participation, and
+each repeater's self-reported scope.
+
+The backend declares this itself (`Capabilities.ScopeCatalog`), so the
+pipeline, the API and the front end all switch together. See
+[Beacon compatibility](docs/BEACON_COMPATIBILITY_PLAN.md#0-status-implemented-and-verified-against-a-real-beacon)
+for the feature-by-feature matrix, verified by loading one real mesh into both
+backends and comparing the output.
 
 ## Quick start
 
@@ -113,7 +145,7 @@ the firmware source, not a secondhand approximation.
 
 - **Load your network** — planned repeaters, the real ones, or both, plus
   virtual companion devices anywhere you click.
-- **Choose how links are decided** — the terrain model, CoreScope's real
+- **Choose how links are decided** — the terrain model, the backend's real
   observed reach data, or a blend of the two.
 - **Schedule sends and watch the flood** — an animated replay steps through
   it wave by wave, with a scrub bar to drag back and forth through time.
@@ -129,7 +161,7 @@ the firmware source, not a secondhand approximation.
 - **🔥 Stress test** — push synthetic load until it breaks and report the
   knee: how many messages this specific network can actually handle.
 
-**Replay a real packet.** Paste a CoreScope packet hash and it reconstructs
+**Replay a real packet.** Paste a packet hash and it reconstructs
 what genuinely happened — every relay there's proof of — then runs its own
 simulation from the same origin and compares. Hops the model predicted but
 nobody observed show as dashed amber (candidates for where interference
