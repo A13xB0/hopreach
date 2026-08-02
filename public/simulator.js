@@ -13,12 +13,10 @@
   const cfg = window.HOPREACH_CONFIG;
   const { map } = window.MCCoverageMap;
 
-  // Frame parsing, SHA-256/HMAC and region decoding now live in
-  // mesh-frame.js — pure byte arithmetic, and unit-tested there rather than
-  // relying on e2e cases that skip on a quiet mesh. Destructured here so
-  // every call site below reads exactly as it did in-file.
-  const { extractPacketHash, parseMeshFrame, regionKeysFor } = window.MeshFrame;
-  const decodeRegionOfPacketSync = window.MeshFrame.decodeRegion;
+  // Parsing a packet's own bytes is the backend's job (internal/corescope);
+  // /mesh-api/ hands us the decoded scope, hash size and frame length. All
+  // that is left here is pulling a hash out of whatever the user pasted.
+  const { extractPacketHash } = window.MeshFrame;
 
   // The config-rule and topology-attribute mirrors of internal/meshsim live
   // in sim-topology.js, which takes nodes and links as arguments so it can be
@@ -4794,8 +4792,11 @@
   // See public/evidence.js and docs/REPLAY_NEGATIVE_EVIDENCE_PLAN.md.
   function buildObserverEvidence({ detail, targetMs, hash, liveness }) {
     const radioDefaults = self.HopReachMeshModel.defaultPrefs().radio;
-    const airOf = (rawHex, fallbackBytes) =>
-      HopReachEvidence.loraAirtimeMs(rawHex ? Math.floor(rawHex.length / 2) : fallbackBytes || 24, radioDefaults.sf, radioDefaults.bwKhz, radioDefaults.cr);
+    // frame_bytes is the whole on-air frame as the backend measured it.
+    // A backend that can't say omits it, hence the fallback — a zero here
+    // would mean "instantaneous transmission", which is worse than a guess.
+    const airOf = (frameBytes, fallbackBytes) =>
+      HopReachEvidence.loraAirtimeMs(frameBytes || fallbackBytes || 24, radioDefaults.sf, radioDefaults.bwKhz, radioDefaults.cr);
     const observerNames = new Map();
     for (const lp of liveness) {
       const oid = (lp.observer_id || "").toLowerCase();
@@ -4809,7 +4810,7 @@
     for (const lp of liveness) {
       const tMs = Date.parse(lp.timestamp);
       if (Number.isNaN(tMs)) continue;
-      const air = airOf(lp.raw_hex);
+      const air = airOf(lp.frame_bytes);
       const oid = (lp.observer_id || "").toLowerCase();
       if (oid) evidenceEvents.push({ observerId: oid, tMs, airtimeMs: air, hash: lp.hash, kind: "rx" });
       for (const relay of lp.resolved_path || []) {
@@ -4820,7 +4821,7 @@
     const heardIds = new Set((detail.observations || []).map((o) => (o.observer_id || "").toLowerCase()).filter(Boolean));
     const evidenceMap = HopReachEvidence.classifyObservers({
       targetMs,
-      targetAirtimeMs: airOf(detail.packet && detail.packet.raw_hex, 105),
+      targetAirtimeMs: airOf(detail.packet && detail.packet.frame_bytes, 105),
       targetHash: hash,
       heardObserverIds: heardIds,
       events: evidenceEvents,
@@ -4877,28 +4878,26 @@
     return null;
   }
 
-  let regionKeyCache = null;
+  // Region decoding is the backend's job now (internal/corescope's
+  // RegionOfPacket, or a backend like Beacon that simply reports the scope).
+  // The browser used to do it itself, which meant a hand-rolled SHA-256 here
+  // because SubtleCrypto is undefined off a secure context. These two read
+  // what the API already decoded.
 
-  // The IO half of region decoding: fetch the candidate region names, then
-  // hand them to mesh-frame.js to turn into keys, and cache the result for
-  // the session.
-  async function ensureRegionKeys() {
-    if (regionKeyCache) return regionKeyCache;
-    let keys = new Map();
-    try {
-      keys = regionKeysFor(await MeshApi.scopes());
-    } catch {
-      // Backend unreachable. Deliberately NOT cached below, so a transient
-      // failure doesn't silently disable region decoding for the rest of the
-      // session — the next replay tries again.
-      return keys;
-    }
-    if (keys.size > 0) regionKeyCache = keys;
-    return keys;
+  // carriesTransportCode reports whether a packet has a transport code at
+  // all — route types 0/3. A plain flood is genuinely unscoped, which is a
+  // different fact from "scoped, but we couldn't name the region".
+  function carriesTransportCode(p) {
+    return p && (p.route_type === 0 || p.route_type === 3);
   }
 
-  async function decodeRegionOfPacket(rawHex) {
-    return decodeRegionOfPacketSync(rawHex, await ensureRegionKeys());
+  // regionOfPacket prefers the real decoded region name. A transport-coded
+  // packet whose region we can't name still needs a non-empty marker so the
+  // engine adds its 4 transport-code bytes to the airtime; the reconstructed
+  // nodes all hold the "*" wildcard, so this never gates relaying.
+  function regionOfPacket(p) {
+    if (p && p.scope) return p.scope;
+    return carriesTransportCode(p) ? "scoped" : "";
   }
 
   // Every real flood in the window, as simulator messages — real origin,
@@ -4941,18 +4940,17 @@
       if (!originKey) continue;
       const origin = pubkeyToIndex.get(originKey);
       if (origin == null) continue;
-      const frame = parseMeshFrame(p.raw_hex);
       msgs.push({
         origin,
         sendAtMs: Math.max(0, tMs - windowStartMs),
-        payloadLen: frame ? frame.payloadLen : 20,
-        hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+        payloadLen: p.payload_len || 20,
+        hashSize: p.hash_size || DEFAULT_MESSAGE_HASH_SIZE,
         // Real ScotMesh traffic is overwhelmingly scoped (TRANSPORT_FLOOD).
         // Replaying it untagged made every repeater that doesn't relay
         // unscoped traffic refuse the lot — a whole window of "Region
         // mismatch — not relayed" that says nothing about the real network,
         // only about our having thrown the region away.
-        region: await decodeRegionOfPacket(p.raw_hex),
+        region: p.scope || "",
         sourceHash: p.hash,
       });
     }
@@ -5113,7 +5111,6 @@
           continue;
         }
         const atMs = Math.max(0, tMs - windowStartMs);
-        const frame = parseMeshFrame(p.raw_hex);
         const path = (p.resolved_path || []).map((x) => (x || "").toLowerCase());
         const isFlood = p.route_type === 0 || p.route_type === 1;
         if (isFlood) {
@@ -5128,12 +5125,14 @@
             fixed: true,
             nodeIndex: oi,
             atMs,
-            payloadLen: frame ? frame.payloadLen : 20,
-            hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
+            payloadLen: p.payload_len || 20,
+            hashSize: p.hash_size || DEFAULT_MESSAGE_HASH_SIZE,
             // A non-empty region marks the packet as transport-coded (route 0)
             // for the +4-byte airtime; the reconstructed nodes all hold the
             // "*" wildcard so this never gates relaying, only sizes airtime.
-            region: frame && frame.hasTransport ? "scoped" : "",
+            // Prefer the real decoded name, falling back to the route type so
+            // a region we can't name still gets its transport-code bytes.
+            region: regionOfPacket(p),
             background: false,
             sourceHash: p.hash,
             isTarget: p.hash === hash,
@@ -5154,10 +5153,10 @@
             background: true,
             nodeIndex: bi,
             atMs,
-            frameBytes: p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 24,
-            payloadLen: frame ? frame.payloadLen : 20,
-            hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
-            region: frame && frame.hasTransport ? "scoped" : "",
+            frameBytes: p.frame_bytes || 24,
+            payloadLen: p.payload_len || 20,
+            hashSize: p.hash_size || DEFAULT_MESSAGE_HASH_SIZE,
+            region: regionOfPacket(p),
             sourceHash: p.hash,
           });
           bgCount++;
@@ -6338,8 +6337,8 @@
       // framing/path bytes. Use the packet's own hash size too, recovered
       // from the path_len byte, so the replay reproduces the real packet's
       // airtime rather than an approximation.
-      const frame = parseMeshFrame(packetData.packet ? packetData.packet.raw_hex : null);
-      const payloadLen = frame ? frame.payloadLen : 20;
+      const targetPacket = packetData.packet || {};
+      const payloadLen = targetPacket.payload_len || 20;
       const originIndex = pubkeyToIndex.get(originPubkey);
       const seed = parseInt(document.getElementById("sim-seed").value, 10) || 0;
       // Simulate the whole window, not just the target packet: every real
@@ -6348,7 +6347,7 @@
       // normal run does — and it means the surrounding traffic contends for
       // the channel with the target instead of the target flooding a mesh
       // that's implausibly silent.
-      const regionKeys = await ensureRegionKeys();
+      const knownRegions = await MeshApi.scopes().catch(() => []);
       let predictedMessages = await buildWindowFloodMessages(windowPackets, pubkeyToIndex, replayWindowStartMs);
       // The target itself may be missing from the window list (it's fetched
       // separately, and its own row can fall outside what /api/packets
@@ -6359,8 +6358,8 @@
           origin: originIndex,
           sendAtMs: Math.max(0, targetMs - replayWindowStartMs),
           payloadLen,
-          hashSize: frame ? frame.hashSize : DEFAULT_MESSAGE_HASH_SIZE,
-          region: await decodeRegionOfPacket(packetData.packet ? packetData.packet.raw_hex : null),
+          hashSize: targetPacket.hash_size || DEFAULT_MESSAGE_HASH_SIZE,
+          region: regionOfPacket(targetPacket),
           sourceHash: hash,
         });
         predictedMessages.sort((a, b) => a.sendAtMs - b.sendAtMs);
@@ -6491,12 +6490,12 @@
       // presenting a wall of "Region mismatch" as if it were a finding.
       const scopedCount = predictedMessages.filter((m) => m.region).length;
       const transportCount = predictedMessages.filter((m) => {
-        const f = parseMeshFrame(windowPackets.find((p) => p.hash === m.sourceHash)?.raw_hex);
-        return f && f.hasTransport;
+        const p = windowPackets.find((w) => w.hash === m.sourceHash);
+        return p && carriesTransportCode(p);
       }).length;
       const regionNote =
-        regionKeys.size === 0
-          ? " Couldn't fetch the region list from CoreScope, so every packet is being simulated as unscoped — expect repeaters that deny unscoped traffic to refuse it."
+        knownRegions.length === 0
+          ? " Couldn't fetch the region list from the observation backend, so every packet is being simulated as unscoped — expect repeaters that deny unscoped traffic to refuse it."
           : transportCount > scopedCount
             ? ` ${transportCount - scopedCount} scoped packet(s) carry a region we couldn't identify, so they're simulated as unscoped.`
             : "";
@@ -7191,9 +7190,10 @@
     // what a node's settings actually resolved to, rather than what the
     // node object happens to carry before overrides are applied.
     getScenario: () => scenarioFromState(),
-    // Region decode for one raw frame — lets a test cross-check the
-    // browser's own implementation against the Go one it was ported from.
-    decodeRegion: (rawHex) => decodeRegionOfPacket(rawHex),
+    // How this build reads a packet's region. Decoding itself is the
+    // backend's now, so a test cross-checks /mesh-api/'s answer rather than
+    // a second implementation living here.
+    regionOfPacket: (packet) => regionOfPacket(packet),
     getLinks: () => simLinks,
     panBy: (dx, dy) => map.panBy([dx, dy], { animate: false }),
     getSavedSetups: () => loadAllSetups(),

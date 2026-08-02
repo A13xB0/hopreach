@@ -1488,29 +1488,39 @@ test("replays a real CoreScope packet: proven vs. predicted bottleneck analysis"
   }
 });
 
-// Region decoding used to go through SubtleCrypto, which is undefined
-// outside a secure context — i.e. on any plain-http deployment that isn't
-// localhost, including this project's own production setup. It threw, got
-// swallowed, and left every packet simulated as unscoped, which most
-// repeaters then refuse: a whole replay of "Region mismatch — not relayed"
-// on exactly the deployment it's built for, while working fine locally.
-// This pins the pure-JS implementation that replaced it against real
-// packets and an independent reference.
-test("decodes real packet regions without SubtleCrypto", async ({ page, request }) => {
+// Region decoding used to run in the browser, through SubtleCrypto — which
+// is undefined outside a secure context, i.e. on any plain-http deployment
+// that isn't localhost, including this project's own production setup. It
+// threw, got swallowed, and left every packet simulated as unscoped, which
+// most repeaters then refuse: a whole replay of "Region mismatch — not
+// relayed" on exactly the deployment it's built for.
+//
+// It is the backend's job now (internal/corescope's RegionOfPacket, unit
+// tested against a real captured packet). What this checks is the thing unit
+// tests can't: that a REAL deployment's packets come back through /mesh-api/
+// with regions actually on them, cross-checked against an independent
+// implementation of the same algorithm.
+test("the API decodes real packet regions server-side", async ({ request }) => {
   const crypto = require("crypto");
 
-  const statsResp = await request.get("http://localhost:8080/corescope-api/api/scope-stats?window=7d");
-  test.skip(!statsResp.ok(), "CoreScope scope-stats unavailable");
+  const statsResp = await request.get("http://localhost:8080/mesh-api/api/scope-stats");
+  test.skip(!statsResp.ok(), "scope-stats unavailable");
   const names = ((await statsResp.json()).byRegion || []).map((r) => r.name).filter(Boolean);
   test.skip(names.length === 0, "no live regions to decode against");
 
-  const pktResp = await request.get("http://localhost:8080/corescope-api/api/packets?limit=120");
-  test.skip(!pktResp.ok(), "CoreScope packets unavailable");
-  const packets = ((await pktResp.json()).packets || []).filter((p) => p.raw_hex).slice(0, 60);
-  test.skip(packets.length === 0, "no live packets to decode");
+  // A window wide enough to be sure of catching traffic on a quiet mesh.
+  const until = Date.now();
+  const since = until - 6 * 60 * 60 * 1000;
+  const pktResp = await request.get(
+    `http://localhost:8080/mesh-api/api/packets?since=${since}&until=${until}&limit=200`
+  );
+  expect(pktResp.ok(), "the packet window must not error — a 502 here is the " +
+    "replay being broken, not the mesh being quiet").toBeTruthy();
+  const packets = (await pktResp.json()).packets || [];
+  test.skip(packets.length === 0, "no live packets in the window");
 
-  // Independent reference: the same algorithm via node:crypto, mirroring
-  // internal/corescope/scope.go's decodePacketRegion.
+  // Independent reference: the same algorithm via node:crypto and the raw
+  // frame, straight from the vendor API rather than through our own layer.
   const reference = (rawHex) => {
     const raw = Buffer.from(rawHex, "hex");
     if (raw.length < 6) return "";
@@ -1529,16 +1539,26 @@ test("decodes real packet regions without SubtleCrypto", async ({ page, request 
     return "";
   };
 
-  await page.waitForFunction(() => !!(window.__hopreachSimulatorDebug && window.__hopreachSimulatorDebug.decodeRegion));
+  const rawResp = await request.get("http://localhost:8080/corescope-api/api/packets?limit=200");
+  test.skip(!rawResp.ok(), "vendor API unavailable for cross-checking");
+  const rawByHash = new Map(
+    ((await rawResp.json()).packets || []).filter((p) => p.raw_hex).map((p) => [p.hash, p.raw_hex])
+  );
 
+  let checked = 0;
   let scoped = 0;
   for (const p of packets) {
-    const got = await page.evaluate((hex) => window.__hopreachSimulatorDebug.decodeRegion(hex), p.raw_hex);
-    expect(got, `region for packet ${p.hash}`).toBe(reference(p.raw_hex));
-    if (got) scoped++;
+    const rawHex = rawByHash.get(p.hash);
+    if (!rawHex) continue; // outside the vendor page we fetched
+    expect(p.scope || "", `region for packet ${p.hash}`).toBe(reference(rawHex));
+    // The frame facts the browser no longer derives itself must be present.
+    expect(p.frame_bytes, `frame_bytes for ${p.hash}`).toBe(Math.floor(rawHex.length / 2));
+    checked++;
+    if (p.scope) scoped++;
   }
+  test.skip(checked === 0, "no overlap between the two pages to cross-check");
   // Real ScotMesh traffic is largely scoped; decoding none of it would mean
-  // the decoder is silently returning "" for everything, which is precisely
+  // the backend is silently returning "" for everything, which is precisely
   // the failure this test exists to catch.
   expect(scoped).toBeGreaterThan(0);
 });
