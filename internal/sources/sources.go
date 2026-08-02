@@ -7,6 +7,7 @@ package sources
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"hopreach/internal/beacon"
@@ -21,6 +22,27 @@ import (
 // it. Selection is deliberately explicit rather than "whichever URL is set",
 // so a half-filled config can't silently swap the data underneath a map.
 func FromConfig(cfg config.Config) (meshsource.Source, error) {
+	src, err := backendFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if names := nonEmpty(cfg.Source.Scopes); len(names) > 0 {
+		return withConfiguredScopes{Source: src, names: names}, nil
+	}
+	return src, nil
+}
+
+func nonEmpty(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func backendFor(cfg config.Config) (meshsource.Source, error) {
 	kind, err := cfg.Resolve()
 	if err != nil {
 		return nil, err

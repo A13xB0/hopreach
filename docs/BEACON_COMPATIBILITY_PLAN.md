@@ -37,10 +37,10 @@ source:
 | Observed reach / links | ✅ | ✅ | Beacon synthesises from neighbour lists both directions |
 | Calibration against observed links | ✅ | ✅ | same `[]meshsource.ReachLink` |
 | Coverage rasters, all tiers | ✅ | ✅ | pure function of positions + terrain |
-| Region/scope catalogue | ✅ | ❌ | different question, so the feature is off (§0.2) |
-| Region tagging on repeaters | ✅ | ❌ | off with the catalogue |
-| Per-scope coverage rasters | ✅ | ❌ | off with the catalogue |
-| Map's region filter control | ✅ | ❌ | hidden, not empty (§0.2) |
+| Region/scope catalogue | ✅ | ⚙️ | from `source.scopes` when set (§0.2) |
+| Region tagging on repeaters | ✅ | ⚙️ | 32/77 with a configured list |
+| Per-scope coverage rasters | ✅ | ⚙️ | follows the catalogue |
+| Map's region filter control | ✅ | ⚙️ | follows the catalogue |
 | Packet scope (per packet) | ✅ | ✅ | Beacon reports it directly |
 | Observed region participation | ✅ | ✅ | both derived from traffic (§0.3) |
 | Observed-unscoped signal | ✅ | ✅ | both derived from traffic |
@@ -78,7 +78,22 @@ is missing looks like a region with no repeaters in it, which is a wrong
 answer rather than a missing one.
 
 So it is declared rather than discovered. `meshsource.Capabilities.ScopeCatalog`
-is false for Beacon, and everything downstream switches off together:
+is false for Beacon **unless the operator supplies the list**:
+
+```yaml
+source:
+  type: beacon
+  scopes: ["#sco", "#fif", "#tay"]
+```
+
+Completeness is knowledge an operator usually has and a backend often does
+not, so config is the right place for it. This is enumeration only —
+membership is still decoded from real traffic, so a configured region nobody
+has been heard on gets no observations rather than an invented one. Verified
+on the migrated ScotMesh mesh: with the nine regions listed, Beacon tags
+**32 of 77 repeaters** and renders per-region rasters.
+
+Without a list, everything downstream switches off together:
 
 | Layer | Behaviour when false |
 |---|---|

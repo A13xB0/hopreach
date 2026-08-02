@@ -46,17 +46,26 @@ simulator, same packet replay. Everything the app needs goes through one
 internal interface, so the browser never sees a vendor's API and adding a
 third backend means implementing that interface — not touching the front end.
 
-One difference is worth knowing before you choose. Beacon scopes its region
-list to the observers in your configured IATAs, so it answers *"regions
-somebody local was heard on"* rather than *"every region on this mesh"*.
-Region-wide features need the complete set to be truthful — a region missing
-from a filter looks like a region with no repeaters in it — so on Beacon the
-per-region coverage rasters and the map's region filter are **switched off
-rather than drawn from a partial list**. Everything keyed to a *specific*
-scope still works: a packet's own region, observed region participation, and
-each repeater's self-reported scope.
+One difference is worth knowing. Beacon scopes its region list to the
+observers in your configured IATAs, so it answers *"regions somebody local was
+heard on"* rather than *"every region on this mesh"*. Region-wide features
+need the complete set to be truthful — a region missing from a filter looks
+like a region with no repeaters in it — so with a partial list they are
+**switched off rather than drawn wrong**.
 
-The backend declares this itself (`Capabilities.ScopeCatalog`), so the
+If you know your regions, just say so and they come back on:
+
+```yaml
+source:
+  type: beacon
+  scopes: ["#sco", "#fif", "#tay"]
+```
+
+That is enumeration only. Which repeater carries which region is still decoded
+from real traffic either way, so a region you list that nobody has been heard
+on gets no observations rather than an invented one.
+
+The backend declares what it can answer (`Capabilities.ScopeCatalog`), so the
 pipeline, the API and the front end all switch together. See
 [Beacon compatibility](docs/BEACON_COMPATIBILITY_PLAN.md#0-status-implemented-and-verified-against-a-real-beacon)
 for the feature-by-feature matrix, verified by loading one real mesh into both

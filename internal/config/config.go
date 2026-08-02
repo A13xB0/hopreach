@@ -114,6 +114,22 @@ type SourceConfig struct {
 	// Type is "corescope" or "beacon". Empty means corescope, which is what
 	// every deployment predating this key is running.
 	Type string `yaml:"type"`
+
+	// Scopes is the complete list of MeshCore regions on this network, e.g.
+	// ["#sco", "#fif"]. Optional, and only needed when the backend cannot
+	// enumerate them itself.
+	//
+	// The region features present themselves as the whole set, so a partial
+	// list makes them quietly wrong — a missing region reads as a region with
+	// no repeaters in it. Beacon's own /scopes is scoped to local observers
+	// and so is usually a subset, which is why those features are off there
+	// by default. Listing the regions here supplies what the backend cannot
+	// and switches them back on.
+	//
+	// This is enumeration only. Which packets belong to which region is still
+	// decoded from real traffic; a region listed here that nobody has been
+	// heard on simply gets no observations.
+	Scopes []string `yaml:"scopes"`
 }
 
 // SourceType names a backend. Kept as constants so a typo in config.yaml is
