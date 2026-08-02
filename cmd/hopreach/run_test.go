@@ -104,8 +104,6 @@ func TestRecordCrashedRunIfAny(t *testing.T) {
 	}
 }
 
-func strPtr(s string) *string { return &s }
-
 // TestRepeaterInScope covers the union repeaterInScope draws on — the same
 // one public/app.js's repeaterScopesOf uses client-side, so which repeaters
 // count as "in scope #x" agrees between the per-scope coverage this drives
