@@ -9,7 +9,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { parse } from "acorn";
 import { ancestor, full } from "acorn-walk";
 
-const FILE = "public/simulator.js";
+const [FILE, STATE_FILE, GLOBAL] = process.argv.slice(2).length
+  ? process.argv.slice(2)
+  : ["public/simulator.js", "public/sim-state.js", "SimState"];
 const src = readFileSync(FILE, "utf8");
 const ast = parse(src, { ecmaVersion: "latest", locations: true, ranges: true });
 
@@ -123,10 +125,10 @@ writeFileSync(FILE, out);
 // Emit the state module.
 const lines = decls.map((d) => `  ${d.name}: ${d.init},`);
 writeFileSync(
-  "public/sim-state.js",
+  STATE_FILE,
   `// The simulator's shared mutable state, in one place.
 //
-// simulator.js used to hold all of this as ${decls.length} closure variables, which is
+// ${FILE.split('/').pop()} used to hold all of this as ${decls.length} closure variables, which is
 // exactly why it could not be split: every feature area read and reassigned
 // them, so moving any one of them out meant threading a getter for each. As a
 // single object, a module that needs the current nodes just reads S.simNodes
@@ -140,7 +142,7 @@ writeFileSync(
   if (typeof module === "object" && module.exports) {
     module.exports = factory();
   } else {
-    root.SimState = factory();
+    root.${GLOBAL} = factory();
   }
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";

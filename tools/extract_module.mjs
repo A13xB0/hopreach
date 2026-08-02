@@ -15,10 +15,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { parse } from "acorn";
 import { ancestor } from "acorn-walk";
 
-const [globalName, fileBase, startArg, endArg, doc] = process.argv.slice(2);
+const [globalName, fileBase, startArg, endArg, doc, simArg] = process.argv.slice(2);
 const START = Number(startArg);
 const END = Number(endArg);
-const SIM = "public/simulator.js";
+const SIM = simArg || "public/simulator.js";
 const OUT = `public/${fileBase}.js`;
 const WIRE_MARK = "  // --- module wiring ---";
 
@@ -103,7 +103,7 @@ let header = `// ${doc}
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  const S = window.SimState;
+  const S = window.${SIM.includes("planner") ? "PlanState" : "SimState"};
 `;
 if (ctx.length) {
   header += `\n  let ${ctx.join(", ")};\n`;
