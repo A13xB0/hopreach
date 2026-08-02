@@ -82,9 +82,14 @@ if (shadows.length) {
 // tools/fix_state_assignments.mjs, which repaired 170 of exactly that.
 const edits = [];
 ancestor(ast, {
-  VariablePattern(node) {
+  VariablePattern(node, _s, ancestors) {
     if (!names.has(node.name)) return;
     if (topLevelDeclNodes.has(node)) return;
+    // A shorthand property ({ foo }) also surfaces here; it needs
+    // `foo: S.foo`, not `S.foo`, and the Identifier visitor already does
+    // that. Rewriting it here as well produces invalid syntax.
+    const parent = ancestors[ancestors.length - 2];
+    if (parent && parent.type === "Property" && parent.shorthand) return;
     edits.push({ start: node.range[0], end: node.range[1], text: `S.${node.name}` });
   },
   Identifier(node, _s, ancestors) {

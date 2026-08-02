@@ -21,6 +21,10 @@ const END = Number(endArg);
 const SIM = simArg || "public/simulator.js";
 const OUT = `public/${fileBase}.js`;
 const WIRE_MARK = "  // --- module wiring ---";
+// Which state module this file's modules read from.
+const STATE_GLOBAL = SIM.includes("planner") ? "PlanState"
+  : SIM.includes("app.js") ? "MapState"
+  : "SimState";
 
 const src = readFileSync(SIM, "utf8");
 const lines = src.split("\n");
@@ -103,7 +107,7 @@ let header = `// ${doc}
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  const S = window.${SIM.includes("planner") ? "PlanState" : "SimState"};
+  const S = window.${STATE_GLOBAL};
 `;
 if (ctx.length) {
   header += `\n  let ${ctx.join(", ")};\n`;

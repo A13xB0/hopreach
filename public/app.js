@@ -1,4 +1,6 @@
 (function () {
+  const S = window.MapState;
+
   const cfg = window.HOPREACH_CONFIG;
 
   document.getElementById("site-title").textContent = cfg.siteName;
@@ -22,6 +24,21 @@
   // a surface you open specifically to change something — so arriving to
   // a column of collapsed headers would just cost an extra tap each.
   const NARROW_VIEWPORT_PX = 700;
+
+  // --- module wiring ---
+  //
+  // Responsive map chrome: the declutter button, bottom clearances, the phone-only map-options sheet, and the drag-to-dismiss bottom sheets the panels become on a narrow screen.
+  const {
+    darkRoads,
+    initialBasemap,
+    layersControl,
+  } = window.MapResponsive.init({
+    NARROW_VIEWPORT_PX, map,
+  });
+
+  // Feature modules are initialised here, after the top-level consts exist.
+  // Helpers are passed as arrow wrappers so they resolve at call time.
+
 
   window.HopReachMapControls = {
     collapsibleHtml(title, bodyHtml, storageKey) {
@@ -51,384 +68,6 @@
     },
   };
 
-  // Item 14's own "manage it better" answer: one button that collapses
-  // every collapsible map control on screen at once (whichever ones
-  // actually exist right now — some, like the simulator view options or
-  // the bottleneck key, only exist while their own mode is active), and
-  // restores each to whatever it individually was before, not just a
-  // blanket re-expand (an intentionally-collapsed control, e.g. "Map
-  // display" which defaults closed, should stay closed on restore).
-  // Session-only — deliberately not persisted, this is a momentary "clear
-  // the map" action, not a saved preference the way each control's own
-  // collapsed state already is.
-  let mapDeclutterSnapshot = null;
-
-  function setMapControlHeaderCollapsed(header, collapsed) {
-    const body = header.parentElement && header.parentElement.querySelector(".map-control-body");
-    if (!body) return;
-    const chevron = header.querySelector(".map-control-chevron");
-    body.classList.toggle("hidden", collapsed);
-    if (chevron) chevron.textContent = collapsed ? "▸" : "▾";
-    const key = header.dataset.storageKey;
-    if (key) localStorage.setItem(`hopreach.mapControlCollapsed.${key}`, collapsed ? "1" : "0");
-  }
-
-  function toggleMapDeclutter() {
-    const headers = document.querySelectorAll(".map-control-header");
-    const btn = document.getElementById("map-declutter-toggle");
-    if (mapDeclutterSnapshot === null) {
-      mapDeclutterSnapshot = new Map();
-      headers.forEach((header) => {
-        const body = header.parentElement && header.parentElement.querySelector(".map-control-body");
-        if (!body) return;
-        mapDeclutterSnapshot.set(header, body.classList.contains("hidden"));
-        setMapControlHeaderCollapsed(header, true);
-      });
-      btn.classList.add("active");
-      btn.title = "Restore every map control to how it was";
-    } else {
-      headers.forEach((header) => {
-        setMapControlHeaderCollapsed(header, mapDeclutterSnapshot.has(header) ? mapDeclutterSnapshot.get(header) : false);
-      });
-      mapDeclutterSnapshot = null;
-      btn.classList.remove("active");
-      btn.title = "Collapse (or restore) every map control at once";
-    }
-  }
-  document.getElementById("map-declutter-toggle").addEventListener("click", toggleMapDeclutter);
-
-  const baseLayers = {
-    // _nolabels (not _all): place names/roads are drawn separately, in the
-    // "labels" pane below, which sits *above* the coverage overlay — see
-    // that pane's setup further down. Using _all here as well as the
-    // separate labels layer would just double the text up.
-    "Dark": L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      maxZoom: 19,
-    }),
-    "Streets": L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
-    }),
-    "Satellite": L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-      attribution: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
-      maxZoom: 19,
-    }),
-    "Terrain": L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
-      maxZoom: 17,
-    }),
-  };
-  const BASEMAP_STORAGE_KEY = "hopreach.basemap";
-  const savedBasemap = localStorage.getItem(BASEMAP_STORAGE_KEY);
-  const initialBasemap = baseLayers[savedBasemap] ? savedBasemap : "Dark";
-  baseLayers[initialBasemap].addTo(map);
-
-  const layersControl = L.control.layers(baseLayers, {}, { collapsed: true, position: "topright" }).addTo(map);
-  map.on("baselayerchange", (e) => localStorage.setItem(BASEMAP_STORAGE_KEY, e.name));
-
-  // Everything docked along the bottom of the map has to stack without
-  // overlapping, and none of the heights are knowable up front: the
-  // #map-tools button row wraps to a second line on narrow viewports, and
-  // the replay transport bar is only present while there's something to
-  // replay. So measure both and publish two CSS variables the stack is
-  // built from (see style.css) — bottom to top, that's the transport bar,
-  // then #map-tools, then Leaflet's own bottom control corners.
-  const mapToolsEl = document.getElementById("map-tools");
-  const mapWrapEl = document.getElementById("map-wrap");
-  const transportEl = document.getElementById("sim-transport");
-  function syncBottomClearances() {
-    if (!mapToolsEl || !mapWrapEl) return;
-    const gapPx = 12; // matches #map-tools' own 0.75rem bottom offset
-    // A hidden bar is display:none, so this is 0 and the stack collapses
-    // back down on its own.
-    const transportH = transportEl ? transportEl.getBoundingClientRect().height : 0;
-    const toolsH = mapToolsEl.getBoundingClientRect().height;
-    mapWrapEl.style.setProperty("--transport-clearance", `${Math.round(transportH)}px`);
-    mapWrapEl.style.setProperty("--map-tools-clearance", `${Math.round(transportH + toolsH + gapPx * 2)}px`);
-    // The row's height on its own, without the desktop layout's gaps: the
-    // phone tab bar is flush to the bottom edge and everything above it
-    // (transport bar, sheets, Leaflet's corners) stacks directly on top,
-    // so the mobile block needs the bare measurement rather than the
-    // padded desktop clearance.
-    mapWrapEl.style.setProperty("--tools-h", `${Math.round(toolsH)}px`);
-  }
-  window.HopReachSyncBottomClearances = syncBottomClearances;
-  if (mapToolsEl && mapWrapEl && typeof ResizeObserver !== "undefined") {
-    const ro = new ResizeObserver(syncBottomClearances);
-    ro.observe(mapToolsEl);
-    if (transportEl) ro.observe(transportEl);
-    syncBottomClearances();
-  }
-
-  // ===================================================================
-  // Phone layout: the Map options sheet, and panels-as-bottom-sheets
-  // ===================================================================
-  const isNarrow = () => window.innerWidth <= NARROW_VIEWPORT_PX;
-
-  // The controls that live stacked down the map's right edge on desktop
-  // and belong together in one sheet on a phone, in the order they should
-  // appear there. Deliberately an allowlist rather than "everything in
-  // the corner": the simulator also docks run-scoped controls there (the
-  // replay's own map key, the live stat strip) which are readouts for
-  // what's happening on the map right now and would be useless filed away
-  // behind a settings sheet.
-  const MAP_OPTIONS_CONTROLS = [
-    ".leaflet-control-layers",
-    ".map-display-control",
-    ".neighbor-window-control",
-    ".position-mode-control",
-    ".scope-filter-control",
-    ".sim-view-control",
-    ".legend",
-  ];
-
-  // Where each control came from, so a phone → desktop resize can put it
-  // back exactly where Leaflet had it rather than leaving it orphaned in
-  // a sheet that's now display:none.
-  const controlHomes = new WeakMap();
-  const optionsSheet = document.getElementById("map-options-sheet");
-  const optionsBody = document.getElementById("map-options-body");
-  const optionsToggle = document.getElementById("map-options-toggle");
-
-  // These are MOVED, not cloned: a copy would be a second set of inputs
-  // with no listeners on them (Leaflet binds to the element it created),
-  // so the sheet's controls would look right and do nothing.
-  function syncMapOptionsSheet() {
-    if (!optionsBody) return;
-    const narrow = isNarrow();
-    MAP_OPTIONS_CONTROLS.forEach((sel) => {
-      document.querySelectorAll(sel).forEach((el) => {
-        if (narrow) {
-          if (el.parentElement === optionsBody) return;
-          controlHomes.set(el, { parent: el.parentElement, next: el.nextElementSibling });
-          optionsBody.appendChild(el);
-        } else {
-          const home = controlHomes.get(el);
-          if (!home || el.parentElement !== optionsBody || !home.parent) return;
-          // Only reuse the remembered sibling if it's still where it was;
-          // otherwise fall back to appending to the original corner.
-          const before = home.next && home.next.parentElement === home.parent ? home.next : null;
-          home.parent.insertBefore(el, before);
-          controlHomes.delete(el);
-        }
-      });
-    });
-    if (!narrow) return;
-
-    // Controls arrive whenever they happen to mount — the region filter
-    // waits on a live CoreScope call, so it lands after the legend and the
-    // sheet ends up in load order rather than reading order. Re-append in
-    // the allowlist's order, but only when it's actually wrong: appendChild
-    // on a control the user is mid-interaction with would drop focus.
-    const desired = MAP_OPTIONS_CONTROLS.flatMap((sel) =>
-      [...optionsBody.children].filter((el) => el.matches(sel))
-    );
-    const current = [...optionsBody.children];
-    if (desired.length === current.length && desired.every((el, i) => el === current[i])) return;
-    desired.forEach((el) => optionsBody.appendChild(el));
-  }
-
-  function setMapOptionsOpen(open) {
-    if (!optionsSheet) return;
-    if (open) syncMapOptionsSheet();
-    optionsSheet.classList.toggle("hidden", !open);
-    if (optionsToggle) optionsToggle.classList.toggle("active", open);
-  }
-
-  if (optionsToggle && optionsSheet) {
-    optionsToggle.addEventListener("click", () => setMapOptionsOpen(optionsSheet.classList.contains("hidden")));
-    const optionsClose = document.getElementById("map-options-close");
-    if (optionsClose) optionsClose.addEventListener("click", () => setMapOptionsOpen(false));
-    // Only one sheet at a time — opening Plan or Simulate puts a sheet in
-    // exactly the space this one occupies.
-    ["plan-toggle", "sim-toggle"].forEach((id) => {
-      const btn = document.getElementById(id);
-      if (btn) btn.addEventListener("click", () => setMapOptionsOpen(false));
-    });
-  }
-
-  // Controls mount at different times — the region scope filter waits on a
-  // live CoreScope call, the simulator's view options only exist while
-  // Simulate is open — so the sheet is kept in step by watching the corners
-  // rather than by syncing once at startup and hoping. Moving a control OUT
-  // of a corner re-triggers this, which then finds it already in the sheet
-  // and does nothing, so it settles rather than looping.
-  if (typeof MutationObserver !== "undefined") {
-    const cornerObserver = new MutationObserver(() => {
-      if (isNarrow()) syncMapOptionsSheet();
-    });
-    [".leaflet-top.leaflet-right", ".leaflet-bottom.leaflet-right"].forEach((sel) => {
-      const corner = document.querySelector(sel);
-      if (corner) cornerObserver.observe(corner, { childList: true });
-    });
-  }
-
-  // Drag the grabber to resize a sheet between three heights: minimised to
-  // a title strip, half, or nearly full.
-  //
-  // Dragging DOWN bottoms out at minimised — it deliberately cannot close
-  // the sheet. Closing a panel is destructive (setSimPanelOpen(false) stops
-  // any replay, drops the transport bar and removes every simulator layer
-  // from the map), and "shrink this out of the way so I can watch the run"
-  // is the single most likely reason to drag a sheet down mid-simulation.
-  // Having that gesture tear the run down was exactly backwards. Closing
-  // stays available, but only through the explicit × next to the title.
-  const SHEET_PEEK_PX = 68; // grabber + the sticky title row
-  const SHEET_SNAP_FRACTIONS = [0.45, 0.88];
-  const TAP_SLOP_PX = 6;
-
-  function initBottomSheet(panelId) {
-    const panel = document.getElementById(panelId);
-    if (!panel) return;
-    const grab = panel.querySelector(".panel-grab");
-    if (!grab) return;
-
-    let startY = 0;
-    let startH = 0;
-    let moved = 0;
-    let dragging = false;
-
-    const availableH = () =>
-      mapWrapEl.getBoundingClientRect().height -
-      (parseFloat(getComputedStyle(mapWrapEl).getPropertyValue("--tools-h")) || 0) -
-      (parseFloat(getComputedStyle(mapWrapEl).getPropertyValue("--transport-clearance")) || 0);
-
-    // Ascending, so "the next one up" is just the following entry.
-    const snapPoints = () => [SHEET_PEEK_PX, ...SHEET_SNAP_FRACTIONS.map((f) => Math.round(availableH() * f))];
-
-    const setHeight = (px) => {
-      panel.style.setProperty("--sheet-h", `${Math.round(px)}px`);
-      // Minimised, the body would still be scrollable behind a 68px window,
-      // so the title strip could be scrolled away leaving an unlabelled
-      // stub with no way back. Clipping it keeps the strip stable.
-      panel.classList.toggle("sheet-minimised", Math.round(px) <= SHEET_PEEK_PX + 1);
-    };
-
-    // Exposed so the header's own minimise button drives the same state as
-    // the drag, rather than a second, subtly different notion of "small".
-    panel.__hopreachSheet = {
-      minimise: () => setHeight(SHEET_PEEK_PX),
-      restore: () => setHeight(snapPoints()[1]),
-      isMinimised: () => panel.classList.contains("sheet-minimised"),
-    };
-
-    grab.addEventListener("pointerdown", (e) => {
-      if (!isNarrow()) return;
-      dragging = true;
-      moved = 0;
-      startY = e.clientY;
-      startH = panel.getBoundingClientRect().height;
-      grab.classList.add("dragging");
-      grab.setPointerCapture(e.pointerId);
-    });
-
-    grab.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
-      const dy = e.clientY - startY;
-      moved = Math.max(moved, Math.abs(dy));
-      const avail = availableH();
-      // Floors at the peek height rather than 0 — see SHEET_PEEK_PX.
-      const h = Math.max(SHEET_PEEK_PX, Math.min(avail, startH - dy));
-      setHeight(h);
-    });
-
-    const endDrag = (e) => {
-      if (!dragging) return;
-      dragging = false;
-      grab.classList.remove("dragging");
-      if (e && e.pointerId !== undefined && grab.hasPointerCapture(e.pointerId)) {
-        grab.releasePointerCapture(e.pointerId);
-      }
-      const h = panel.getBoundingClientRect().height;
-      const points = snapPoints();
-
-      if (moved <= TAP_SLOP_PX) {
-        // Treated as a tap: step up to the next height, wrapping back round
-        // to minimised from the tallest. One repeatable gesture cycles the
-        // whole range without needing an accurate drag.
-        const next = points.find((p) => p > h + 1);
-        setHeight(next === undefined ? points[0] : next);
-        return;
-      }
-      setHeight(points.reduce((best, p) => (Math.abs(p - h) < Math.abs(best - h) ? p : best)));
-    };
-    grab.addEventListener("pointerup", endDrag);
-    grab.addEventListener("pointercancel", endDrag);
-  }
-
-  initBottomSheet("plan-panel");
-  initBottomSheet("sim-panel");
-
-  // The header's minimise button is the discoverable version of dragging
-  // the grabber all the way down: shrink to the title strip to watch a run
-  // on the map, press again to come back. Deliberately never closes — the
-  // × beside it is the only thing that does.
-  document.querySelectorAll(".panel-minimise").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const sheet = btn.closest("#plan-panel, #sim-panel");
-      const api = sheet && sheet.__hopreachSheet;
-      if (!api) return;
-      const minimised = api.isMinimised();
-      if (minimised) api.restore();
-      else api.minimise();
-      btn.textContent = minimised ? "▾" : "▴";
-      btn.setAttribute("aria-label", minimised ? "Minimise to watch the map" : "Expand the panel");
-    });
-  });
-
-  let resizeRaf = null;
-  window.addEventListener("resize", () => {
-    if (resizeRaf) cancelAnimationFrame(resizeRaf);
-    resizeRaf = requestAnimationFrame(() => {
-      syncMapOptionsSheet();
-      if (!isNarrow()) {
-        setMapOptionsOpen(false);
-        // Drop any dragged height so the desktop sidebar isn't stuck at
-        // whatever the phone sheet was last left at.
-        ["plan-panel", "sim-panel"].forEach((id) => {
-          const p = document.getElementById(id);
-          if (p) p.style.removeProperty("--sheet-h");
-        });
-      }
-      syncBottomClearances();
-    });
-  });
-  syncMapOptionsSheet();
-
-  // Roads and place names, drawn in their own panes above the coverage
-  // overlay (imageOverlay defaults to Leaflet's overlayPane, z-index 400)
-  // but below markers (markerPane, z-index 600) — so both stay legible
-  // through the coverage tint instead of being hidden underneath it,
-  // without covering up the repeater dots themselves. Only available for
-  // the Dark basemap: CARTO publishes a matching label-only layer for it
-  // for free: the other three basemaps here (OSM Streets, Esri Satellite,
-  // OpenTopoMap Terrain) bake labels into the same raster as everything
-  // else, with no equivalent free split layer to draw separately.
-  //
-  // CARTO's free raster tiles don't offer a roads-only (transparent
-  // background) layer the way they do for labels — only the full
-  // dark_nolabels raster, which already bakes roads into the same opaque
-  // fill used for the base layer below the coverage overlay. Reusing that
-  // same tile source a second time, in its own pane above the coverage
-  // overlay, blended via mix-blend-mode: screen on the *pane* (Leaflet
-  // 1.9.4's TileLayer has no per-tile className option to hang CSS off of
-  // directly — the pane itself is the right place, and blending there
-  // still composites correctly against everything painted beneath it)
-  // gets the same practical effect without a second tile provider or API
-  // key: the near-black background (~RGB 6-14) blends away to almost
-  // nothing against whatever's beneath it, while the lighter road-line
-  // pixels (~RGB 25-44+) punch through visibly. Same tile URL as the base
-  // layer, so the browser serves it from the same tile cache rather than
-  // doubling network requests.
-  map.createPane("roads");
-  map.getPane("roads").style.zIndex = 440;
-  map.getPane("roads").style.pointerEvents = "none";
-  map.getPane("roads").style.mixBlendMode = "screen";
-  const darkRoads = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
-    pane: "roads",
-    maxZoom: 19,
-  });
 
   map.createPane("labels");
   map.getPane("labels").style.zIndex = 450;
@@ -460,19 +99,11 @@
 
   const statusColor = { active: "#4ade80", degraded: "#facc15", silent: "#64748b" };
 
-  let clusters = null;
-  // Off by default (clustered) — see the general "Marker clustering" map
+    // Off by default (clustered) — see the general "Marker clustering" map
   // control below. L.featureGroup (not plain layerGroup) so getBounds()
   // still works for the initial fitBounds the same way markerClusterGroup
   // already provides it.
-  let clusteringDisabled = false;
-  let coverageLayer = null; // L.layerGroup wrapping the current set of tile overlays
-  let coverageTileOverlays = []; // the individual L.imageOverlay instances, for opacity control (LayerGroup has no setOpacity)
-  let legendControl = null;
-  let lastGeneratedAt = null;
-  let currentGeojson = null;
-  let currentMeta = null;
-
+              
   // "Map detail": which repeater positions + which coverage raster to show.
   // standard/precision use reported positions; calibrated/calibrated_precision
   // use positions nudged to fit observed reach data (see calibration.go).
@@ -501,22 +132,20 @@
   // straight back to their old preference) is saved and respected exactly
   // as before.
   const POSITION_MODE_MIGRATION_KEY = "hopreach.positionModeDefaultMigrated.2026-07-25";
-  let positionMode;
-  if (localStorage.getItem(POSITION_MODE_MIGRATION_KEY)) {
-    positionMode = localStorage.getItem(POSITION_MODE_KEY) || DEFAULT_POSITION_MODE;
+    if (localStorage.getItem(POSITION_MODE_MIGRATION_KEY)) {
+    S.positionMode = localStorage.getItem(POSITION_MODE_KEY) || DEFAULT_POSITION_MODE;
   } else {
-    positionMode = DEFAULT_POSITION_MODE;
-    localStorage.setItem(POSITION_MODE_KEY, positionMode);
+    S.positionMode = DEFAULT_POSITION_MODE;
+    localStorage.setItem(POSITION_MODE_KEY, S.positionMode);
     localStorage.setItem(POSITION_MODE_MIGRATION_KEY, "1");
   }
-  let positionModeControl = null;
-
+  
   function usesCalibratedPositions(mode) {
     return CALIBRATED_MODES.has(mode);
   }
 
   function displayedLatLng(props, fallbackLatLng) {
-    if (usesCalibratedPositions(positionMode) && props.calibrated_lat != null && props.calibrated_lon != null) {
+    if (usesCalibratedPositions(S.positionMode) && props.calibrated_lat != null && props.calibrated_lon != null) {
       return L.latLng(props.calibrated_lat, props.calibrated_lon);
     }
     return fallbackLatLng;
@@ -586,11 +215,11 @@
 
   function renderScopeOverlay(name) {
     clearScopeOverlay(name);
-    const cm = currentMeta && currentMeta.scope_coverage && currentMeta.scope_coverage[name];
+    const cm = S.currentMeta && S.currentMeta.scope_coverage && S.currentMeta.scope_coverage[name];
     if (!cm || !cm.tiles || cm.tiles.length === 0) return;
     const tileLayers = cm.tiles.map((t) => {
       const b = t.bounds;
-      const overlay = L.imageOverlay(`data/${t.image}?t=${Date.parse(currentMeta.generated_at)}`, [[b.South, b.West], [b.North, b.East]], {
+      const overlay = L.imageOverlay(`data/${t.image}?t=${Date.parse(S.currentMeta.generated_at)}`, [[b.South, b.West], [b.North, b.East]], {
         interactive: false,
       });
       // Nearest-neighbour, same as the main coverage layer (see
@@ -624,9 +253,9 @@
     } catch {
       // CoreScope unreachable — fall through to the local-data fallback below.
     }
-    if (regionNames.length === 0 && currentGeojson) {
+    if (regionNames.length === 0 && S.currentGeojson) {
       const seen = new Set();
-      for (const f of currentGeojson.features) {
+      for (const f of S.currentGeojson.features) {
         for (const s of repeaterScopesOf(f.properties)) seen.add(s);
       }
       regionNames = Array.from(seen).sort();
@@ -664,7 +293,7 @@
           // mode, which force-hides coverage behind its own snapshot (see
           // applySimulateDeclutter) that this would corrupt.
           const nowFiltering = scopeFilterActive();
-          if (nowFiltering !== wasFiltering && !simDeclutterSnapshot) {
+          if (nowFiltering !== wasFiltering && !S.simDeclutterSnapshot) {
             setCoverageVisible(!nowFiltering);
           }
         });
@@ -801,11 +430,11 @@
   }
 
   function addCoverageLegend(freqMHz) {
-    if (legendControl) {
-      map.removeControl(legendControl);
+    if (S.legendControl) {
+      map.removeControl(S.legendControl);
     }
-    legendControl = L.control({ position: "bottomright" });
-    legendControl.onAdd = function () {
+    S.legendControl = L.control({ position: "bottomright" });
+    S.legendControl.onAdd = function () {
       const div = L.DomUtil.create("div", "legend");
       // Item 14 — title/bar/labels/opacity stay always visible (the part
       // anyone actually needs at a glance); the explanatory note goes
@@ -832,22 +461,22 @@
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);
       div.querySelector("#coverage-opacity").addEventListener("input", (e) => {
-        coverageTileOverlays.forEach((o) => o.setOpacity(e.target.value / 100));
+        S.coverageTileOverlays.forEach((o) => o.setOpacity(e.target.value / 100));
       });
       window.HopReachMapControls.wireCollapsible(div);
       return div;
     };
-    legendControl.addTo(map);
+    S.legendControl.addTo(map);
   }
 
   function renderFilteredRepeaters(fitBounds) {
-    if (!currentGeojson) return;
-    const filtered = { type: "FeatureCollection", features: currentGeojson.features.filter((f) => matchesScopeFilter(f.properties)) };
+    if (!S.currentGeojson) return;
+    const filtered = { type: "FeatureCollection", features: S.currentGeojson.features.filter((f) => matchesScopeFilter(f.properties)) };
 
-    if (clusters) {
-      map.removeLayer(clusters);
+    if (S.clusters) {
+      map.removeLayer(S.clusters);
     }
-    clusters = clusteringDisabled ? L.featureGroup() : L.markerClusterGroup({ maxClusterRadius: 45 });
+    S.clusters = S.clusteringDisabled ? L.featureGroup() : L.markerClusterGroup({ maxClusterRadius: 45 });
     const layer = L.geoJSON(filtered, {
       pointToLayer: (feature, latlng) =>
         L.circleMarker(displayedLatLng(feature.properties, latlng), {
@@ -861,10 +490,10 @@
         layer.bindPopup(popupHtml(feature.properties));
       },
     });
-    clusters.addLayer(layer);
-    map.addLayer(clusters);
+    S.clusters.addLayer(layer);
+    map.addLayer(S.clusters);
     if (fitBounds && filtered.features.length > 0) {
-      map.fitBounds(clusters.getBounds(), { padding: [30, 30], maxZoom: 10 });
+      map.fitBounds(S.clusters.getBounds(), { padding: [30, 30], maxZoom: 10 });
     }
     // planner.js (loaded after this script) hooks in here to attach
     // neighbour-hover behaviour to the currently-visible real repeater
@@ -877,7 +506,7 @@
   }
 
   function setClusteringDisabled(disabled) {
-    clusteringDisabled = disabled;
+    S.clusteringDisabled = disabled;
     renderFilteredRepeaters(false); // rebuild in the new mode, keeping the current view
   }
 
@@ -888,8 +517,8 @@
         return r.json();
       })
       .then((geojson) => {
-        const isFirstLoad = !lastGeneratedAt;
-        currentGeojson = geojson;
+        const isFirstLoad = !S.lastGeneratedAt;
+        S.currentGeojson = geojson;
         renderFilteredRepeaters(isFirstLoad);
       })
       .catch((err) => {
@@ -903,8 +532,8 @@
   // particular pass isn't available for some reason (e.g. it failed
   // server-side, or an older meta.json predates it).
   function currentCoverageMeta() {
-    if (!currentMeta || !currentMeta.coverage) return null;
-    return currentMeta.coverage[positionMode] || currentMeta.coverage.standard;
+    if (!S.currentMeta || !S.currentMeta.coverage) return null;
+    return S.currentMeta.coverage[S.positionMode] || S.currentMeta.coverage.standard;
   }
 
   // Coverage rasters are served pre-split into a grid of tiles (see
@@ -926,11 +555,11 @@
     // finishing its first-ever tier mid-visit) has no old layer to read, so
     // it defaults visible unless a state that hides coverage is already
     // active at that moment.
-    let coverageWasVisible = !scopeFilterActive() && !simDeclutterSnapshot;
-    if (coverageLayer) {
-      coverageWasVisible = map.hasLayer(coverageLayer);
-      layersControl.removeLayer(coverageLayer);
-      map.removeLayer(coverageLayer);
+    let coverageWasVisible = !scopeFilterActive() && !S.simDeclutterSnapshot;
+    if (S.coverageLayer) {
+      coverageWasVisible = map.hasLayer(S.coverageLayer);
+      layersControl.removeLayer(S.coverageLayer);
+      map.removeLayer(S.coverageLayer);
     }
 
     // Always crisp (nearest-neighbour), regardless of tier. This used to be
@@ -945,9 +574,9 @@
     // nearest-neighbour rendering keeps every tier's boundary at its real,
     // unshifted position relative to every other — worth the coarser
     // tiers looking blockier when zoomed in past their native resolution.
-    coverageTileOverlays = cm.tiles.map((t) => {
+    S.coverageTileOverlays = cm.tiles.map((t) => {
       const b = t.bounds;
-      const overlay = L.imageOverlay(`data/${t.image}?t=${Date.parse(currentMeta.generated_at)}`, [[b.South, b.West], [b.North, b.East]], {
+      const overlay = L.imageOverlay(`data/${t.image}?t=${Date.parse(S.currentMeta.generated_at)}`, [[b.South, b.West], [b.North, b.East]], {
         opacity: 1,
         interactive: false,
       });
@@ -957,9 +586,9 @@
       });
       return overlay;
     });
-    coverageLayer = L.layerGroup(coverageTileOverlays);
-    if (coverageWasVisible) coverageLayer.addTo(map);
-    layersControl.addOverlay(coverageLayer, "Estimated coverage");
+    S.coverageLayer = L.layerGroup(S.coverageTileOverlays);
+    if (coverageWasVisible) S.coverageLayer.addTo(map);
+    layersControl.addOverlay(S.coverageLayer, "Estimated coverage");
     addCoverageLegend(cm.frequency_mhz);
   }
 
@@ -971,46 +600,46 @@
   function ensurePositionModeControl(coverage) {
     const available = MAP_DETAIL_OPTIONS.filter((o) => coverage && coverage[o.value]);
     if (available.length === 0) {
-      if (positionModeControl) {
-        map.removeControl(positionModeControl);
-        positionModeControl = null;
+      if (S.positionModeControl) {
+        map.removeControl(S.positionModeControl);
+        S.positionModeControl = null;
       }
-      positionMode = "standard";
+      S.positionMode = "standard";
       return;
     }
-    if (!available.some((o) => o.value === positionMode)) {
-      positionMode = "standard";
+    if (!available.some((o) => o.value === S.positionMode)) {
+      S.positionMode = "standard";
     }
-    if (positionModeControl) {
-      map.removeControl(positionModeControl);
-      positionModeControl = null;
+    if (S.positionModeControl) {
+      map.removeControl(S.positionModeControl);
+      S.positionModeControl = null;
     }
-    positionModeControl = L.control({ position: "topright" });
-    positionModeControl.onAdd = function () {
+    S.positionModeControl = L.control({ position: "topright" });
+    S.positionModeControl.onAdd = function () {
       const div = L.DomUtil.create("div", "position-mode-control");
       const options = available.map((o) => `<option value="${o.value}">${o.label}</option>`).join("");
       div.innerHTML = window.HopReachMapControls.collapsibleHtml("Map detail", `<select id="position-mode-select">${options}</select>`, "map-detail");
       L.DomEvent.disableClickPropagation(div);
       window.HopReachMapControls.wireCollapsible(div);
       const select = div.querySelector("#position-mode-select");
-      select.value = positionMode;
+      select.value = S.positionMode;
       select.addEventListener("change", (e) => {
-        positionMode = e.target.value;
-        localStorage.setItem(POSITION_MODE_KEY, positionMode);
+        S.positionMode = e.target.value;
+        localStorage.setItem(POSITION_MODE_KEY, S.positionMode);
         renderFilteredRepeaters();
         applyCoverageLayer();
       });
       return div;
     };
-    positionModeControl.addTo(map);
+    S.positionModeControl.addTo(map);
   }
 
   function loadMeta() {
     fetch(`${cfg.metaUrl}?t=${Date.now()}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((meta) => {
-        currentMeta = meta;
-        lastGeneratedAt = meta.generated_at;
+        S.currentMeta = meta;
+        S.lastGeneratedAt = meta.generated_at;
         document.getElementById("count-active").textContent = meta.counts.active;
         document.getElementById("count-degraded").textContent = meta.counts.degraded;
         document.getElementById("count-silent").textContent = meta.counts.silent;
@@ -1045,8 +674,7 @@
   // cmd/hopreach/run.go's writeTier), specifically so a tier that's
   // already finished shows up here without waiting for the whole run
   // (every remaining tier included) to complete first.
-  let lastProgressStage = null;
-
+  
   // A run that gets killed (OOM, a manual kill, a host reboot) never
   // reaches its own "done"/"error" write — progress.json just stops
   // updating, frozen mid-stage. Without treating that as stale, the
@@ -1072,11 +700,11 @@
             // was silently killed — refresh the map data either way.
             loadData();
           }
-          lastProgressStage = null;
+          S.lastProgressStage = null;
           return;
         }
-        if (progress.stage !== lastProgressStage) {
-          lastProgressStage = progress.stage;
+        if (progress.stage !== S.lastProgressStage) {
+          S.lastProgressStage = progress.stage;
           // Reaching a new stage means whichever stage came before it (if
           // any produced a coverage tier) just finished and wrote its own
           // update to meta.json — pick that up now rather than waiting for
@@ -1112,12 +740,11 @@
   // Restores the snapshot rather than blanket re-enabling: someone who had
   // coverage off, or clustering already disabled, before opening the
   // simulator gets exactly that back, not a map reconfigured behind them.
-  let simDeclutterSnapshot = null;
-
+  
   function setCoverageVisible(visible) {
-    if (!coverageLayer) return;
-    if (visible) coverageLayer.addTo(map);
-    else map.removeLayer(coverageLayer);
+    if (!S.coverageLayer) return;
+    if (visible) S.coverageLayer.addTo(map);
+    else map.removeLayer(S.coverageLayer);
     // The Plan panel's own "Estimated coverage" checkbox only re-syncs on
     // panel open / preview recompute (see planner.js syncCoverageToggles),
     // so an external toggle — the scope filter's auto-swap above — has to
@@ -1130,35 +757,35 @@
 
   function applySimulateDeclutter(on) {
     if (on) {
-      if (simDeclutterSnapshot) return; // already applied — don't overwrite the real snapshot
-      simDeclutterSnapshot = {
-        coverageVisible: !!(coverageLayer && map.hasLayer(coverageLayer)),
-        clusteringDisabled,
+      if (S.simDeclutterSnapshot) return; // already applied — don't overwrite the real snapshot
+      S.simDeclutterSnapshot = {
+        coverageVisible: !!(S.coverageLayer && map.hasLayer(S.coverageLayer)),
+        clusteringDisabled: S.clusteringDisabled,
       };
       setCoverageVisible(false);
-      if (!clusteringDisabled) setClusteringDisabled(true);
+      if (!S.clusteringDisabled) setClusteringDisabled(true);
     } else {
-      if (!simDeclutterSnapshot) return;
-      const snap = simDeclutterSnapshot;
-      simDeclutterSnapshot = null;
+      if (!S.simDeclutterSnapshot) return;
+      const snap = S.simDeclutterSnapshot;
+      S.simDeclutterSnapshot = null;
       // If a scope filter was ticked while simulating, leaving Simulate
       // mode must land in the same place ticking it outside would have:
       // main coverage swapped out for the per-scope overlays, whatever the
       // pre-Simulate snapshot says.
       setCoverageVisible(snap.coverageVisible && !scopeFilterActive());
-      if (clusteringDisabled !== snap.clusteringDisabled) setClusteringDisabled(snap.clusteringDisabled);
+      if (S.clusteringDisabled !== snap.clusteringDisabled) setClusteringDisabled(snap.clusteringDisabled);
     }
     // The "Disable marker clustering" checkbox lives in its own map control
     // and is the user's view of this state, so it has to follow.
     const box = document.getElementById("disable-clustering-toggle");
-    if (box) box.checked = clusteringDisabled;
+    if (box) box.checked = S.clusteringDisabled;
   }
 
   window.MCCoverageMap = {
     map,
     layersControl,
     popupHtml,
-    getPositionMode: () => positionMode,
+    getPositionMode: () => S.positionMode,
     usesCalibratedPositions,
     currentCoverageMeta,
     setClusteringDisabled,
@@ -1167,6 +794,6 @@
     // coverageLayer is reassigned on every recompute, so a live check
     // rather than a cached reference — a stale boolean here would leave
     // the Plan panel's own checkbox out of sync after a background refresh.
-    isCoverageVisible: () => !!(coverageLayer && map.hasLayer(coverageLayer)),
+    isCoverageVisible: () => !!(S.coverageLayer && map.hasLayer(S.coverageLayer)),
   };
 })();
