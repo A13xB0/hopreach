@@ -153,6 +153,14 @@ func TestFetchRepeatersUnwrapsItemsAndFollowsCursor(t *testing.T) {
 			t.Errorf("iatas = %q, want the configured filter (an unfiltered "+
 				"call pulls every network on the server)", got)
 		}
+		// FetchRepeaters also fills in each node's self-reported default
+		// scope, which Beacon's node list omits — that is a second, differently
+		// shaped query (see fillDefaultScopes). Answer it emptily and let the
+		// assertions below stay about the repeater walk.
+		if r.URL.Path == "/api/v1/scopes" {
+			_ = json.NewEncoder(w).Encode([]string{})
+			return
+		}
 		if got := r.URL.Query().Get("type"); got != "2" {
 			t.Errorf("type = %q, want 2 (repeater)", got)
 		}
@@ -321,5 +329,71 @@ func TestFetchScopesHandlesBothShapes(t *testing.T) {
 		if len(got) != 2 || got[0] != "#sco" {
 			t.Errorf("body %s → %v", body, got)
 		}
+	}
+}
+
+func TestNewAcceptsABaseURLThatAlreadyHasTheAPIPrefix(t *testing.T) {
+	// Beacon's docs show /api/v1 in every example URL, so configuring it that
+	// way is the natural thing to do. Doubling the prefix produces a 404 that
+	// looks like the server is down rather than like a typo.
+	for _, base := range []string{
+		"http://localhost:8090",
+		"http://localhost:8090/",
+		"http://localhost:8090/api/v1",
+		"http://localhost:8090/api/v1/",
+	} {
+		c, err := New(base, []string{"EDI"}, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", base, err)
+		}
+		if c.BaseURL != "http://localhost:8090" {
+			t.Errorf("New(%q).BaseURL = %q, want the bare host", base, c.BaseURL)
+		}
+	}
+}
+
+func TestFetchRepeatersFillsDefaultScopeTheListOmits(t *testing.T) {
+	// Beacon's node LIST does not carry defaultScope even though its detail
+	// endpoint does, so without this the map's scope filter and popups would
+	// show nothing on a Beacon deployment while working fine on CoreScope.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/scopes":
+			_ = json.NewEncoder(w).Encode([]string{"#sco"})
+		case r.URL.Query().Get("scope") == "#sco":
+			// Only AA is in this scope.
+			_ = json.NewEncoder(w).Encode(page[nodeSummary]{
+				Items: []nodeSummary{{ID: "uuid-1", PublicKey: "AA", NodeTypeName: "repeater"}},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(page[nodeSummary]{
+				Items: []nodeSummary{
+					{ID: "uuid-1", PublicKey: "AA", NodeTypeName: "repeater"},
+					{ID: "uuid-2", PublicKey: "BB", NodeTypeName: "repeater"},
+				},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, []string{"EDI"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := c.FetchRepeaters(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, n := range nodes {
+		got[n.PublicKey] = n.DefaultScope
+	}
+	if got["aa"] != "#sco" {
+		t.Errorf("AA default scope = %q, want #sco", got["aa"])
+	}
+	if got["bb"] != "" {
+		t.Errorf("BB default scope = %q, want empty — it is in no scope, and "+
+			"guessing one would be a claim the backend never made", got["bb"])
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -49,6 +50,9 @@ type Client struct {
 	uuidByPK map[string]string // node public key → Beacon UUID
 }
 
+// apiPrefix is Beacon's versioned API root, appended to the configured base.
+const apiPrefix = "/api/v1"
+
 func New(baseURL string, iatas []string, httpClient *http.Client) (*Client, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("beacon: base URL is required")
@@ -60,8 +64,15 @@ func New(baseURL string, iatas []string, httpClient *http.Client) (*Client, erro
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	// Tolerate a base URL that already includes the API prefix. Beacon's own
+	// docs and every example URL show /api/v1, so configuring it that way is
+	// the natural mistake — and doubling it gives a 404 that reads like the
+	// server is down rather than like a config typo.
+	base := strings.TrimRight(baseURL, "/")
+	base = strings.TrimSuffix(base, apiPrefix)
+
 	return &Client{
-		BaseURL:  strings.TrimRight(baseURL, "/"),
+		BaseURL:  base,
 		IATAs:    iatas,
 		HTTP:     httpClient,
 		uuidByPK: map[string]string{},
@@ -285,7 +296,7 @@ func SynthesiseReach(
 // ── HTTP ───────────────────────────────────────────────────────────────────
 
 func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
-	u := c.BaseURL + "/api/v1" + path
+	u := c.BaseURL + apiPrefix + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
@@ -309,7 +320,46 @@ func (c *Client) iataParam() string { return strings.Join(c.IATAs, ",") }
 // FetchRepeaters pages through the node list, keeping repeaters, and records
 // the pubkey→UUID mapping the neighbour calls need (node paths take UUIDs).
 func (c *Client) FetchRepeaters(ctx context.Context) ([]meshsource.Node, error) {
-	return c.fetchNodes(ctx, url.Values{"type": []string{"2"}}) // 2 = repeater
+	nodes, err := c.fetchNodes(ctx, url.Values{"type": []string{"2"}}) // 2 = repeater
+	if err != nil {
+		return nil, err
+	}
+	return nodes, c.fillDefaultScopes(ctx, nodes)
+}
+
+// fillDefaultScopes populates each node's self-reported default scope.
+//
+// Beacon's node LIST omits defaultScope (its per-node detail endpoint reports
+// it, and the list query selects it, but the list response does not carry it).
+// Asking for detail per node would be one request per repeater; asking
+// /nodes?scope=NAME — which filters on exactly that field — is one request per
+// region, and there are single-digit numbers of those.
+//
+// A failure here is logged rather than fatal: default_scope is what a repeater
+// says about itself, sparse in practice, and shown alongside the observed
+// scopes rather than relied on.
+func (c *Client) fillDefaultScopes(ctx context.Context, nodes []meshsource.Node) error {
+	scopes, err := c.FetchScopes(ctx)
+	if err != nil || len(scopes) == 0 {
+		return nil
+	}
+	byKey := make(map[string]int, len(nodes))
+	for i := range nodes {
+		byKey[strings.ToLower(nodes[i].PublicKey)] = i
+	}
+	for _, name := range scopes {
+		members, err := c.fetchNodes(ctx, url.Values{"scope": []string{name}})
+		if err != nil {
+			log.Printf("beacon: default scope %q: %v", name, err)
+			continue
+		}
+		for _, m := range members {
+			if i, ok := byKey[strings.ToLower(m.PublicKey)]; ok {
+				nodes[i].DefaultScope = name
+			}
+		}
+	}
+	return nil
 }
 
 // fetchNodes pages /nodes with an optional filter, recording each node's

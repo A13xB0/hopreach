@@ -2,7 +2,6 @@ package beacon
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 	"sync"
 	"time"
@@ -39,14 +38,13 @@ func (c *Client) FetchPacketsWithPaths(
 	return c.resolvePaths(ctx, list)
 }
 
-// fetchUnscopedWithPaths is the same window query narrowed to plain floods —
-// the traffic that carries no transport code at all. Region participation
-// needs their relay paths and nothing else.
-func (c *Client) fetchUnscopedWithPaths(
-	ctx context.Context, from, to time.Time,
+// fetchWithPaths is the same window query narrowed by a server-side filter —
+// one region, or one route type. Region participation needs the relay paths
+// of a narrow slice of traffic, not of everything.
+func (c *Client) fetchWithPaths(
+	ctx context.Context, from, to time.Time, limit int, filter url.Values,
 ) (packets []meshsource.Packet, failed int, err error) {
-	list, err := c.fetchPacketList(ctx, from, to, unscopedPacketCap,
-		url.Values{"routeType": []string{fmt.Sprint(unscopedRouteType)}})
+	list, err := c.fetchPacketList(ctx, from, to, limit, filter)
 	if err != nil {
 		return nil, 0, err
 	}
