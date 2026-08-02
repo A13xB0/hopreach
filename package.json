@@ -4,9 +4,13 @@
   "description": "Playwright end-to-end tests for the HopReach frontend (see tests/, playwright.config.js). Not a published package \u2014 just a home for the one JS-side dev dependency this repo has.",
   "scripts": {
     "test:e2e": "playwright test",
-    "test:unit": "node --test tests/unit/*.test.mjs"
+    "test:unit": "node --test tests/unit/*.test.mjs",
+    "test:refs": "node tools/check_module_refs.mjs",
+    "test": "npm run test:refs && npm run test:unit"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1"
+    "@playwright/test": "^1.61.1",
+    "acorn": "^8.15.0",
+    "acorn-walk": "^8.3.4"
   }
 }
