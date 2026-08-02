@@ -58,6 +58,18 @@ type ReachLink struct {
 	// confidence weight.
 	Bottleneck int
 	Bidir      bool
+
+	// WeHear and TheyHear are the per-direction observation counts: how often
+	// this node heard the neighbour, and the neighbour heard it.
+	//
+	// Not derivable from Bottleneck, which is only the weaker of the two.
+	// Real links are routinely asymmetric — a hilltop repeater hears a
+	// handheld far better than the reverse — and the simulator anchors each
+	// direction's SNR to its own receiver, so collapsing them to one number
+	// makes every link symmetrical and the model wrong in a direction it
+	// cannot recover.
+	WeHear   int
+	TheyHear int
 }
 
 // HopConfidence says how certain the backend is that a path hash resolved to

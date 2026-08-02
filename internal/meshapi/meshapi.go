@@ -73,6 +73,12 @@ type wireLink struct {
 	Lon        *float64 `json:"lon"`
 	Bottleneck int      `json:"bottleneck"`
 	Bidir      bool     `json:"bidir"`
+
+	// Per-direction observation counts. The simulator builds one directed
+	// link per direction from these, each anchored to its own receiver's
+	// spreading factor — bottleneck alone would make every link symmetrical.
+	WeHear   int `json:"we_hear"`
+	TheyHear int `json:"they_hear"`
 }
 
 type wirePacket struct {
@@ -261,6 +267,7 @@ func (h *Handler) handleNodeSub(w http.ResponseWriter, r *http.Request) {
 		out = append(out, wireLink{
 			Pubkey: l.PublicKey, Name: l.Name, Lat: l.Lat, Lon: l.Lon,
 			Bottleneck: l.Bottleneck, Bidir: l.Bidir,
+			WeHear: l.WeHear, TheyHear: l.TheyHear,
 		})
 	}
 	writeJSON(w, map[string]any{"links": out})

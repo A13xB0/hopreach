@@ -316,3 +316,20 @@ func TestAnUnreportedPathDoesNotClaimToBeComplete(t *testing.T) {
 		t.Error("a genuine direct reception has no hops and IS complete")
 	}
 }
+
+func TestReachCarriesPerDirectionCounts(t *testing.T) {
+	// The simulator builds one directed link per direction, each anchored to
+	// its own receiver's spreading factor. Bottleneck is only the weaker of
+	// the two, so dropping we_hear/they_hear leaves it with nothing to build
+	// from — the "build links from observed reach" path silently produced
+	// zero links.
+	src := &fakeSource{links: []meshsource.ReachLink{
+		{PublicKey: "bb", Bottleneck: 3, Bidir: true, WeHear: 9, TheyHear: 3},
+	}}
+	got := serve(t, src, Prefix+"api/nodes/aa/reach?days=7")
+	link := got["links"].([]any)[0].(map[string]any)
+	if link["we_hear"].(float64) != 9 || link["they_hear"].(float64) != 3 {
+		t.Errorf("we_hear/they_hear = %v/%v, want 9/3 — an asymmetric link "+
+			"must stay asymmetric", link["we_hear"], link["they_hear"])
+	}
+}

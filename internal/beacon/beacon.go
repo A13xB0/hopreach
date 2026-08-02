@@ -341,6 +341,10 @@ func SynthesiseReach(
 			Lon:        n.Lng,
 			Bottleneck: int(bottleneck),
 			Bidir:      bidir,
+			// forward is this node's own neighbour row — how often it heard
+			// them. reverse is their row about it.
+			WeHear:   int(fwd),
+			TheyHear: int(rev),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PublicKey < out[j].PublicKey })

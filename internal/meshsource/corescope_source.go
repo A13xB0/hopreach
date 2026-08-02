@@ -56,6 +56,8 @@ func (s *CoreScopeSource) FetchReach(ctx context.Context, pubkey string, days in
 			Lon:        l.Lon,
 			Bottleneck: l.Bottleneck,
 			Bidir:      l.Bidir,
+			WeHear:     l.WeHear,
+			TheyHear:   l.TheyHear,
 		})
 	}
 	return out, nil
