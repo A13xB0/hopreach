@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -186,6 +187,72 @@ func TestDetailExposesEveryObservation(t *testing.T) {
 	}
 	if obs[1].(map[string]any)["path_complete"] != false {
 		t.Error("the ambiguous observation must not claim a complete path")
+	}
+}
+
+func TestPacketCarriesTheDecodedFieldsTheBrowserNoLongerComputes(t *testing.T) {
+	// The browser used to receive raw_hex and decode these itself — a
+	// hand-rolled SHA-256 and a frame parser in front-end code. It now reads
+	// them off the wire, so anything missing here is a silently unscoped
+	// replay rather than a visible error.
+	src := &fakeSource{packets: []meshsource.Packet{{
+		Hash: "aa", HeardAt: time.Now(), RouteType: 0,
+		Scope: "#fife", PayloadType: 3, HashSize: 2, HopCount: 4,
+		PayloadLen: 40, FrameBytes: 105,
+	}}}
+	got := serve(t, src, Prefix+"api/packets?since=1&until=9999999999999")
+	p := got["packets"].([]any)[0].(map[string]any)
+	for field, want := range map[string]any{
+		"scope": "#fife", "payload_type": 3.0, "hash_size": 2.0,
+		"hop_count": 4.0, "payload_len": 40.0, "frame_bytes": 105.0,
+	} {
+		if p[field] != want {
+			t.Errorf("%s = %v, want %v", field, p[field], want)
+		}
+	}
+	if _, ok := p["raw_hex"]; ok {
+		t.Error("raw_hex must not reach the browser — decoding it there is what " +
+			"put a vendor's wire format in front-end code")
+	}
+}
+
+func TestUnknownFrameFieldsAreOmittedRatherThanZero(t *testing.T) {
+	// A backend that cannot tell us the frame size must not claim zero
+	// bytes: airtime computed from that would be confidently wrong.
+	src := &fakeSource{packets: []meshsource.Packet{
+		{Hash: "aa", HeardAt: time.Now(), RouteType: 1},
+	}}
+	got := serve(t, src, Prefix+"api/packets?since=1&until=9999999999999")
+	p := got["packets"].([]any)[0].(map[string]any)
+	for _, field := range []string{"scope", "frame_bytes", "payload_len", "hash_size"} {
+		if _, present := p[field]; present {
+			t.Errorf("%s present as %v, want omitted so the caller can tell "+
+				"'unknown' from a real zero", field, p[field])
+		}
+	}
+}
+
+func TestDetailAndListAgreeOnTheSamePacketShape(t *testing.T) {
+	// Both handlers convert through one function precisely so a field added
+	// to one can't be forgotten by the other.
+	p := meshsource.Packet{
+		Hash: "bb03", HeardAt: time.Now(), RouteType: 0,
+		Scope: "#fife", HashSize: 2, FrameBytes: 105,
+	}
+	list := serve(t, &fakeSource{packets: []meshsource.Packet{p}},
+		Prefix+"api/packets?since=1&until=9999999999999")
+	detail := serve(t, &fakeSource{detail: p}, Prefix+"api/packets/bb03")
+
+	fromList := list["packets"].([]any)[0].(map[string]any)
+	fromDetail := detail["packet"].(map[string]any)
+	if len(fromList) != len(fromDetail) {
+		t.Fatalf("list has %d fields, detail %d — they have drifted apart",
+			len(fromList), len(fromDetail))
+	}
+	for k, v := range fromList {
+		if !reflect.DeepEqual(fromDetail[k], v) {
+			t.Errorf("%s: list %v, detail %v", k, v, fromDetail[k])
+		}
 	}
 }
 

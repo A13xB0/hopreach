@@ -94,6 +94,14 @@ type Packet struct {
 	HopCount    int
 	Scope       string
 
+	// PayloadLen and FrameBytes describe the frame as transmitted: the
+	// application payload alone, and the whole thing including header,
+	// transport code and accumulated path. FrameBytes is what airtime is
+	// computed from, so the two are not interchangeable. Zero means the
+	// backend could not tell us.
+	PayloadLen int
+	FrameBytes int
+
 	// OriginKey is the originating node when the backend could decode it.
 	OriginKey string
 

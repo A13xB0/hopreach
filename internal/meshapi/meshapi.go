@@ -89,6 +89,41 @@ type wirePacket struct {
 	// always reports true). A replay built on an incomplete path is less
 	// certain and the front end can say so instead of presenting a guess.
 	PathComplete bool `json:"path_complete"`
+
+	// Everything below is decoded from the packet's own over-the-air bytes
+	// by whichever backend has them, so the browser never sees raw_hex.
+	// Scope is the region the packet was actually sent on, empty for a
+	// genuinely unscoped flood or one whose region we cannot name — never a
+	// guess. Zeroes elsewhere mean "the backend could not tell us", which is
+	// why they are omitted rather than sent as 0.
+	Scope       string `json:"scope,omitempty"`
+	PayloadType int    `json:"payload_type,omitempty"`
+	HashSize    int    `json:"hash_size,omitempty"`
+	HopCount    int    `json:"hop_count,omitempty"`
+	PayloadLen  int    `json:"payload_len,omitempty"`
+	FrameBytes  int    `json:"frame_bytes,omitempty"`
+}
+
+// toWirePacket is the single conversion both the window and detail handlers
+// use, so a field added to one can never be forgotten by the other.
+func toWirePacket(p meshsource.Packet) wirePacket {
+	path, complete := hopKeys(p.Path)
+	return wirePacket{
+		Hash:         p.Hash,
+		Timestamp:    p.HeardAt.UTC().Format(time.RFC3339),
+		ObserverID:   p.ObserverKey,
+		ResolvedPath: path,
+		RouteType:    p.RouteType,
+		SNR:          p.SNR,
+		DecodedJSON:  originJSON(p.OriginKey),
+		PathComplete: complete,
+		Scope:        p.Scope,
+		PayloadType:  p.PayloadType,
+		HashSize:     p.HashSize,
+		HopCount:     p.HopCount,
+		PayloadLen:   p.PayloadLen,
+		FrameBytes:   p.FrameBytes,
+	}
 }
 
 type wireObservation struct {
@@ -256,17 +291,7 @@ func (h *Handler) handlePackets(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]wirePacket, 0, len(packets))
 	for _, p := range packets {
-		path, complete := hopKeys(p.Path)
-		out = append(out, wirePacket{
-			Hash:         p.Hash,
-			Timestamp:    p.HeardAt.UTC().Format(time.RFC3339),
-			ObserverID:   p.ObserverKey,
-			ResolvedPath: path,
-			RouteType:    p.RouteType,
-			SNR:          p.SNR,
-			DecodedJSON:  originJSON(p.OriginKey),
-			PathComplete: complete,
-		})
+		out = append(out, toWirePacket(p))
 	}
 	writeJSON(w, map[string]any{"packets": out, "total": len(out)})
 }
@@ -282,7 +307,6 @@ func (h *Handler) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	path, complete := hopKeys(p.Path)
 	obs := make([]wireObservation, 0, len(p.Observations))
 	for _, o := range p.Observations {
 		op, oc := hopKeys(o.Path)
@@ -296,16 +320,7 @@ func (h *Handler) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, map[string]any{
-		"packet": wirePacket{
-			Hash:         p.Hash,
-			Timestamp:    p.HeardAt.UTC().Format(time.RFC3339),
-			ObserverID:   p.ObserverKey,
-			ResolvedPath: path,
-			RouteType:    p.RouteType,
-			SNR:          p.SNR,
-			DecodedJSON:  originJSON(p.OriginKey),
-			PathComplete: complete,
-		},
+		"packet":       toWirePacket(p),
 		"observations": obs,
 	})
 }

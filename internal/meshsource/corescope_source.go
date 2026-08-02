@@ -2,8 +2,9 @@ package meshsource
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"hopreach/internal/corescope"
@@ -11,12 +12,14 @@ import (
 
 // CoreScopeSource adapts the original CoreScope client to [Source].
 //
-// Behaviour is deliberately unchanged — this is the regression net for the
-// abstraction, not a rewrite. The packet methods are not implemented here:
-// the replay path still talks to CoreScope directly from the browser, and
-// moving it is a later phase (docs/BEACON_COMPATIBILITY_PLAN.md, P2/P4).
+// Packet access included: region decoding and frame parsing happen here,
+// from the raw over-the-air bytes, so the browser is handed answers rather
+// than a vendor's raw_hex to decode for itself.
 type CoreScopeSource struct {
 	Client *corescope.Client
+
+	regionMu    sync.Mutex
+	regionNames map[string]bool
 }
 
 func NewCoreScopeSource(c *corescope.Client) *CoreScopeSource {
@@ -67,24 +70,139 @@ func (s *CoreScopeSource) FetchReach(ctx context.Context, pubkey string, days in
 	return out, nil
 }
 
-// FetchScopes is not exposed by the Go-side CoreScope client (the scope list
-// is fetched in the browser today), so it reports empty rather than pretending.
-func (s *CoreScopeSource) FetchScopes(context.Context) ([]string, error) {
-	return nil, nil
+func (s *CoreScopeSource) FetchScopes(ctx context.Context) ([]string, error) {
+	return s.Client.FetchKnownRegionNames(ctx)
 }
-
-var errNotImplemented = fmt.Errorf(
-	"meshsource: packet access for CoreScope still runs in the browser " +
-		"(see docs/BEACON_COMPATIBILITY_PLAN.md P2/P4)")
 
 func (s *CoreScopeSource) FetchPacketsBetween(
-	context.Context, time.Time, time.Time, int,
+	ctx context.Context, from, to time.Time, limit int,
 ) ([]Packet, error) {
-	return nil, errNotImplemented
+	rows, err := s.Client.FetchPacketsBetween(ctx, from, to, limit)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := s.regionKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Packet, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, s.packetFromRow(r, keys))
+	}
+	return out, nil
 }
 
-func (s *CoreScopeSource) FetchPacketDetail(context.Context, string) (Packet, error) {
-	return Packet{}, errNotImplemented
+func (s *CoreScopeSource) FetchPacketDetail(ctx context.Context, hash string) (Packet, error) {
+	detail, err := s.Client.FetchPacketDetail(ctx, hash)
+	if err != nil {
+		return Packet{}, err
+	}
+	keys, err := s.regionKeys(ctx)
+	if err != nil {
+		return Packet{}, err
+	}
+	p := s.packetFromRow(detail.Packet, keys)
+	if p.Hash == "" {
+		p.Hash = hash
+	}
+	for _, o := range detail.Observations {
+		p.Observations = append(p.Observations, Observation{
+			ObserverKey:  strings.ToLower(o.ObserverID),
+			ObserverName: o.ObserverName,
+			HeardAt:      parseTime(&o.Timestamp),
+			Path:         resolvedHops(o.ResolvedPath),
+			SNR:          o.SNR,
+		})
+	}
+	return p, nil
+}
+
+// regionKeys caches the candidate region set for the process lifetime.
+//
+// The names come from a second endpoint, so deriving them per packet would
+// mean a fetch per packet. A transient failure is deliberately NOT cached:
+// caching an empty set would silently unscope every packet for the rest of
+// the process, which reads as "this mesh has no regions" rather than as an
+// error.
+func (s *CoreScopeSource) regionKeys(ctx context.Context) (map[string]bool, error) {
+	s.regionMu.Lock()
+	defer s.regionMu.Unlock()
+	if s.regionNames != nil {
+		return s.regionNames, nil
+	}
+	names, err := s.Client.FetchKnownRegionNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	if len(set) > 0 {
+		s.regionNames = set
+	}
+	return set, nil
+}
+
+// packetFromRow converts one CoreScope row to the canonical shape, decoding
+// the region and frame structure from the raw bytes here rather than shipping
+// raw_hex to the browser to decode.
+func (s *CoreScopeSource) packetFromRow(r corescope.PacketRow, regions map[string]bool) Packet {
+	names := make([]string, 0, len(regions))
+	for n := range regions {
+		names = append(names, n)
+	}
+	p := Packet{
+		Hash:        strings.ToLower(r.Hash),
+		HeardAt:     parseTime(&r.Timestamp),
+		RouteType:   r.RouteType,
+		ObserverKey: strings.ToLower(r.ObserverID),
+		SNR:         r.SNR,
+		Path:        resolvedHops(r.ResolvedPath),
+		OriginKey:   originFromDecodedJSON(r.DecodedJSON),
+		Scope:       corescope.RegionOfPacket(r.RawHex, names),
+	}
+	if f, ok := corescope.ParseFrame(r.RawHex); ok {
+		p.PayloadType = int(f.PayloadType)
+		p.HashSize = f.HashSize
+		p.HopCount = f.HopCount
+		p.PayloadLen = f.PayloadLen
+		p.FrameBytes = f.TotalBytes
+	}
+	return p
+}
+
+// resolvedHops wraps CoreScope's already-resolved public keys. CoreScope
+// reports no per-hop confidence, so a key it gives us is taken as resolved
+// and an empty slot as genuinely unknown — never guessed at.
+func resolvedHops(keys []string) []Hop {
+	if len(keys) == 0 {
+		return nil
+	}
+	hops := make([]Hop, 0, len(keys))
+	for _, k := range keys {
+		if k == "" {
+			hops = append(hops, Hop{Confidence: HopUnknown})
+			continue
+		}
+		hops = append(hops, Hop{PublicKey: strings.ToLower(k), Confidence: HopResolved})
+	}
+	return hops
+}
+
+// originFromDecodedJSON pulls the originating node out of the stringified
+// JSON blob CoreScope carries it in.
+func originFromDecodedJSON(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var decoded struct {
+		PubKey string `json:"pubKey"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return ""
+	}
+	return strings.ToLower(decoded.PubKey)
 }
 
 func derefString(s *string) string {
