@@ -13,6 +13,126 @@ where the code emits lowercase).
 
 ---
 
+## 0. Status: implemented and verified against a real Beacon
+
+Every HopReach feature runs on both backends. Verified by loading ScotMesh's
+own CoreScope data into a local Beacon (`cmd/corescope-to-beacon`) and running
+the whole system twice — comparing against an unrelated Beacon would have
+proved nothing, since the maps would differ because the networks differ.
+
+Switch with one key:
+
+```yaml
+source:
+  type: corescope   # or: beacon
+```
+
+### Feature parity
+
+| Feature | CoreScope | Beacon | Notes |
+|---|---|---|---|
+| Repeater list + positions | ✅ | ✅ | identical set and coordinates on the same mesh |
+| Node names, first/last heard | ✅ | ✅ | "never heard" stays null on both |
+| Self-reported default scope | ✅ | ✅ | Beacon's node *list* omits it; filled per region (§0.1) |
+| Observed reach / links | ✅ | ✅ | Beacon synthesises from neighbour lists both directions |
+| Calibration against observed links | ✅ | ✅ | same `[]meshsource.ReachLink` |
+| Coverage rasters, all tiers | ✅ | ✅ | pure function of positions + terrain |
+| Region/scope list | ✅ | ⚠️ | different question (§0.2) |
+| Observed region participation | ✅ | ✅ | both derived from traffic (§0.3) |
+| Observed-unscoped signal | ✅ | ✅ | both derived from traffic |
+| Per-scope coverage rasters | ✅ | ✅ | follows from participation |
+| Packet window (replay) | ✅ | ✅ | Beacon filters server-side; CoreScope needs the offset search |
+| Packet detail, all observations | ✅ | ✅ | |
+| Resolved relay paths | ✅ | ✅ | list omits them; recovered by bounded detail fan-out |
+| Per-hop resolution confidence | ❌ | ✅ | Beacon-only, and an upgrade — see §3 |
+| Frame size for airtime | ✅ | ⚠️ | detail only (§0.4) |
+| Packet replay end-to-end | ✅ | ✅ | |
+
+### 0.1 Default scope is missing from Beacon's node list
+
+Beacon's `ListNodes` query selects `ts.name AS default_scope_name` and its
+`NodeSummary` type has the field, but the list response does not carry it —
+only the per-node detail endpoint does. Left alone, every node arrives
+unscoped and the map's scope filter is empty on Beacon while working on
+CoreScope.
+
+Filled with one `/nodes?scope=NAME` request per region rather than one detail
+request per node, since that filter matches on exactly this field. Worth
+raising upstream; the workaround is cheap and correct either way.
+
+### 0.2 `/scopes` answers a different question
+
+CoreScope's scope list is "regions this instance knows". Beacon's
+`/scopes?iatas=…` is "regions with observers in these IATAs" — it joins
+through `observer_scopes`, so a region nobody local has been heard on is
+absent. On the migrated sample that is 3 of 9.
+
+Both answers are defensible and neither is wrong; they are simply not the
+same question. HopReach uses the list to decide which per-scope rasters to
+generate, so on Beacon it generates them for locally-observed regions only.
+Recorded rather than papered over: forcing them to agree would mean
+fabricating regions on one side or hiding them on the other.
+
+### 0.3 Region participation is derived from traffic on both
+
+Beacon exposes `/nodes?scope=…`, which is tempting and wrong for this: it
+filters on a node's *self-reported* default scope, which is a different claim
+from "observed relaying on that region". Using it would label repeaters as
+observed participants on the strength of what they say about themselves —
+precisely the weak signal observation exists to replace.
+
+So both backends derive it from real traffic. What Beacon buys is a
+server-side scope filter on the packet query, making each region a narrow
+question instead of a walk of the whole history.
+
+### 0.4 Frame size is detail-only on Beacon
+
+Beacon's packet list carries no payload, so `frame_bytes` is 0 there and
+present on CoreScope. It is populated from the detail response, which the
+replay path fetches anyway for relay paths — so the simulator gets real
+airtime. Anything reading only the list gets 0, which the front end already
+treats as "not reported" rather than as a zero-length frame.
+
+### 0.5 What "equivalent output" means
+
+Not byte equality, and `tools/compare_backends.py` encodes why:
+
+- The runs happen minutes apart, so a repeater can cross the active/degraded
+  threshold between them.
+- Beacon reports per-hop confidence and CoreScope cannot, so Beacon can
+  honestly say "unknown" where CoreScope names a node. Flattening that would
+  be the bug, not the fix.
+
+Result on the same mesh: **77 repeaters both sides, identical set, positions,
+names and self-reported scopes.**
+
+### 0.6 Reproducing it
+
+```bash
+docker run -d --name beacon-postgres -e POSTGRES_USER=beacon \
+  -e POSTGRES_PASSWORD=beacon -e POSTGRES_DB=beacon -p 5433:5432 postgres:16-alpine
+# beacon-server with a Scotland IATA config, then:
+go run ./cmd/corescope-to-beacon -corescope https://YOUR-CORESCOPE \
+  | docker exec -i beacon-postgres psql -U beacon -d beacon
+python3 tools/compare_backends.py out-corescope out-beacon
+bash tools/compare_mesh_api.sh http://localhost:9091 http://localhost:9092
+```
+
+### 0.7 Defects this found
+
+Four, none of which a unit test with a fake source could have reached:
+
+1. Beacon's node list omits `defaultScope` (§0.1).
+2. Participation was using self-reported scope as if it were observed (§0.3).
+3. Beacon's packet-detail handler dereferences `source_broker` without a nil
+   guard, so a NULL panics the endpoint — worth reporting upstream.
+4. Path resolution is scoped to the IATA an observation was filed under. That
+   suits a global service where partitions are separate networks; a single
+   mesh spanning four airports loses every hop that crossed a boundary, which
+   reads as "unknown relay" rather than as a modelling artifact.
+
+---
+
 ## 1. Verdict
 
 **Yes — compatible, and in two respects better than what we have.** No

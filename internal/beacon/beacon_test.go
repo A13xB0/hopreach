@@ -397,3 +397,41 @@ func TestFetchRepeatersFillsDefaultScopeTheListOmits(t *testing.T) {
 			"guessing one would be a claim the backend never made", got["bb"])
 	}
 }
+
+func TestPacketDetailReportsFrameSizeForAirtime(t *testing.T) {
+	// The simulator sizes a replayed transmission's airtime from the frame
+	// length. Beacon reports the payload and the framing separately and never
+	// the assembled length, so it has to be reconstructed — and a wrong or
+	// absent answer here silently changes how long every replayed packet
+	// occupies the channel.
+	got := convertDetail(packetDetail{
+		PacketHash: "aa",
+		Header:     packetHeader{RouteType: 0, PayloadType: 3}, // transport flood
+		RawPayload: "deadbeef",                                 // 4 bytes
+		Observations: []observationDetail{{
+			ObserverID: "o1",
+			PathLength: pathLength{HashSize: 2, HopCount: 3},
+		}},
+	})
+	if got.PayloadLen != 4 {
+		t.Errorf("payloadLen = %d, want 4", got.PayloadLen)
+	}
+	// 4 payload + 1 header + 4 transport code + 1 path_len + 3*2 path = 16.
+	if got.FrameBytes != 16 {
+		t.Errorf("frameBytes = %d, want 16", got.FrameBytes)
+	}
+}
+
+func TestPacketDetailWithoutAPayloadReportsZeroNotAGuess(t *testing.T) {
+	// "Not reported" and "a zero-length frame" are different, and the front
+	// end falls back on the first — airtime from a fabricated zero would be
+	// confidently wrong.
+	got := convertDetail(packetDetail{
+		PacketHash:   "aa",
+		Header:       packetHeader{RouteType: 1},
+		Observations: []observationDetail{{ObserverID: "o1"}},
+	})
+	if got.PayloadLen != 0 || got.FrameBytes != 0 {
+		t.Errorf("got %d/%d, want 0/0", got.PayloadLen, got.FrameBytes)
+	}
+}

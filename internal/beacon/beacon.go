@@ -169,13 +169,51 @@ type observationDetail struct {
 }
 
 type packetDetail struct {
-	PacketHash   string              `json:"packetHash"`
-	Header       packetHeader        `json:"header"`
+	PacketHash string       `json:"packetHash"`
+	Header     packetHeader `json:"header"`
+
+	// RawPayload is the application payload as hex — the frame minus its
+	// header, transport code and accumulated path. Only the detail response
+	// carries it; the packet list does not, which is why frame sizing is
+	// only available once a packet has been looked at individually.
+	RawPayload string `json:"rawPayload"`
+
 	OriginPubkey *string             `json:"originPubkey"`
 	Scope        *string             `json:"scope"`
 	FirstHeardAt int64               `json:"firstHeardAt"`
 	Observations []observationDetail `json:"observations"`
 }
+
+// frameSizes derives the payload and whole-frame byte counts the simulator
+// needs for airtime, from the payload Beacon reports plus the framing implied
+// by the packet's own route type and path.
+//
+// Reconstructed rather than measured, because Beacon stores the payload and
+// the framing separately and never reports the assembled frame length. The
+// arithmetic is the wire format's, not a guess: one header byte, four more for
+// a transport code when the route type carries one, one path_len byte, and
+// hopCount*hashSize accumulated path bytes.
+//
+// Returns zeroes when the payload is absent, so a caller can tell "not
+// reported" from "a zero-length frame" — airtime computed from a fabricated
+// zero would be confidently wrong.
+func frameSizes(d packetDetail, hashSize, hopCount int) (payloadLen, frameBytes int) {
+	payloadLen = len(d.RawPayload) / 2
+	if payloadLen == 0 {
+		return 0, 0
+	}
+	framing := 1 + 1 + hopCount*hashSize
+	if d.Header.RouteType == routeTransportFlood || d.Header.RouteType == routeTransportDirect {
+		framing += 4
+	}
+	return payloadLen, payloadLen + framing
+}
+
+// MeshCore route types that carry a 4-byte transport code.
+const (
+	routeTransportFlood  = 0
+	routeTransportDirect = 3
+)
 
 type scopeSummary struct {
 	Name string `json:"name"`
@@ -585,6 +623,9 @@ func convertDetail(d packetDetail) meshsource.Packet {
 	if len(d.Observations) > 0 {
 		pk.HashSize = d.Observations[0].PathLength.HashSize
 		pk.HopCount = d.Observations[0].PathLength.HopCount
+		// Airtime is computed from the frame length, which Beacon reports only
+		// here — its packet list carries no payload at all.
+		pk.PayloadLen, pk.FrameBytes = frameSizes(d, pk.HashSize, pk.HopCount)
 	}
 	return pk
 }
