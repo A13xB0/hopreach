@@ -55,10 +55,32 @@
     return self.__hopreachWasm.pathMargin(grid.__handle, handleFor(p), txLat, txLon, txHeightM, rxLat, rxLon, distanceKm);
   }
 
+  // computeMarginsRows — see internal/propagation.ComputeMarginsRows. Fills
+  // rows [rowStart, rowEnd) of the raster described by bounds/imageWidth/
+  // imageHeight, returning a band-relative Float32Array (NaN = uncovered).
+  //
+  // Prefer this over a JS loop calling pathMargin per pixel: it is the same
+  // code the server's own coverage map runs (so it cannot drift from it),
+  // and it crosses the WASM boundary once per band instead of once per
+  // pixel, which is worth ~18% on a full-length raster.
+  //
+  // `bounds` and `imageHeight` always describe the WHOLE raster, never the
+  // band — that's what makes bands from different workers line up.
+  function computeMarginsRows(grid, p, sites, bounds, imageWidth, imageHeight, rowStart, rowEnd, rangeKm) {
+    const bytes = self.__hopreachWasm.computeMarginsRows(
+      grid.__handle, handleFor(p), sites,
+      bounds.south, bounds.north, bounds.west, bounds.east,
+      imageWidth, imageHeight, rowStart, rowEnd, rangeKm
+    );
+    // Zero-copy view over the bytes Go just handed back, not a re-decode.
+    return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  }
+
   self.Propagation = {
     ready: self.__hopreachWasmReadyPromise,
     haversineKm,
     linkBudgetMaxRangeKm,
     pathMargin,
+    computeMarginsRows,
   };
 })();

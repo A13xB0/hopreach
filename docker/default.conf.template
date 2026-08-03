@@ -73,6 +73,15 @@ server {
         proxy_cache dem_tiles;
         proxy_cache_valid 200 30d;
         proxy_cache_key $uri;
+        # The plan-mode coverage preview computes its raster across a pool of
+        # Web Workers, and their terrain boxes overlap — so several of them
+        # ask for the same uncached tile at the same moment. Without a lock
+        # every one of those is a separate round trip to S3, which is how a
+        # first full-detail preview spent ~22s fetching and ~5s computing.
+        # With it, one request fills the cache and the rest wait on it.
+        proxy_cache_lock on;
+        proxy_cache_lock_timeout 30s;
+        proxy_cache_lock_age 30s;
         proxy_set_header Host s3.amazonaws.com;
         proxy_pass https://s3.amazonaws.com/elevation-tiles-prod/terrarium/;
         proxy_ssl_server_name on;

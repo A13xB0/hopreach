@@ -14,7 +14,7 @@
 
   const S = window.PlanState;
 
-  let AREA_MAX_NEW_KEY, areaLayer, cfg, effectiveRealRepeaters, ensureWorker, escapeHtml, planSites, randomId, redrawPlannedMarkers, renderRepeaterList, scheduleCoveragePreview;
+  let AREA_MAX_NEW_KEY, areaLayer, cfg, effectiveRealRepeaters, ensureWorker, escapeHtml, planSites, previewRangeKm, randomId, redrawPlannedMarkers, renderRepeaterList, scheduleCoveragePreview;
 
   // --- cover an area (auto-placer) ---------------------------------------
   //
@@ -103,6 +103,10 @@
       existingSites: planSites(),
       realRepeaters: effectiveRealRepeaters(),
       config: { demTileURLBase: cfg.demTileURLBase, demZoom: cfg.demZoom, propagation: cfg.propagation },
+      // Score against whatever range the coverage preview is currently set
+      // to draw, so the percentage this reports and the overlay the user
+      // then sees are talking about the same radio.
+      previewRangeKm: previewRangeKm(),
     });
   }
 
@@ -164,7 +168,7 @@
   }
 
   function init(context) {
-    ({ AREA_MAX_NEW_KEY, areaLayer, cfg, effectiveRealRepeaters, ensureWorker, escapeHtml, planSites, randomId, redrawPlannedMarkers, renderRepeaterList, scheduleCoveragePreview } = context);
+    ({ AREA_MAX_NEW_KEY, areaLayer, cfg, effectiveRealRepeaters, ensureWorker, escapeHtml, planSites, previewRangeKm, randomId, redrawPlannedMarkers, renderRepeaterList, scheduleCoveragePreview } = context);
     bindDom();
     return api;
   }

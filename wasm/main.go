@@ -200,6 +200,58 @@ func jsPathMargin(this js.Value, args []js.Value) any {
 	return propagation.PathMargin(g, p, txLat, txLon, txHeightM, rxLat, rxLon, distanceKm)
 }
 
+// jsComputeMarginsRows(gridHandle, paramsHandle, sites, south, north, west,
+// east, imageWidth, imageHeight, rowStart, rowEnd, rangeKm) -> Uint8Array of
+// little-endian float32 margins for rows [rowStart, rowEnd), NaN where
+// nothing reaches.
+//
+// `sites` is a JS array of {lat, lon, txHeightM}.
+//
+// This is the batched twin of jsPathMargin, and the reason it exists is that
+// crossing this boundary is expensive: measured on a desktop Chrome, a
+// pathMargin call costs ~13.6us before it does any physics at all (syscall/js
+// argument marshalling plus the registry mutex), against ~62us of actual
+// work for a full-length 300-sample profile. A raster asks one question per
+// pixel — hundreds of thousands of them — so paying that per pixel threw
+// away nearly a fifth of the time. One call per row band instead of one per
+// pixel makes it vanish, and it also means the browser runs
+// propagation.marginsRow itself rather than a JS re-derivation of it.
+func jsComputeMarginsRows(this js.Value, args []js.Value) any {
+	mu.Lock()
+	g := gridReg[args[0].Int()]
+	p := paramsReg[args[1].Int()]
+	mu.Unlock()
+
+	sitesJS := args[2]
+	sites := make([]propagation.Site, sitesJS.Length())
+	for i := range sites {
+		s := sitesJS.Index(i)
+		sites[i] = propagation.Site{
+			Lat:       getFloat(s, "lat"),
+			Lon:       getFloat(s, "lon"),
+			TxHeightM: getFloat(s, "txHeightM"),
+		}
+	}
+
+	bounds := propagation.Bounds{
+		South: args[3].Float(), North: args[4].Float(),
+		West: args[5].Float(), East: args[6].Float(),
+	}
+	imageWidth, imageHeight := args[7].Int(), args[8].Int()
+	rowStart, rowEnd := args[9].Int(), args[10].Int()
+	rangeKm := args[11].Float()
+
+	band := propagation.ComputeMarginsRows(g, sites, bounds, imageWidth, imageHeight, rowStart, rowEnd, rangeKm, p)
+
+	out := make([]byte, len(band)*4)
+	for i, v := range band {
+		binary.LittleEndian.PutUint32(out[i*4:], math.Float32bits(v))
+	}
+	jsOut := js.Global().Get("Uint8Array").New(len(out))
+	js.CopyBytesToJS(jsOut, out)
+	return jsOut
+}
+
 func main() {
 	api := js.Global().Get("Object").New()
 	api.Set("createParams", js.FuncOf(jsCreateParams))
@@ -211,6 +263,7 @@ func main() {
 	api.Set("releaseGrid", js.FuncOf(jsReleaseGrid))
 	api.Set("gridAt", js.FuncOf(jsGridAt))
 	api.Set("pathMargin", js.FuncOf(jsPathMargin))
+	api.Set("computeMarginsRows", js.FuncOf(jsComputeMarginsRows))
 	registerMeshsim(api)
 	js.Global().Set("__hopreachWasm", api)
 

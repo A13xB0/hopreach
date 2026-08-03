@@ -177,3 +177,56 @@ func TestComputeMarginsCPUShape(t *testing.T) {
 		t.Errorf("expected a non-NaN margin near the transmitter, got NaN")
 	}
 }
+
+// The whole point of ComputeMarginsRows is that a band is indistinguishable
+// from the same rows of a full computation — the browser shards a raster
+// across Web Workers on that promise, so an off-by-one in the row geometry
+// would show up as a seam between bands rather than an error.
+func TestComputeMarginsRowsMatchesFullRaster(t *testing.T) {
+	p := Params{
+		FrequencyMHz: 868, TxPowerDBm: 22, TxAntennaGainDB: 3, RxAntennaGainDB: 0,
+		RxSensitivityDB: -124, FadeMarginDB: 20, RxHeightM: 2, MaxRangeKm: 50,
+	}
+	grid := flatGrid{elevM: 0}
+	sites := []Site{{Lat: 0.01, Lon: -0.02, GroundM: 0, TxHeightM: 50}}
+	bounds := Bounds{South: -0.1, North: 0.1, West: -0.1, East: 0.1}
+
+	const w, h = 16, 13 // deliberately not a multiple of the band count
+	rangeKm := LinkBudgetMaxRangeKm(p)
+	full := ComputeMarginsCPU(grid, sites, bounds, w, h, rangeKm, p, nil)
+
+	// Reassemble the raster from uneven bands, the way the worker pool does.
+	var got []float32
+	for _, band := range [][2]int{{0, 5}, {5, 6}, {6, 13}} {
+		got = append(got, ComputeMarginsRows(grid, sites, bounds, w, h, band[0], band[1], rangeKm, p)...)
+	}
+	if len(got) != len(full) {
+		t.Fatalf("reassembled %d pixels, want %d", len(got), len(full))
+	}
+	for i := range full {
+		a, b := float64(full[i]), float64(got[i])
+		if math.IsNaN(a) != math.IsNaN(b) || (!math.IsNaN(a) && a != b) {
+			t.Fatalf("pixel %d (row %d, col %d): band gave %v, full raster gave %v", i, i/w, i%w, b, a)
+		}
+	}
+}
+
+func TestComputeMarginsRowsClampsOutOfRangeBands(t *testing.T) {
+	p := Params{
+		FrequencyMHz: 868, TxPowerDBm: 22, RxSensitivityDB: -124, FadeMarginDB: 20, MaxRangeKm: 50,
+	}
+	grid := flatGrid{elevM: 0}
+	sites := []Site{{Lat: 0, Lon: 0, TxHeightM: 50}}
+	bounds := Bounds{South: -0.1, North: 0.1, West: -0.1, East: 0.1}
+	const w, h = 8, 8
+
+	if got := ComputeMarginsRows(grid, sites, bounds, w, h, 8, 12, 40, p); got != nil {
+		t.Errorf("band starting past the last row = %d pixels, want nil", len(got))
+	}
+	if got := ComputeMarginsRows(grid, sites, bounds, w, h, 6, 99, 40, p); len(got) != w*2 {
+		t.Errorf("band overrunning the raster = %d pixels, want %d (clamped to the last 2 rows)", len(got), w*2)
+	}
+	if got := ComputeMarginsRows(grid, sites, bounds, w, h, 4, 4, 40, p); got != nil {
+		t.Errorf("empty band = %d pixels, want nil", len(got))
+	}
+}

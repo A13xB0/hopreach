@@ -157,6 +157,19 @@
         Planned coverage (preview)
       </label>
 
+      <!-- How far, and how sharply, a planned repeater's coverage is
+           computed. Fast is the quick estimate; Full uses exactly the search
+           range and terrain detail the real (nightly, server-side) coverage
+           map uses, so the two are directly comparable. -->
+      <div class="plan-field-row">
+        <label for="plan-preview-quality">Preview detail</label>
+        <select id="plan-preview-quality">
+          <option value="fast">Fast</option>
+          <option value="full">Full (matches real map)</option>
+        </select>
+      </div>
+      <div id="plan-preview-quality-hint" class="plan-hint"></div>
+
       <div class="plan-mode-buttons">
         <button data-mode="add-repeater" class="plan-mode-btn">📍 Add repeater</button>
         <button data-mode="adjust-repeater" class="plan-mode-btn">✎ Adjust repeater</button>
@@ -923,11 +936,12 @@
 <script src="map-responsive.js"></script>
 <script src="plan-state.js"></script>
 <script src="plan-los.js"></script>
-<script src="plan-los.js"></script>
 <script src="plan-neighbors.js"></script>
 <script src="plan-kml.js"></script>
 <script src="plan-connect.js"></script>
 <script src="plan-area.js"></script>
+<script src="plan-preview-geometry.js"></script>
+<script src="plan-preview.js"></script>
 <script src="app.js"></script>
 <script src="planner.js"></script>
 <script src="evidence.js"></script>

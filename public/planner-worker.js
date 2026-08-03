@@ -1,22 +1,24 @@
 // Computes a coverage-preview raster for a set of planned repeater sites,
-// off the main thread so dragging a marker never janks the map. Mirrors
-// coverage.go's coverageRaster/coverageRow, scaled down to a modest preview
-// size since this runs live on every edit rather than once a day. Also
+// off the main thread so dragging a marker never janks the map. Also
 // predicts each planned site's neighbours (other planned sites + nearby
 // real repeaters) using the same terrain grid, since there's no observed
 // radio data for a site that doesn't exist yet — unlike real repeaters,
 // whose neighbours come from CoreScope's own reach data (see planner.js).
+//
+// The raster itself is NOT computed here pixel by pixel any more: a
+// "preview-band" job hands one horizontal band of the raster straight to
+// propagation.ComputeMarginsRows in WebAssembly — literally the function the
+// server's nightly map runs — instead of re-deriving its loop in JS. Several
+// copies of this worker each take a band, because Go compiled to WASM has no
+// thread parallelism and one band at full range takes half a minute alone.
+// plan-preview.js owns the pool and decides the bands; see
+// plan-preview-geometry.js for how.
 importScripts("wasm_exec.js", "wasm-bridge.js", "terrain.js", "propagation.js", "meshsim-scenario.js", "meshsim-bridge.js");
 
-// The real (nightly, server-side) map searches out to the full link-budget
-// range (often ~100km) because it's computed once a day over the whole
-// region. A live preview recomputed on every marker drag can't afford
-// that: at DEM_ZOOM≈11 a single 100km-radius site needs 250+ elevation
-// tiles just to start. Cap the preview's search radius and use a coarser
-// zoom — plenty to judge "does this fill the gap", not meant to reproduce
-// the full map's extreme-range hilltop cases.
-const PREVIEW_MAX_RANGE_KM = 35;
-const PREVIEW_ZOOM_CAP = 10;
+// Range/zoom caps for the tools that still have their own: connect-repeaters
+// and area-coverage. The coverage preview's own search radius and zoom now
+// come from the quality the user picked in the Plan panel (see
+// plan-preview-geometry.js) and arrive with each job.
 const MAX_NEIGHBORS_PER_SITE = 8;
 
 self.onmessage = async (e) => {
@@ -28,49 +30,83 @@ self.onmessage = async (e) => {
   await MeshSim.ready;
   if (e.data.kind === "connect") return handleConnect(e.data);
   if (e.data.kind === "area-coverage") return handleAreaCoverage(e.data);
-  return handlePreview(e.data);
+  if (e.data.kind === "preview-band") return handlePreviewBand(e.data);
+  return handlePreviewNeighbors(e.data);
 };
 
-async function handlePreview({ generation, sites, realRepeaters, config, imageWidth }) {
+// resolveSites turns planned sites into propagation.Site-shaped records by
+// looking up each one's ground elevation.
+//
+// Every band worker does this against its own grid, and they must agree: they
+// do, because each band's terrain box is required to contain all the sites
+// (see bandGridBounds) and every grid samples the same DEM tiles at the same
+// zoom, so grid.at() is the same number in each.
+function resolveSites(sites, grid, propagation) {
+  return sites.map((s) => {
+    const groundM = grid.at(s.lat, s.lon);
+    const antennaHeightM = s.antennaHeightM != null ? s.antennaHeightM : propagation.antennaHeightM;
+    // isReal/label distinguish a personally-adjusted real repeater (see
+    // planner.js's overrides) from a brand-new planned site, so it shows
+    // up correctly (real name, "observed"-style styling) when it's
+    // *another* site's predicted neighbour, not just when it's the
+    // subject of its own prediction.
+    return {
+      id: s.id, lat: s.lat, lon: s.lon, txHeightM: groundM + antennaHeightM,
+      isReal: !!s.isReal, label: s.label || null,
+    };
+  });
+}
 
+// handlePreviewBand computes rows [rowStart, rowEnd) of the preview raster.
+//
+// gridBounds is deliberately NOT the raster's bounds: it's the smaller box
+// this band's own paths can reach (bandGridBounds), which is what keeps a
+// pool of workers from each holding a full copy of the terrain.
+async function handlePreviewBand({ generation, sites, config, geometry, band, gridBounds }) {
+  try {
+    const { propagation } = config;
+    const t0 = performance.now();
+    const grid = await Terrain.buildLocalGrid(config.demTileURLBase, geometry.zoom, gridBounds);
+    const t1 = performance.now();
+    const resolved = resolveSites(sites, grid, propagation);
+
+    const margins = Propagation.computeMarginsRows(
+      grid, propagation, resolved, geometry.bounds,
+      geometry.imageWidth, geometry.imageHeight,
+      band.rowStart, band.rowEnd, geometry.rangeKm
+    );
+    const t2 = performance.now();
+    // computeMarginsRows returns a view over WASM-owned bytes; copy so the
+    // buffer can be transferred (and so nothing later reuses it underneath us).
+    const owned = new Float32Array(margins);
+    // Terrain vs physics, reported per band: which of the two dominates
+    // decides whether the pool wants more workers or fewer, and it flips
+    // between quality levels and between a cold and a warm tile cache.
+    const timing = { tileMs: Math.round(t1 - t0), computeMs: Math.round(t2 - t1) };
+    self.postMessage({ kind: "preview", generation, type: "band", band, timing, margins: owned.buffer }, [owned.buffer]);
+  } catch (err) {
+    self.postMessage({ kind: "preview", generation, type: "error", message: err.message || String(err) });
+  }
+}
+
+// handlePreviewNeighbors predicts each planned site's neighbours: other
+// planned sites, plus real repeaters in range. Split out of the old combined
+// preview job because it is cheap (a few hundred paths, against a raster's
+// hundreds of thousands) and wants the whole terrain box, whereas each band
+// of the raster wants only its own slice.
+async function handlePreviewNeighbors({ generation, sites, realRepeaters, config, geometry }) {
   if (!sites || sites.length === 0) {
-    self.postMessage({ generation, type: "result", empty: true });
+    self.postMessage({ kind: "preview", generation, type: "neighbors", neighbors: {}, empty: true });
     return;
   }
 
   try {
     const propagation = config.propagation;
-    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), PREVIEW_MAX_RANGE_KM);
-    const zoom = Math.min(config.demZoom, PREVIEW_ZOOM_CAP);
+    const { rangeKm, zoom, bounds } = geometry;
 
-    const kmPerDegLat = 110.574;
-    let south = Infinity, north = -Infinity, west = Infinity, east = -Infinity;
-    for (const s of sites) {
-      const kmPerDegLon = Math.max(1, 111.32 * Math.cos((s.lat * Math.PI) / 180));
-      const latPad = rangeKm / kmPerDegLat;
-      const lonPad = rangeKm / kmPerDegLon;
-      south = Math.min(south, s.lat - latPad);
-      north = Math.max(north, s.lat + latPad);
-      west = Math.min(west, s.lon - lonPad);
-      east = Math.max(east, s.lon + lonPad);
-    }
-    const bounds = { south, north, west, east };
-
-    self.postMessage({ generation, type: "status", message: "Loading terrain…" });
     const grid = await Terrain.buildLocalGrid(config.demTileURLBase, zoom, bounds);
+    const resolvedSites = resolveSites(sites, grid, propagation);
 
-    const resolvedSites = sites.map((s) => {
-      const groundM = grid.at(s.lat, s.lon);
-      const antennaHeightM = s.antennaHeightM != null ? s.antennaHeightM : propagation.antennaHeightM;
-      // isReal/label distinguish a personally-adjusted real repeater (see
-      // planner.js's overrides) from a brand-new planned site, so it shows
-      // up correctly (real name, "observed"-style styling) when it's
-      // *another* site's predicted neighbour, not just when it's the
-      // subject of its own prediction.
-      return { id: s.id, lat: s.lat, lon: s.lon, txHeightM: groundM + antennaHeightM, isReal: !!s.isReal, label: s.label || null };
-    });
-
-    // --- neighbour prediction (cheap compared to the raster below) ---
     const neighbors = {};
     // resolvedSiteIds also covers real repeaters that have been personally
     // adjusted (their pubkey reused as the site id, see planner.js) — such
@@ -106,48 +142,9 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
       neighbors[s.id] = found.slice(0, MAX_NEIGHBORS_PER_SITE);
     }
 
-    // --- coverage raster ---
-    const avgLat = (south + north) / 2;
-    const kmPerDegLon = 111.32 * Math.cos((avgLat * Math.PI) / 180);
-    const widthKm = (east - west) * kmPerDegLon;
-    const heightKm = (north - south) * kmPerDegLat;
-    const imageHeight = Math.max(1, Math.round(imageWidth * (heightKm / widthKm)));
-
-    const margins = new Float32Array(imageWidth * imageHeight).fill(NaN);
-
-    for (let py = 0; py < imageHeight; py++) {
-      const lat = north - ((py + 0.5) / imageHeight) * (north - south);
-      for (let px = 0; px < imageWidth; px++) {
-        const lon = west + ((px + 0.5) / imageWidth) * (east - west);
-        let best = -Infinity;
-        for (const s of resolvedSites) {
-          const d = Propagation.haversineKm(lat, lon, s.lat, s.lon);
-          if (d > rangeKm || d < 0.01) continue;
-          const m = Propagation.pathMargin(grid, propagation, s.lat, s.lon, s.txHeightM, lat, lon, d);
-          if (m > best) best = m;
-        }
-        if (best >= 0) margins[py * imageWidth + px] = best;
-      }
-      if (py % 5 === 0 || py === imageHeight - 1) {
-        self.postMessage({ generation, type: "progress", done: py + 1, total: imageHeight });
-      }
-    }
-
-    self.postMessage(
-      {
-        generation,
-        type: "result",
-        bounds,
-        imageWidth,
-        imageHeight,
-        marginGreenDb: propagation.marginGreenDb,
-        margins: margins.buffer,
-        neighbors,
-      },
-      [margins.buffer]
-    );
+    self.postMessage({ kind: "preview", generation, type: "neighbors", neighbors });
   } catch (err) {
-    self.postMessage({ generation, type: "error", message: err.message || String(err) });
+    self.postMessage({ kind: "preview", generation, type: "error", message: err.message || String(err) });
   }
 }
 
@@ -658,7 +655,7 @@ function pointInPolygon(lat, lon, polygon) {
   return inside;
 }
 
-async function handleAreaCoverage({ generation, polygon, maxNewSites, existingSites, realRepeaters, config }) {
+async function handleAreaCoverage({ generation, polygon, maxNewSites, existingSites, realRepeaters, config, previewRangeKm }) {
   const post = (msg) => self.postMessage({ generation, kind: "area-coverage", ...msg });
   const siteCap = maxNewSites > 0 ? maxNewSites : AREA_DEFAULT_MAX_NEW_SITES;
   try {
@@ -684,15 +681,17 @@ async function handleAreaCoverage({ generation, polygon, maxNewSites, existingSi
       return;
     }
 
-    // Deliberately reuses PREVIEW_MAX_RANGE_KM (not AREA_MAX_BBOX_KM, which
-    // only bounds how large a shape you can draw) — this is what actually
-    // gets *rendered* by the coverage-preview overlay once these sites
-    // land in the plan. Scoring against a longer range than the renderer
-    // will ever draw is exactly what caused this tool to report coverage
-    // percentages the map didn't visually back up: a site could be
-    // credited with "covering" a point 50km away that the preview's own
-    // 35km search radius will never draw a pixel for.
-    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), PREVIEW_MAX_RANGE_KM);
+    // previewRangeKm is the coverage preview's OWN search radius, passed in
+    // by the caller because the user now chooses it (Fast vs Full) rather
+    // than it being a constant here. Scoring against a longer range than the
+    // preview will ever draw is exactly what caused this tool to report
+    // coverage percentages the map didn't visually back up: a site could be
+    // credited with "covering" a point the preview never draws a pixel for.
+    // So this deliberately tracks the preview, not AREA_MAX_BBOX_KM (which
+    // only bounds how large a shape you can draw).
+    const rangeKm = previewRangeKm > 0
+      ? previewRangeKm
+      : Math.min(Propagation.linkBudgetMaxRangeKm(propagation), 35);
     const zoom = Math.min(config.demZoom, AREA_ZOOM_CAP);
     const bounds = { south, north, west, east };
 
