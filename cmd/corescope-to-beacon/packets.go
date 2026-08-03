@@ -18,7 +18,7 @@ import (
 const sourceBroker = "corescope-to-beacon"
 
 func (m *migration) writePackets(
-	ctx context.Context, byKey map[string]nodeRef, scopeIDs map[string]int, o runOpts,
+	ctx context.Context, byKey map[string]nodeRef, scopeRefs map[string]string, o runOpts,
 ) error {
 	packets, err := m.src.FetchPacketsBetween(ctx, o.packetSince, time.Now(), o.packetLimit)
 	if err != nil {
@@ -49,7 +49,7 @@ func (m *migration) writePackets(
 	// regions exist in an IATA by joining observers to scopes through this
 	// table (GetScopesByIATAs), so without it /scopes?iatas=… answers empty
 	// and every region-aware feature goes quiet.
-	observerScopes := map[string]map[int]bool{}
+	observerScopes := map[string]map[string]bool{}
 
 	for _, p := range packets {
 		if p.Hash == "" {
@@ -82,11 +82,11 @@ func (m *migration) writePackets(
 				iata = ref.iata
 			}
 			observers[key] = iata
-			if id, ok := scopeIDs[p.Scope]; ok {
+			if ref, ok := scopeRefs[p.Scope]; ok {
 				if observerScopes[key] == nil {
-					observerScopes[key] = map[int]bool{}
+					observerScopes[key] = map[string]bool{}
 				}
-				observerScopes[key][id] = true
+				observerScopes[key][ref] = true
 			}
 		}
 	}
@@ -98,8 +98,8 @@ func (m *migration) writePackets(
 		p, detail := row.packet, row.detail
 
 		scope := "NULL"
-		if id, ok := scopeIDs[p.Scope]; ok {
-			scope = fmt.Sprint(id)
+		if ref, ok := scopeRefs[p.Scope]; ok {
+			scope = ref
 		}
 		origin := "NULL"
 		if p.OriginKey != "" {
@@ -190,7 +190,7 @@ func observationsOf(p, detail meshsource.Packet) []meshsource.Observation {
 // run before any packet_observations row names them — see the two-pass note
 // in writePackets.
 func (m *migration) writeObservers(
-	observers map[string]string, observerScopes map[string]map[int]bool,
+	observers map[string]string, observerScopes map[string]map[string]bool,
 ) {
 	m.w.printf("\n-- observers\n")
 	for key := range observers {
@@ -198,11 +198,11 @@ func (m *migration) writeObservers(
 			"INSERT INTO observers (id, public_key, display_name, observer_type) "+
 				"VALUES (%s, %s, NULL, %s) ON CONFLICT (public_key) DO NOTHING;\n",
 			uuidFor(key), hexLit(key), quote("migrated"))
-		for id := range observerScopes[key] {
+		for ref := range observerScopes[key] {
 			m.w.printf(
-				"INSERT INTO observer_scopes (observer_id, scope_id) VALUES (%s, %d) "+
+				"INSERT INTO observer_scopes (observer_id, scope_id) VALUES (%s, %s) "+
 					"ON CONFLICT DO NOTHING;\n",
-				uuidFor(key), id)
+				uuidFor(key), ref)
 		}
 	}
 	m.w.printf("\n")

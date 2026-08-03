@@ -18,8 +18,23 @@ and are reported as expected rather than as failures:
 Usage: compare_backends.py OUT_CORESCOPE OUT_BEACON
 """
 import json
+import math
 import sys
 from pathlib import Path
+
+# How far a repeater may appear to move between the two runs before it counts
+# as a disagreement rather than a re-advert. A DEM-backed raster samples the
+# ground in tens of metres, so anything under this cannot change the map.
+POSITION_TOLERANCE_M = 25.0
+
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    r = math.pi / 180
+    d_lat = (lat2 - lat1) * r
+    d_lon = (lon2 - lon1) * r
+    a = (math.sin(d_lat / 2) ** 2
+         + math.cos(lat1 * r) * math.cos(lat2 * r) * math.sin(d_lon / 2) ** 2)
+    return 6371008.8 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def load(out_dir):
@@ -58,14 +73,27 @@ def main():
 
     status_drift = 0
     scope_drift = []
+    position_drift = []
     for key in sorted(set(cs) & set(bc)):
         a, b = cs[key], bc[key]
 
-        # Position drives every raster. A disagreement here is not tolerable:
-        # the two backends would be drawing different maps.
-        if (a["lat"], a["lon"]) != (b["lat"], b["lon"]):
+        # Position drives every raster, so a real disagreement is not
+        # tolerable: the two backends would be drawing different maps.
+        #
+        # Exact float equality is the wrong test, though. A repeater that
+        # re-adverts between the two runs reports a slightly different GPS fix,
+        # and the run against the migrated snapshot then holds the older one —
+        # a metre or two apart, which changes no pixel of a raster whose
+        # resolution is tens of metres. A translation bug does not look like
+        # that; it swaps coordinates or loses precision wholesale. So compare
+        # in metres, and report anything inside the threshold as drift.
+        moved_m = haversine_m(a["lat"], a["lon"], b["lat"], b["lon"])
+        if moved_m > POSITION_TOLERANCE_M:
             failures.append(
-                f"{key[:8]}: position {a['lat']},{a['lon']} vs {b['lat']},{b['lon']}")
+                f"{key[:8]}: position {a['lat']},{a['lon']} vs {b['lat']},{b['lon']}"
+                f" ({moved_m:.0f}m apart)")
+        elif moved_m > 0:
+            position_drift.append((key[:8], moved_m))
 
         if a["name"] != b["name"]:
             failures.append(f"{key[:8]}: name {a['name']!r} vs {b['name']!r}")
@@ -81,6 +109,13 @@ def main():
 
         if a["status"] != b["status"]:
             status_drift += 1
+
+    if position_drift:
+        worst = max(m for _, m in position_drift)
+        expected.append(
+            f"{len(position_drift)} repeater(s) moved by under "
+            f"{POSITION_TOLERANCE_M:.0f}m between runs (worst {worst:.1f}m) — "
+            f"a re-advert with a fresh GPS fix, too small to move a raster pixel")
 
     if status_drift:
         expected.append(

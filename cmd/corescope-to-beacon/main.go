@@ -103,7 +103,7 @@ func (s stats) String() string {
 func (m *migration) run(ctx context.Context, o runOpts) error {
 	m.w.header()
 
-	scopeIDs, err := m.writeScopes(ctx)
+	scopeRefs, err := m.writeScopes(ctx)
 	if err != nil {
 		return fmt.Errorf("scopes: %w", err)
 	}
@@ -112,12 +112,12 @@ func (m *migration) run(ctx context.Context, o runOpts) error {
 	if err != nil {
 		return fmt.Errorf("nodes: %w", err)
 	}
-	byKey := m.writeNodes(nodes, scopeIDs)
+	byKey := m.writeNodes(nodes, scopeRefs)
 
 	if err := m.writeNeighbours(ctx, nodes, byKey, o); err != nil {
 		return fmt.Errorf("neighbours: %w", err)
 	}
-	if err := m.writePackets(ctx, byKey, scopeIDs, o); err != nil {
+	if err := m.writePackets(ctx, byKey, scopeRefs, o); err != nil {
 		return fmt.Errorf("packets: %w", err)
 	}
 
