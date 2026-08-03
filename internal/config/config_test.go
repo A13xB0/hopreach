@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -172,5 +173,37 @@ func TestValidate(t *testing.T) {
 				t.Errorf("expected no error, got %v", err)
 			}
 		})
+	}
+}
+
+// The two config files this repo ships are the only way an operator learns
+// how to select a backend, and `source.type` shipped in the Go struct before
+// it shipped in either file — so both were documenting the deprecated
+// `beacon.enabled` shape as the way to do it. Pin that they parse, validate,
+// carry a top-level `source:` block, and resolve to the backend they name.
+func TestShippedConfigFilesSelectABackendExplicitly(t *testing.T) {
+	for _, path := range []string{"../../config.example.yaml", "../../docker/config.docker.yaml"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if !strings.Contains(string(raw), "\nsource:\n") {
+			t.Errorf("%s: no top-level `source:` block — nothing tells an operator that source.type exists", path)
+		}
+
+		cfg, _, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		got, err := cfg.Resolve()
+		if err != nil {
+			t.Fatalf("%s: resolve: %v", path, err)
+		}
+		if got != SourceCoreScope {
+			t.Errorf("%s: resolves to %q, want %q (the shipped default)", path, got, SourceCoreScope)
+		}
+		if cfg.Beacon.Enabled {
+			t.Errorf("%s: ships with the deprecated beacon.enabled set", path)
+		}
 	}
 }

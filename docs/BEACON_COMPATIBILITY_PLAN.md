@@ -141,8 +141,15 @@ Not byte equality, and `tools/compare_backends.py` encodes why:
   honestly say "unknown" where CoreScope names a node. Flattening that would
   be the bug, not the fix.
 
-Result on the same mesh: **77 repeaters both sides, identical set, positions,
-names and self-reported scopes.**
+- Beacon never deletes a node; CoreScope ages them out. See §0.8.
+
+Positions are compared in **metres**, not by float equality: a repeater that
+re-adverts between the two runs reports a slightly different GPS fix, which is
+drift, not disagreement. A translation bug does not move a node by a metre —
+it swaps coordinates or loses precision wholesale.
+
+Result on the same mesh: **identical set, positions, names, self-reported
+scopes and activity status** — see §0.9 for the latest run.
 
 ### 0.6 Reproducing it
 
@@ -158,7 +165,7 @@ bash tools/compare_mesh_api.sh http://localhost:9091 http://localhost:9092
 
 ### 0.7 Defects this found
 
-Four, none of which a unit test with a fake source could have reached:
+Six, none of which a unit test with a fake source could have reached:
 
 1. Beacon's node list omits `defaultScope` (§0.1).
 2. Participation was using self-reported scope as if it were observed (§0.3).
@@ -168,6 +175,54 @@ Four, none of which a unit test with a fake source could have reached:
    suits a global service where partitions are separate networks; a single
    mesh spanning four airports loses every hop that crossed a boundary, which
    reads as "unknown relay" rather than as a modelling artifact.
+5. `cmd/corescope-to-beacon` numbered transport scopes by their position in
+   the scope list and wrote that id literally, guarded only by
+   `ON CONFLICT (name)`. Re-running it after the mesh gained or lost a region
+   shifted every later id and collided on the PRIMARY KEY, which that conflict
+   target does not catch — and one unhandled error aborts the transaction, so
+   psql discarded the whole migration and left the previous data in place. The
+   database looked populated and was silently a day stale. Scopes are now
+   referenced by name and the id is the sequence's to assign.
+6. The same tool used `ON CONFLICT ... DO NOTHING` for `nodes` and
+   `node_iatas`, so a re-run refreshed nothing: a repeater that had moved kept
+   its old coordinates, and `last_heard` stayed frozen at whatever the *first*
+   migration saw. On a day-old copy that put 64 of 79 shared repeaters in a
+   different activity bucket from CoreScope — the map showed live repeaters as
+   silent. Both are now `DO UPDATE`, with `first_seen`/`first_heard` taking
+   `LEAST` and `last_seen`/`last_heard` taking `GREATEST`.
+
+Defects 5 and 6 are worth dwelling on, because both presented as *Beacon*
+being a lower-fidelity source. They were the migration's, and the only reason
+they surfaced is that the comparison was re-run from scratch rather than
+trusting the first green result.
+
+### 0.8 Nodes Beacon keeps and CoreScope drops
+
+The one difference `tools/compare_backends.py` still reports, and it is not
+fixable in HopReach: CoreScope ages nodes out of its list, Beacon never
+deletes one. Two repeaters in the run below return HTTP 404 from CoreScope's
+own node endpoint and are still served by Beacon.
+
+This is left as a failure rather than whitelisted. A node present on one side
+and absent on the other is also exactly what a translation bug looks like, and
+the check is worth more catching that than it costs to explain these two.
+
+### 0.9 Re-verified 2026-08-03
+
+Both backends re-run from the same HEAD binary, against the same mesh, after
+re-running the migration:
+
+| | CoreScope | Beacon |
+|---|---|---|
+| repeaters in region | 79 | 81 |
+| active / degraded | **57 / 15** | **57 / 15** |
+| silent | 10 | 8 (+2 nodes CoreScope has deleted, §0.8) |
+| position differences | — | none |
+| activity-status differences | — | none |
+
+Every `/mesh-api/` endpoint the browser calls answered on both
+(`tools/compare_mesh_api.sh`), and the real web app loads against each
+backend's output with zero page errors.
 
 ---
 

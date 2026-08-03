@@ -57,7 +57,7 @@ corescope:
   api_url: https://scotmesh-corescope.mm7roq.compute.oarc.uk
   request_timeout_seconds: 30
 
-  scope_inference:
+  scope_observation:
     # Tags each repeater with its real MeshCore region(s) (inferred_scopes,
     # shown in its map popup alongside the site's own default_scope) —
     # decoded from each packet's own cryptographic transport code (see
@@ -278,14 +278,48 @@ remote_worker:
   # several minutes just fetching tiles before GPU compute even starts.
   job_timeout_seconds: 1800
 
-# ── Alternative data source: MeshCore Beacon ─────────────────────────────────
-# HopReach normally reads a CoreScope instance (see `corescope:` above). A
-# MeshCore Beacon server can be used instead — see
-# docs/BEACON_COMPATIBILITY_PLAN.md for what differs and what to verify first.
+# ── Which observation backend to read ────────────────────────────────────────
+# HopReach reads its mesh from one of two interchangeable backends, behind a
+# single interface: a CoreScope instance (configured under `corescope:` above)
+# or a MeshCore Beacon server (`beacon:` below). Everything downstream — the
+# coverage pipeline, calibration, the map, the simulator, packet replay — goes
+# through that interface and neither knows nor cares which one is answering.
 #
-# Selection is explicit: nothing changes until `enabled: true`, so a
-# half-filled block can't silently swap the data underneath a map.
+# See docs/BEACON_COMPATIBILITY_PLAN.md for the capability matrix: what works
+# on both, and the handful of things Beacon genuinely cannot answer, each with
+# the reason.
+source:
+  # "corescope" (the default, and what every config predating this key runs)
+  # or "beacon". A value that is neither is rejected at startup rather than
+  # silently falling back — a typo here would otherwise swap the data
+  # underneath a map without saying so.
+  type: corescope
+
+  # The complete list of MeshCore regions on this network. Optional, and only
+  # needed when the backend cannot enumerate them itself.
+  #
+  # The region features — per-region coverage rasters, the map's region
+  # filter, per-repeater region tagging — present themselves as the WHOLE set,
+  # so a partial list makes them quietly wrong: a missing region reads as a
+  # region with no repeaters in it. CoreScope keeps a global region list and
+  # can answer, so this is unnecessary there. Beacon's own /scopes is scoped
+  # to observers in the configured IATAs and so is usually a subset, which is
+  # why those features are switched off on Beacon by default. Listing the
+  # regions here supplies what the backend cannot and switches them back on.
+  #
+  # This is enumeration only. Which packets belong to which region is still
+  # decoded from real traffic (Beacon records a packet's scope at ingest from
+  # its transport code), so a region listed here that nobody has been heard on
+  # simply gets no observations — the honest answer rather than an invented
+  # one.
+  # scopes: ["#sco", "#edi", "#fif", "#gla"]
+
+# ── MeshCore Beacon connection details ───────────────────────────────────────
+# Only read when `source.type: beacon`.
 beacon:
+  # Deprecated: set `source.type: beacon` instead. Still honoured when
+  # source.type is unset, so a config written before that key keeps working;
+  # source.type wins if both are set.
   enabled: false
   api_url: "https://beacon.example.org"
 

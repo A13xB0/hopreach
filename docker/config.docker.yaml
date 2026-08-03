@@ -26,6 +26,13 @@ region:
   boundary_url: ""
   required_scope: ""
 
+# Which observation backend to read: "corescope" or "beacon". Both satisfy the
+# same interface, so everything downstream works either way — see
+# config.example.yaml for the full explanation and
+# docs/BEACON_COMPATIBILITY_PLAN.md for what differs between them.
+source:
+  type: corescope
+
 corescope:
   api_url: https://scotmesh-corescope.mm7roq.compute.oarc.uk
   request_timeout_seconds: 30

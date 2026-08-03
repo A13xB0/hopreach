@@ -40,9 +40,17 @@ check "nodes: with position" "sum(1 for n in d['nodes'] if n['lat'])" "/mesh-api
 check "nodes: never-heard null" "sum(1 for n in d['nodes'] if n['last_heard'] is None)" "/mesh-api/api/nodes?limit=5000"
 check "scopes: count"       "len(d['byRegion'])"                    "/mesh-api/api/scope-stats"
 
-SINCE=$(( ($(date +%s) - 3600) * 1000 ))
+# Packet window. The default is deliberately wide: only a backend ingesting
+# live MQTT traffic has anything in the last hour, and a Beacon stood up from
+# migrated data (tools/../cmd/corescope-to-beacon) has none — which reads as
+# "the packets endpoint is broken on Beacon" when it is really "this instance
+# has no traffic that recent". Override with WINDOW_HOURS to narrow it when
+# both instances are genuinely live.
+WINDOW_HOURS="${WINDOW_HOURS:-720}" # 30 days
+SINCE=$(( ($(date +%s) - WINDOW_HOURS * 3600) * 1000 ))
 UNTIL=$(( $(date +%s) * 1000 ))
 W="/mesh-api/api/packets?since=$SINCE&until=$UNTIL&limit=200"
+echo "   (packet window: last ${WINDOW_HOURS}h)"
 check "packets: count"      "len(d['packets'])"                     "$W"
 check "packets: with scope"  "sum(1 for p in d['packets'] if p.get('scope'))" "$W"
 check "packets: with frame_bytes" "sum(1 for p in d['packets'] if p.get('frame_bytes'))" "$W"
@@ -68,16 +76,33 @@ print('obs=%d frame_bytes=%s scope=%r' % (
 say "detail A" "$(detail_of "$A")"
 say "detail B" "$(detail_of "$B")"
 
-# Reach for a node both know about.
-PK=$(curl -s -m 30 "$A/mesh-api/api/nodes?limit=5000" | python3 -c "
-import json,sys
-ns=json.load(sys.stdin)['nodes']
-print(ns[0]['public_key'] if ns else '')" 2>/dev/null)
+# Reach, for a node BOTH instances actually know about.
+#
+# This has to intersect the two node lists rather than take the first node
+# from A. The backends observe overlapping but not identical meshes (a real
+# run here: 480 shared, 48 CoreScope-only, 56 Beacon-only), so asking one of
+# them about a node it has never seen tests the error path, not parity — and
+# both correctly answer that with an error, which the comparison then reports
+# as a failure of the reach endpoint itself.
+curl -s -m 30 "$A/mesh-api/api/nodes?limit=5000" > /tmp/cmp-a.json 2>/dev/null
+curl -s -m 30 "$B/mesh-api/api/nodes?limit=5000" > /tmp/cmp-b.json 2>/dev/null
+PK=$(python3 -c "
+import json
+def keys(p):
+    try:
+        return {n['public_key'] for n in json.load(open(p))['nodes']}
+    except Exception:
+        return set()
+both = sorted(keys('/tmp/cmp-a.json') & keys('/tmp/cmp-b.json'))
+print(both[0] if both else '')" 2>/dev/null)
 if [ -n "$PK" ]; then
   check "reach: links" "len(d['links'])" "/mesh-api/api/nodes/$PK/reach?days=7"
+  check "reach: bidirectional" "sum(1 for l in d['links'] if l['bidir'])" "/mesh-api/api/nodes/$PK/reach?days=7"
+  check "reach: both directions counted" "sum(1 for l in d['links'] if l['we_hear'] and l['they_hear'])" "/mesh-api/api/nodes/$PK/reach?days=7"
 else
-  say "reach" "SKIP (no nodes)"
+  say "reach" "SKIP (the two instances share no nodes)"
 fi
+rm -f /tmp/cmp-a.json /tmp/cmp-b.json
 
 echo
 if [ "$FAIL" -ne 0 ]; then

@@ -60,31 +60,44 @@ func nodeTypeFor(role string) int {
 
 // writeScopes seeds transport_scopes, deriving each region's key the same way
 // the firmware does: sha256(name)[:16], public by construction.
-func (m *migration) writeScopes(ctx context.Context) (map[string]int, error) {
+//
+// Returns each scope name mapped to a SQL expression that yields its id, not
+// an id. The ids are the sequence's to assign, because this script has to be
+// safe to run twice.
+//
+// It used to number scopes by their position in FetchScopes' result and write
+// that id literally, guarded by ON CONFLICT (name) DO NOTHING. That is fine on
+// an empty database and quietly destructive on a re-run: the mesh gains or
+// loses a region between runs, every later scope shifts by one, and the insert
+// now collides on the PRIMARY KEY — which the name conflict target does not
+// catch. One unhandled error aborts the surrounding transaction, so psql
+// discards the entire migration and leaves the previous, now stale, data in
+// place. The database looks populated and is silently out of date, which is
+// exactly the kind of thing a backend-parity comparison then blames on the
+// backend.
+func (m *migration) writeScopes(ctx context.Context) (map[string]string, error) {
 	names, err := m.src.FetchScopes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ids := make(map[string]int, len(names))
+	refs := make(map[string]string, len(names))
 	m.w.printf("-- transport scopes\n")
-	for i, name := range names {
+	for _, name := range names {
 		if name == "" {
 			continue
 		}
 		digest := sha256.Sum256([]byte(name))
 		key := hex.EncodeToString(digest[:16])
 		fp := hex.EncodeToString(digest[:4])
-		id := i + 1
-		ids[name] = id
+		refs[name] = fmt.Sprintf("(SELECT id FROM transport_scopes WHERE name = %s)", quote(name))
 		m.w.printf(
-			"INSERT INTO transport_scopes (id, name, display_name, transport_key, key_fingerprint) "+
-				"VALUES (%d, %s, %s, %s, %s) ON CONFLICT (name) DO NOTHING;\n",
-			id, quote(name), quote(strings.TrimPrefix(name, "#")), hexLit(key), hexLit(fp))
+			"INSERT INTO transport_scopes (name, display_name, transport_key, key_fingerprint) "+
+				"VALUES (%s, %s, %s, %s) ON CONFLICT (name) DO NOTHING;\n",
+			quote(name), quote(strings.TrimPrefix(name, "#")), hexLit(key), hexLit(fp))
 		m.stats.scopes++
 	}
-	m.w.printf("SELECT setval(pg_get_serial_sequence('transport_scopes','id'), " +
-		"GREATEST((SELECT COALESCE(MAX(id),0) FROM transport_scopes), 1));\n\n")
-	return ids, nil
+	m.w.printf("\n")
+	return refs, nil
 }
 
 // nodeRef is what later phases need to reference a node they have written.
@@ -98,7 +111,7 @@ type nodeRef struct {
 //
 // The UUID is derived from the public key rather than generated, so re-running
 // the migration produces the same rows instead of a second copy of the mesh.
-func (m *migration) writeNodes(nodes []meshsource.Node, scopeIDs map[string]int) map[string]nodeRef {
+func (m *migration) writeNodes(nodes []meshsource.Node, scopeRefs map[string]string) map[string]nodeRef {
 	byKey := make(map[string]nodeRef, len(nodes))
 	m.w.printf("-- nodes\n")
 	for _, n := range nodes {
@@ -110,19 +123,37 @@ func (m *migration) writeNodes(nodes []meshsource.Node, scopeIDs map[string]int)
 		byKey[pk] = nodeRef{pubkey: pk, iata: iata}
 
 		scope := "NULL"
-		if id, ok := scopeIDs[n.DefaultScope]; ok {
-			scope = fmt.Sprint(id)
+		if ref, ok := scopeRefs[n.DefaultScope]; ok {
+			scope = ref
 		}
 		locSource := "NULL"
 		if n.Lat != nil && n.Lon != nil {
 			locSource = quote("advert")
 		}
 
+		// DO UPDATE, not DO NOTHING. A node's identity is its public key, but
+		// its name, position and last_heard are all mutable, and re-running
+		// this migration is how the Beacon copy is brought back up to date
+		// with CoreScope. DO NOTHING froze every one of those at whatever the
+		// FIRST migration saw: a repeater that had moved kept its old
+		// coordinates, and last_heard stayed hours or days behind, which the
+		// map then rendered as silent repeaters that are in fact live. That
+		// looked like a Beacon fidelity problem and was really this line.
+		//
+		// first_seen keeps the earliest of the two, since that is what it
+		// means; everything else takes the newer observation.
 		m.w.printf(
 			"INSERT INTO nodes (id, public_key, node_type, name, latitude, longitude, "+
 				"location_source, last_advert_at, default_scope_id, first_seen, last_seen) "+
 				"VALUES (%s, %s, %d, %s, %s, %s, %s, %s, %s, %s, %s) "+
-				"ON CONFLICT (public_key) DO NOTHING;\n",
+				"ON CONFLICT (public_key) DO UPDATE SET "+
+				"node_type = EXCLUDED.node_type, name = EXCLUDED.name, "+
+				"latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude, "+
+				"location_source = EXCLUDED.location_source, "+
+				"last_advert_at = EXCLUDED.last_advert_at, "+
+				"default_scope_id = EXCLUDED.default_scope_id, "+
+				"first_seen = LEAST(nodes.first_seen, EXCLUDED.first_seen), "+
+				"last_seen = GREATEST(nodes.last_seen, EXCLUDED.last_seen);\n",
 			uuidFor(pk), hexLit(pk), nodeTypeFor(n.Role), nullableText(n.Name),
 			nullableFloat(n.Lat), nullableFloat(n.Lon), locSource,
 			tsOrNull(n.LastHeard), scope,
@@ -130,7 +161,10 @@ func (m *migration) writeNodes(nodes []meshsource.Node, scopeIDs map[string]int)
 
 		m.w.printf(
 			"INSERT INTO node_iatas (node_id, iata, first_heard, last_heard, observation_count) "+
-				"VALUES (%s, %s, %s, %s, %d) ON CONFLICT DO NOTHING;\n",
+				"VALUES (%s, %s, %s, %s, %d) ON CONFLICT (node_id, iata) DO UPDATE SET "+
+				"first_heard = LEAST(node_iatas.first_heard, EXCLUDED.first_heard), "+
+				"last_heard = GREATEST(node_iatas.last_heard, EXCLUDED.last_heard), "+
+				"observation_count = EXCLUDED.observation_count;\n",
 			uuidFor(pk), quote(iata), tsOrNow(n.FirstSeen), tsOrNow(n.LastHeard),
 			n.RelayCount24h)
 
