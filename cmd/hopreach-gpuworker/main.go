@@ -236,6 +236,21 @@ func main() {
 	}
 	log.Printf("gpuworker: GPU ready (%s)", be.AdapterID)
 
+	// Sweep scratch files orphaned by a previous process that died before
+	// its deferred grid.Close could run. Restart=on-failure means a panic or
+	// an OOM kill is followed by a fresh start within seconds, so this is
+	// the point at which those files are reliably reclaimable.
+	//
+	// Satisfies CleanStaleScratch's caller contract: no job can be running
+	// yet — this is before the first broker connection is even dialled, and
+	// jobs only arrive over that connection.
+	//
+	// Without this the worker had no cleanup path at all for crash-orphaned
+	// grids: they accumulated to 101 files and 29GB, filled the root
+	// filesystem, and then every single job failed on "no space left on
+	// device" until someone deleted them by hand.
+	demgrid.CleanStaleScratch(cacheDir)
+
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
 	for {
