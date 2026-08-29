@@ -26,6 +26,13 @@ map:
   center_lon: -4.2
   zoom: 6
 
+  # CARTO's raster basemaps (the Dark base layer and its label/road
+  # overlays) require an API key; without one every tile carries an
+  # "API KEY REQUIRED" watermark. Get a free key (5M tiles/month) at
+  # https://carto.com/basemaps/apikey. The CARTO_API_KEY environment
+  # variable overrides this value - see docker-compose.yml.
+  # carto_api_key: ""
+
 region:
   # Cosmetic label shown in meta.json's "boundary" field. Empty (default)
   # describes the built-in Scotland boundary; set this when you also set

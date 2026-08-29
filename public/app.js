@@ -72,7 +72,7 @@
   map.createPane("labels");
   map.getPane("labels").style.zIndex = 450;
   map.getPane("labels").style.pointerEvents = "none";
-  const darkLabels = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png", {
+  const darkLabels = L.tileLayer(HopReachCartoTiles.withKey("https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png", cfg.cartoApiKey || ""), {
     pane: "labels",
     maxZoom: 19,
   });

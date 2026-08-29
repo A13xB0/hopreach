@@ -70,6 +70,14 @@ type MapConfig struct {
 	CenterLat float64 `yaml:"center_lat"`
 	CenterLon float64 `yaml:"center_lon"`
 	Zoom      int     `yaml:"zoom"`
+
+	// CartoAPIKey unlocks CARTO's raster basemaps - the Dark base layer
+	// and its label/road overlays - which serve an "API KEY REQUIRED"
+	// watermark tile without one. Free from carto.com/basemaps/apikey.
+	// The CARTO_API_KEY environment variable overrides this at container
+	// startup, so docker-compose users never need a config.yaml just for
+	// the key. Empty falls back to anonymous (watermarked) tiles.
+	CartoAPIKey string `yaml:"carto_api_key"`
 }
 
 // RegionConfig scopes which repeaters are included — both a geographic
