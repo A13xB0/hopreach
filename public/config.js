@@ -15,6 +15,10 @@ window.HOPREACH_CONFIG = {
   // the upstream tile host. In the container this is always "/dem-tiles".
   demTileURLBase: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium",
   corescopeUrl: "https://scotmesh-corescope.mm7roq.compute.oarc.uk",
+  // CARTO raster basemaps carry an "API KEY REQUIRED" watermark without a
+  // key. In the container this is filled from config.yaml's
+  // map.carto_api_key or the CARTO_API_KEY environment variable.
+  cartoApiKey: "",
   propagation: {
     frequencyMhz: 868,
     txPowerDbm: 22,

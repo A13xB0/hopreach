@@ -52,6 +52,10 @@ type jsConfig struct {
 	MetaURL        string    `json:"metaUrl"`
 	DemZoom        int       `json:"demZoom"`
 	DemTileURLBase string    `json:"demTileURLBase"`
+	// CARTO's raster basemaps (the Dark base layer and its label/road
+	// overlays) require an API key; without one every tile carries an
+	// "API KEY REQUIRED" watermark. Empty means anonymous tiles.
+	CartoApiKey string `json:"cartoApiKey"`
 	// The real CoreScope instance this deployment pulls repeater/reach data
 	// from — exposed so the frontend can link out to it (e.g. "Replay a
 	// real CoreScope packet"'s own description) rather than hardcoding one
@@ -85,6 +89,14 @@ func writeConfigJS(yc yconfig.Config) error {
 	// never the upstream tile host directly — see terrain.js for why
 	// (CORS/canvas).
 	c.DemTileURLBase = "/dem-tiles"
+	// The environment wins over config.yaml for this one value because a
+	// tile key is deployment identity, not pipeline configuration - the
+	// docker-compose file passes CARTO_API_KEY straight through so an
+	// operator never has to maintain a config.yaml override just for it.
+	c.CartoApiKey = yc.Map.CartoAPIKey
+	if v := os.Getenv("CARTO_API_KEY"); v != "" {
+		c.CartoApiKey = v
+	}
 	c.CorescopeURL = yc.CoreScope.APIURL
 	c.Propagation.FrequencyMhz = yc.Propagation.FrequencyMHz
 	c.Propagation.TxPowerDbm = yc.Propagation.TxPowerDBm

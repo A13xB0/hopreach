@@ -94,6 +94,30 @@ Open `http://localhost:8080`. No GPU required, no API keys, no accounts.
 
 ---
 
+
+### CARTO basemap API key
+
+The default Dark basemap (and its label/road overlays) comes from CARTO,
+whose raster tiles now require an API key - without one, every tile is
+served with an "API KEY REQUIRED" watermark. The other basemaps (OSM
+Streets, Esri Satellite, OpenTopoMap Terrain) need no key.
+
+1. Get a free key at <https://carto.com/basemaps/apikey> - the free tier
+   covers 5,000,000 tile requests a month, counted across raster and
+   vector, which is far beyond what one deployment serves.
+2. Put it in a `.env` file next to `docker-compose.yml`:
+
+   ```
+   CARTO_API_KEY=your-key-here
+   ```
+
+   or set `map.carto_api_key` in your `config.yaml` - the environment
+   variable wins if both are set.
+3. `docker compose up -d` again. The key only ever rides CARTO tile URLs.
+
+Keep the CARTO and OpenStreetMap attribution visible on the map - that is
+the condition of the free tier, and HopReach shows it by default.
+
 ## What you can do with it
 
 ### See real coverage

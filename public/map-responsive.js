@@ -60,12 +60,16 @@
     }
   }
 
+  // CARTO's raster tiles want the deployment's API key on the URL - see
+  // carto-tiles.js. Read once; every CARTO layer in this file shares it.
+  const CARTO_KEY = (window.HOPREACH_CONFIG || {}).cartoApiKey || "";
+
   const baseLayers = {
     // _nolabels (not _all): place names/roads are drawn separately, in the
     // "labels" pane below, which sits *above* the coverage overlay — see
     // that pane's setup further down. Using _all here as well as the
     // separate labels layer would just double the text up.
-    "Dark": L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
+    "Dark": L.tileLayer(HopReachCartoTiles.withKey("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", CARTO_KEY), {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
       maxZoom: 19,
     }),
@@ -292,7 +296,7 @@
 
 
 
-  const darkRoads = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
+  const darkRoads = L.tileLayer(HopReachCartoTiles.withKey("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", CARTO_KEY), {
     pane: "roads",
     maxZoom: 19,
   });

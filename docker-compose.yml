@@ -5,6 +5,14 @@ services:
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-8080}:80"
+    environment:
+      # CARTO's raster basemaps (the Dark base layer and its labels/roads
+      # overlays) require an API key - without one every tile carries an
+      # "API KEY REQUIRED" watermark. Get a free key (5M tiles/month) at
+      # https://carto.com/basemaps/apikey and put it in a .env file next to
+      # this compose file, or export it in the shell:
+      #   CARTO_API_KEY=your-key-here
+      - CARTO_API_KEY=${CARTO_API_KEY:-}
     volumes:
       - hopreach-data:/usr/share/nginx/html/data
       # The run history, memory samples and hardware records behind the
