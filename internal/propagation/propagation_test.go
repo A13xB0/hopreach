@@ -172,7 +172,7 @@ func TestPathMarginBeyondRadioHorizonDoesNotClose(t *testing.T) {
 	grid := flatGrid{elevM: 0}
 	txLat, txLon := 0.0, 0.0
 
-	const horizonKm = 11.65 // 4.12 * (sqrt(2) + sqrt(2))
+	const horizonKm = 11.65   // 4.12 * (sqrt(2) + sqrt(2))
 	rxLat, rxLon := 0.0, 0.36 // ~40km east at the equator, > 3x the horizon
 	d := HaversineKm(txLat, txLon, rxLat, rxLon)
 	if d < 3*horizonKm {
