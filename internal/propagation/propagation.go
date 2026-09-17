@@ -137,8 +137,8 @@ func PathMargin(grid Grid, p Params, txLat, txLon, txHeightM, rxLat, rxLon, dist
 		d2M := distanceM - d1M
 
 		terrainM := grid.At(lat, lon)
-		curvatureDropM := (d1M * d2M) / (2 * refractionK * earthRadiusM)
-		effectiveTerrainM := terrainM - curvatureDropM
+		earthBulgeM := (d1M * d2M) / (2 * refractionK * earthRadiusM)
+		effectiveTerrainM := terrainM + earthBulgeM
 
 		directLineM := txHeightM + (rxHeightASL-txHeightM)*frac
 		obstructionM := effectiveTerrainM - directLineM

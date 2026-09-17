@@ -880,8 +880,8 @@ fn path_margin(tx_lat: f32, tx_lon: f32, tx_height_m: f32, rx_lat: f32, rx_lon: 
 		let d2m = distance_m - d1m;
 
 		let terrain_m = dem_at(lat, lon);
-		let curvature_drop_m = (d1m * d2m) / (2.0 * REFRACTION_K * EARTH_RADIUS_M);
-		let effective_terrain_m = terrain_m - curvature_drop_m;
+		let earth_bulge_m = (d1m * d2m) / (2.0 * REFRACTION_K * EARTH_RADIUS_M);
+		let effective_terrain_m = terrain_m + earth_bulge_m;
 
 		let direct_line_m = tx_height_m + (rx_height_asl - tx_height_m) * frac;
 		let obstruction_m = effective_terrain_m - direct_line_m;

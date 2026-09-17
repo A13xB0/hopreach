@@ -155,6 +155,36 @@ func TestPathMarginMonotonicWithDistance(t *testing.T) {
 	}
 }
 
+// TestPathMarginBeyondRadioHorizonDoesNotClose pins the sign of the earth-
+// curvature correction. The smooth-earth radio horizon for two h-metre
+// antennas is d_km = 4.12*(sqrt(h1)+sqrt(h2)) — a textbook quantity external
+// to this codebase, so this test can't drift along with a future regression
+// in the same direction as the bug it guards against. Well beyond that
+// horizon, the earth's bulge must obstruct the path; a flipped sign instead
+// sinks distant terrain away from the ray, so the link would incorrectly
+// keep closing no matter how far apart the antennas are.
+func TestPathMarginBeyondRadioHorizonDoesNotClose(t *testing.T) {
+	p := Params{
+		FrequencyMHz: 868, TxPowerDBm: 22, TxAntennaGainDB: 3, RxAntennaGainDB: 0,
+		RxSensitivityDB: -124, FadeMarginDB: 20, RxHeightM: 2,
+	}
+	txHeightM := 2.0
+	grid := flatGrid{elevM: 0}
+	txLat, txLon := 0.0, 0.0
+
+	const horizonKm = 11.65   // 4.12 * (sqrt(2) + sqrt(2))
+	rxLat, rxLon := 0.0, 0.36 // ~40km east at the equator, > 3x the horizon
+	d := HaversineKm(txLat, txLon, rxLat, rxLon)
+	if d < 3*horizonKm {
+		t.Fatalf("test geometry (%.1fkm) must be well beyond the radio horizon (%.1fkm)", d, horizonKm)
+	}
+
+	margin := PathMargin(grid, p, txLat, txLon, txHeightM, rxLat, rxLon, d)
+	if margin > 0 {
+		t.Errorf("PathMargin at %.1fkm (>3x the %.1fkm radio horizon) = %v dB, want <= 0 (link cannot close over the horizon)", d, horizonKm, margin)
+	}
+}
+
 func TestComputeMarginsCPUShape(t *testing.T) {
 	p := Params{
 		FrequencyMHz: 868, TxPowerDBm: 22, TxAntennaGainDB: 3, RxAntennaGainDB: 0,
