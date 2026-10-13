@@ -30,7 +30,7 @@ type discoveryDoc struct {
 	Name     string `json:"name"`
 	Subtitle string `json:"subtitle"`
 	HomeURL  string `json:"home_url,omitempty"`
-	Backend  string `json:"backend"`
+	Backend  string `json:"backend,omitempty"`
 	Map      struct {
 		Center []float64 `json:"center"`
 		Zoom   int       `json:"zoom"`
@@ -46,10 +46,13 @@ func buildDiscovery(yc yconfig.Config) discoveryDoc {
 		Name:     yc.Site.Name,
 		Subtitle: yc.Site.Subtitle,
 		HomeURL:  yc.Site.HomeURL,
-		Backend:  yc.Source.Type,
 	}
-	if d.Backend == "" {
-		d.Backend = "corescope" // see config.SourceConfig.Type
+	// The same resolution the pipeline uses to pick a backend (default,
+	// deprecated beacon.enabled alias, case). An unknown source.type is
+	// left out rather than guessed — that config won't run a pipeline
+	// anyway.
+	if backend, err := yc.Resolve(); err == nil {
+		d.Backend = backend
 	}
 	d.Map.Center = []float64{yc.Map.CenterLat, yc.Map.CenterLon}
 	d.Map.Zoom = yc.Map.Zoom

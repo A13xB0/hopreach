@@ -9,7 +9,7 @@
    order alone.
    ====================================================================== */
 .leaflet-container .leaflet-control-attribution {
-  background: color-mix(in srgb, var(--card-bg) 85%, transparent);
+  background: rgba(13, 33, 55, 0.85); background: color-mix(in srgb, var(--card-bg) 85%, transparent);
   color: var(--text-muted);
   border: 1px solid var(--border);
   border-right: none;
@@ -54,7 +54,7 @@
 .leaflet-container .leaflet-bar {
   background: var(--card-bg);
   border: 1px solid var(--border);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow-ink) 40%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow-ink) 40%, transparent);
 }
 .leaflet-container .leaflet-bar a,
 .leaflet-container .leaflet-bar a:hover {
@@ -90,7 +90,7 @@
   border-radius: 8px;
   border: 1px solid var(--border);
   border-left-width: 3px;
-  background: color-mix(in srgb, var(--overlay-ink) 3%, transparent);
+  background: rgba(255, 255, 255, 0.03); background: color-mix(in srgb, var(--overlay-ink) 3%, transparent);
   font-size: 0.72rem;
 }
 .plan-route-check.hidden { display: none; }

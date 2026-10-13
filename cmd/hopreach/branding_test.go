@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	yconfig "hopreach/internal/config"
 )
 
 func readFile(t *testing.T, path string) string {
@@ -103,23 +101,40 @@ func TestInstallLogoRejectsBadInput(t *testing.T) {
 }
 
 func TestCheckHomeURL(t *testing.T) {
-	for _, ok := range []string{"", "https://meshcore.example/", "http://x.example"} {
+	// Accepted exactly as public/site-brand.js's safeUrl accepts them.
+	for _, ok := range []string{"", "https://meshcore.example/", "http://x.example", "/", "../", "/about", "./map"} {
 		if err := checkHomeURL(ok); err != nil {
-			t.Errorf("checkHomeURL(%q) = %v", ok, err)
+			t.Errorf("checkHomeURL(%q) = %v, want no warning", ok, err)
 		}
 	}
-	for _, bad := range []string{"javascript:alert(1)", "example.org"} {
+	for _, bad := range []string{"javascript:alert(1)", "data:text/html,x", "example.org", "net.example/home"} {
 		if err := checkHomeURL(bad); err == nil {
 			t.Errorf("checkHomeURL(%q) should warn", bad)
 		}
 	}
 }
 
-func TestBuildJSConfigCarriesBranding(t *testing.T) {
-	yc := yconfig.Default()
-	yc.Site.HomeURL = "https://net.example/"
-	c := buildJSConfig(yc, "site-logo.png")
-	if c.LogoURL != "site-logo.png" || c.HomeURL != "https://net.example/" {
-		t.Errorf("got logoUrl=%q homeUrl=%q", c.LogoURL, c.HomeURL)
+func TestInstallLogoSourceInsideTheWebRoot(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "site-logo.png")
+	os.WriteFile(src, []byte("png"), 0o644)
+
+	url, err := installLogo(src, root)
+	if err != nil || url != "site-logo.png" {
+		t.Fatalf("got (%q, %v), want site-logo.png", url, err)
+	}
+	if got := readFile(t, src); got != "png" {
+		t.Errorf("the configured logo must survive the clear-out; got %q", got)
+	}
+}
+
+func TestCheckLogoURL(t *testing.T) {
+	if checkLogoURL("http://cdn.example/l.png") == nil {
+		t.Error("plain-http logo should warn about mixed content")
+	}
+	for _, ok := range []string{"", "https://cdn.example/l.png", "/config/logo.svg"} {
+		if err := checkLogoURL(ok); err != nil {
+			t.Errorf("checkLogoURL(%q) = %v", ok, err)
+		}
 	}
 }

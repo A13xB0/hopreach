@@ -45,11 +45,30 @@ func TestWriteDiscoveryIdentifiesTheInstance(t *testing.T) {
 	}
 }
 
-func TestDiscoveryDefaultsBackendAndOmitsEmptyHomeURL(t *testing.T) {
-	d := buildDiscovery(yconfig.Default())
-	if d.Backend != "corescope" {
-		t.Errorf("backend = %q, want corescope (the unset default)", d.Backend)
+// The manifest must name the backend the pipeline actually runs, so it
+// goes through config.Resolve rather than reading source.type raw.
+func TestDiscoveryBackendMatchesResolve(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*yconfig.Config)
+		want   string
+	}{
+		{"unset defaults to corescope", func(c *yconfig.Config) {}, "corescope"},
+		{"deprecated beacon.enabled alias", func(c *yconfig.Config) { c.Beacon.Enabled = true }, "beacon"},
+		{"case and whitespace normalised", func(c *yconfig.Config) { c.Source.Type = " Beacon " }, "beacon"},
+		{"unknown type is omitted, not guessed", func(c *yconfig.Config) { c.Source.Type = "mystery" }, ""},
 	}
+	for _, tc := range cases {
+		yc := yconfig.Default()
+		tc.mutate(&yc)
+		if got := buildDiscovery(yc).Backend; got != tc.want {
+			t.Errorf("%s: backend = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDiscoveryOmitsEmptyHomeURL(t *testing.T) {
+	d := buildDiscovery(yconfig.Default())
 	raw, _ := json.Marshal(d)
 	var m map[string]any
 	json.Unmarshal(raw, &m)

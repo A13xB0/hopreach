@@ -45,23 +45,19 @@ func installTheme(themePath, root string) error {
 // http(s) URL is used as-is; a local file is copied to root/site-logo.<ext>.
 // Returns "" (no logo) when unset or unusable.
 func installLogo(logo, root string) (string, error) {
-	// Clear any logo from a previous start, whatever its extension.
-	old, _ := filepath.Glob(filepath.Join(root, "site-logo.*"))
-	for _, f := range old {
-		os.Remove(f)
-	}
-	if logo == "" {
-		return "", nil
-	}
-	lower := strings.ToLower(logo)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+	if logo == "" || isHTTPURL(logo) {
+		clearLogos(root)
 		return logo, nil
 	}
 	ext := strings.ToLower(filepath.Ext(logo))
 	if !logoExts[ext] {
+		clearLogos(root)
 		return "", fmt.Errorf("site.logo: %q is not an http(s) URL or a .svg/.png/.jpg/.jpeg/.webp/.gif file", logo)
 	}
+	// Read before clearing: the configured file may itself be one of the
+	// site-logo.* files the clear would remove.
 	img, err := os.ReadFile(logo)
+	clearLogos(root)
 	if err != nil {
 		return "", fmt.Errorf("site.logo: %w", err)
 	}
@@ -72,15 +68,50 @@ func installLogo(logo, root string) (string, error) {
 	return name, nil
 }
 
-// checkHomeURL reports a site.home_url the page will refuse to link to
-// (public/site-brand.js keeps http(s) and relative URLs only).
-func checkHomeURL(u string) error {
-	if u == "" {
-		return nil
+// clearLogos removes any logo a previous start installed, whatever its
+// extension.
+func clearLogos(root string) {
+	old, _ := filepath.Glob(filepath.Join(root, "site-logo.*"))
+	for _, f := range old {
+		os.Remove(f)
 	}
+}
+
+func isHTTPURL(u string) bool {
 	lower := strings.ToLower(u)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+// checkLogoURL reports a plain-http logo URL: on an https deployment the
+// browser blocks or upgrades it as mixed content, so it may not show.
+func checkLogoURL(logo string) error {
+	if strings.HasPrefix(strings.ToLower(logo), "http://") {
+		return fmt.Errorf("site.logo: %q is plain http; on an https site the browser may block it as mixed content — prefer https", logo)
+	}
+	return nil
+}
+
+// checkHomeURL reports a site.home_url the page will refuse to link to.
+// Mirrors safeUrl in public/site-brand.js: http(s) URLs and relative
+// paths are kept; anything else with a scheme (javascript:, data:, …) is
+// dropped.
+func checkHomeURL(u string) error {
+	t := strings.TrimSpace(u)
+	if t == "" || isHTTPURL(t) {
 		return nil
 	}
-	return fmt.Errorf("site.home_url: %q is not an http(s) URL; the header will not link to it", u)
+	colon, slash := strings.Index(t, ":"), strings.Index(t, "/")
+	if colon < 0 || (slash >= 0 && slash < colon) {
+		// A relative path — linked as-is. "example.org/x" is one too, but
+		// almost certainly meant https://example.org/x, so say so.
+		first := t
+		if slash >= 0 {
+			first = t[:slash]
+		}
+		if strings.Contains(first, ".") && first != "." && first != ".." {
+			return fmt.Errorf("site.home_url: %q looks like a domain without https://; it will be linked as a path on this site", u)
+		}
+		return nil
+	}
+	return fmt.Errorf("site.home_url: %q is not an http(s) URL or a relative path; the header will not link to it", u)
 }

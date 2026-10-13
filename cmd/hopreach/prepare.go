@@ -39,6 +39,9 @@ func runPrepare(yc yconfig.Config, configPath string) error {
 	if err := installTheme(yc.Site.ThemeCSS, webRoot); err != nil {
 		log.Printf("hopreach: -prepare: WARNING: %v — starting with the built-in theme", err)
 	}
+	if err := checkLogoURL(yc.Site.Logo); err != nil {
+		log.Printf("hopreach: -prepare: WARNING: %v", err)
+	}
 	if err := checkHomeURL(yc.Site.HomeURL); err != nil {
 		log.Printf("hopreach: -prepare: WARNING: %v", err)
 	}
