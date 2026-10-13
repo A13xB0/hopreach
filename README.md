@@ -250,6 +250,8 @@ site:
   theme_css: /config/theme.css
   logo: /config/logo.svg              # or an https:// URL
   home_url: https://your-network.example/   # logo and title link back here
+  name: Repeater Coverage
+  subtitle: ""                        # no subtitle line: title centres on the logo
 ```
 
 The theme loads after every other stylesheet, on both the map and the

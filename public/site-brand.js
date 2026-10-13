@@ -44,7 +44,11 @@
       var h1 = doc.getElementById("site-title");
       var sub = doc.getElementById("site-subtitle");
       if (h1) h1.textContent = b.title;
-      if (sub) sub.textContent = b.subtitle;
+      if (sub) {
+        // No subtitle: drop the line so the title centres on the logo.
+        sub.textContent = b.subtitle;
+        sub.hidden = !b.subtitle;
+      }
       if (b.title) doc.title = b.title;
     }
     var logo = doc.getElementById("site-logo");

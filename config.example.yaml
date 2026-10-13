@@ -15,6 +15,7 @@ output_dir: public/data
 
 site:
   name: HopReach Coverage
+  # Set to "" to drop the subtitle line; the title then centres on the logo.
   subtitle: MeshCore repeater map, refreshed daily
   # A repeater is "active" if last heard within this many hours, "degraded"
   # if within degraded_hours, otherwise "silent".

@@ -63,3 +63,11 @@ test("applyBrand never puts an unsafe URL into the page", () => {
   assert.equal(doc.els["site-logo"].hidden, true);
   assert.equal(doc.els["site-brand"].href, undefined);
 });
+
+test("applyBrand hides an empty subtitle, and shows a set one", () => {
+  const doc = stubDoc(["site-title", "site-subtitle"]);
+  B.applyBrand(doc, { siteName: "Repeater Coverage", siteSubtitle: "" }, { title: true });
+  assert.equal(doc.els["site-subtitle"].hidden, true);
+  B.applyBrand(doc, { siteName: "Net", siteSubtitle: "Sub" }, { title: true });
+  assert.equal(doc.els["site-subtitle"].hidden, false);
+});

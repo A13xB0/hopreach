@@ -107,6 +107,23 @@ gpu:
 	}
 }
 
+// An explicitly empty site.subtitle must win over the default — that is
+// how a deployment drops the subtitle line from the header.
+func TestLoadExplicitEmptySubtitle(t *testing.T) {
+	t.Setenv(EnvVar, "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("site:\n  subtitle: \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Site.Subtitle != "" {
+		t.Errorf("Site.Subtitle = %q, want empty", cfg.Site.Subtitle)
+	}
+}
+
 func TestLoadEnvVarPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "from-env.yaml")
