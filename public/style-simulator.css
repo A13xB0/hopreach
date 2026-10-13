@@ -58,7 +58,7 @@
 #sim-bottleneck-replay-section.hidden { display: none; }
 
 .sim-checklist-row { cursor: pointer; }
-.sim-checklist-row:hover { background: rgba(255,255,255,0.08); }
+.sim-checklist-row:hover { background: rgba(255, 255, 255, 0.08); background: color-mix(in srgb, var(--overlay-ink) 8%, transparent); }
 .sim-checklist-row.sim-checklist-yes { border-left: 3px solid #4ade80; }
 .sim-checklist-row.sim-checklist-no { border-left: 3px solid #f87171; }
 .sim-checklist-row.sim-checklist-origin { border-left: 3px solid #a855f7; }
@@ -71,7 +71,7 @@
 }
 
 .sim-message-row { cursor: pointer; }
-.sim-message-row:hover { background: rgba(255,255,255,0.08); }
+.sim-message-row:hover { background: rgba(255, 255, 255, 0.08); background: color-mix(in srgb, var(--overlay-ink) 8%, transparent); }
 .sim-message-row-selected {
   background: rgba(74,222,128,0.12) !important;
   border-left: 3px solid #4ade80;
@@ -84,7 +84,7 @@
    needs a legend to decode and doesn't survive being read aloud or pasted
    into a message. */
 .sim-policy-profile-row { cursor: pointer; }
-.sim-policy-profile-row:hover { background: rgba(255,255,255,0.08); }
+.sim-policy-profile-row:hover { background: rgba(255, 255, 255, 0.08); background: color-mix(in srgb, var(--overlay-ink) 8%, transparent); }
 .sim-policy-profile-chevron { margin-left: auto; opacity: 0.6; }
 .sim-policy-profile-detail-approx {
   font-style: italic;
@@ -247,7 +247,7 @@
   background: var(--bg);
 }
 .sim-rankings-table th.sim-rank-sorted { color: var(--accent); }
-.sim-rankings-table tbody tr:hover { background: rgba(255,255,255,0.05); }
+.sim-rankings-table tbody tr:hover { background: rgba(255, 255, 255, 0.05); background: color-mix(in srgb, var(--overlay-ink) 5%, transparent); }
 .sim-rankings-table td.sim-rank-good { color: #4ade80; }
 .sim-rankings-table td.sim-rank-bad { color: #f87171; }
 
@@ -306,7 +306,7 @@
   position: fixed;
   inset: 0;
   z-index: 4000;
-  background: rgba(0,0,0,0.55);
+  background: rgba(0, 0, 0, 0.55); background: color-mix(in srgb, var(--shadow-ink) 55%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -318,7 +318,7 @@
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); box-shadow: 0 8px 32px color-mix(in srgb, var(--shadow-ink) 50%, transparent);
   width: min(560px, 100%);
   max-height: 85vh;
   display: flex;
@@ -374,7 +374,7 @@
   gap: 0.35rem;
   margin-bottom: 0.6rem;
   padding: 0.4rem 0.5rem;
-  background: rgba(255,255,255,0.04);
+  background: rgba(255, 255, 255, 0.04); background: color-mix(in srgb, var(--overlay-ink) 4%, transparent);
   border-radius: 6px;
 }
 .sim-bulk-apply-label { font-size: 0.7rem; color: var(--text-muted); flex-shrink: 0; }

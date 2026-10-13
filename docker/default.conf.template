@@ -64,6 +64,18 @@ server {
         add_header    Cache-Control "no-cache";
     }
 
+    # Discovery manifest written by `hopreach -prepare` (cmd/hopreach's
+    # discovery.go): what this instance is, so HopReach deployments can be
+    # found and confirmed. Public by design, holds nothing the page doesn't
+    # already show. CORS-open so a directory page elsewhere can read it from
+    # a browser; no-cache because the version changes on every upgrade.
+    location = /.well-known/hopreach.json {
+        root          /usr/share/nginx/html;
+        default_type  application/json;
+        add_header    Access-Control-Allow-Origin "*";
+        add_header    Cache-Control "no-cache";
+    }
+
     error_page   500 502 503 504  /50x.html;
     location = /50x.html {
         root   /usr/share/nginx/html;

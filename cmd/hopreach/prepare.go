@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"text/template"
 
@@ -26,8 +27,28 @@ const (
 // holds these values. configPath is embedded in the cron file so the cron
 // daemon's child processes (which don't inherit the container's own
 // environment) know where to find it.
+//
+// Branding (theme, logo, home link) and the discovery manifest are
+// cosmetic: a problem with them is logged and the site starts with the
+// built-in look, rather than a typo in a logo path taking the map down.
 func runPrepare(yc yconfig.Config, configPath string) error {
-	if err := writeConfigJS(yc); err != nil {
+	logoURL, err := installLogo(yc.Site.Logo, webRoot)
+	if err != nil {
+		log.Printf("hopreach: -prepare: WARNING: %v — starting without a logo", err)
+	}
+	if err := installTheme(yc.Site.ThemeCSS, webRoot); err != nil {
+		log.Printf("hopreach: -prepare: WARNING: %v — starting with the built-in theme", err)
+	}
+	if err := checkLogoURL(yc.Site.Logo); err != nil {
+		log.Printf("hopreach: -prepare: WARNING: %v", err)
+	}
+	if err := checkHomeURL(yc.Site.HomeURL); err != nil {
+		log.Printf("hopreach: -prepare: WARNING: %v", err)
+	}
+	if err := writeDiscovery(yc, webRoot); err != nil {
+		log.Printf("hopreach: -prepare: WARNING: %s: %v", discoveryPath, err)
+	}
+	if err := writeConfigJS(buildJSConfig(yc, logoURL)); err != nil {
 		return fmt.Errorf("config.js: %w", err)
 	}
 	if err := writeNginxConf(yc); err != nil {
@@ -62,7 +83,11 @@ type jsConfig struct {
 	// specific installation's URL into the client, which would be wrong
 	// for anyone else's deployment pointed at a different instance.
 	CorescopeURL string `json:"corescopeUrl"`
-	Propagation  struct {
+	// Header branding — see public/site-brand.js. LogoURL is what
+	// installLogo resolved site.logo to; "" means no logo.
+	LogoURL     string `json:"logoUrl"`
+	HomeURL     string `json:"homeUrl"`
+	Propagation struct {
 		FrequencyMhz     float64 `json:"frequencyMhz"`
 		TxPowerDbm       float64 `json:"txPowerDbm"`
 		TxAntennaGainDbi float64 `json:"txAntennaGainDbi"`
@@ -76,10 +101,12 @@ type jsConfig struct {
 	} `json:"propagation"`
 }
 
-func writeConfigJS(yc yconfig.Config) error {
+func buildJSConfig(yc yconfig.Config, logoURL string) jsConfig {
 	var c jsConfig
 	c.SiteName = yc.Site.Name
 	c.SiteSubtitle = yc.Site.Subtitle
+	c.LogoURL = logoURL
+	c.HomeURL = yc.Site.HomeURL
 	c.MapCenter = []float64{yc.Map.CenterLat, yc.Map.CenterLon}
 	c.MapZoom = yc.Map.Zoom
 	c.DataURL = "data/repeaters.geojson"
@@ -108,7 +135,10 @@ func writeConfigJS(yc yconfig.Config) error {
 	c.Propagation.RxHeightM = yc.Propagation.RxHeightM
 	c.Propagation.MaxRangeKm = yc.Propagation.MaxRangeKm
 	c.Propagation.MarginGreenDb = yc.Propagation.MarginGreenDB
+	return c
+}
 
+func writeConfigJS(c jsConfig) error {
 	body, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err

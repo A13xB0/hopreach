@@ -3,8 +3,7 @@
 
   const cfg = window.HOPREACH_CONFIG;
 
-  document.getElementById("site-title").textContent = cfg.siteName;
-  document.getElementById("site-subtitle").textContent = cfg.siteSubtitle;
+  window.HopReachBrand.applyBrand(document, cfg, { title: true });
 
   const map = L.map("map").setView(cfg.mapCenter, cfg.mapZoom);
 
@@ -98,6 +97,10 @@
   );
 
   const statusColor = { active: "#4ade80", degraded: "#facc15", silent: "#64748b" };
+  // The ring that separates a marker from the map is the page background,
+  // so it follows the theme (site-theme.css has loaded by now: scripts sit
+  // at the end of <body>). The fill above is data and does not.
+  const markerRing = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#0a1929";
 
     // Off by default (clustered) — see the general "Marker clustering" map
   // control below. L.featureGroup (not plain layerGroup) so getBounds()
@@ -490,7 +493,7 @@
         L.circleMarker(displayedLatLng(feature.properties, latlng), {
           radius: 7,
           fillColor: statusColor[feature.properties.status] || statusColor.silent,
-          color: "#0a1929",
+          color: markerRing,
           weight: 1.5,
           fillOpacity: 0.9,
         }),

@@ -1,0 +1,17 @@
+/* Deployment theme — intentionally empty in the repo.
+ *
+ * In the Docker image this file is replaced at container start with a copy
+ * of site.theme_css from config.yaml (see cmd/hopreach's -prepare mode).
+ * For local development without Docker, put token overrides here directly.
+ *
+ * A theme redefines the tokens declared at the top of style.css, e.g.
+ *
+ *   :root {
+ *     --bg: #111827;
+ *     --card-bg: #1F2937;
+ *     --accent: #0D9488;
+ *     --header-bg: #111827;
+ *     --font-sans: "Inter", system-ui, sans-serif;
+ *   }
+ *
+ * An @import (e.g. a web font) must come before any rule. */

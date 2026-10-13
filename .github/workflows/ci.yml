@@ -56,6 +56,12 @@ jobs:
             echo "checking $f"
             node --check "$f"
           done
+      # Module-reference check plus the node unit tests (tests/unit), which
+      # include the boot test that evaluates every script index.html loads.
+      # No browser or backend needed, so they belong here, not in e2e.
+      - run: npm ci
+      - name: npm test
+        run: npm test
 
   # End-to-end tests (tests/*.spec.js, see playwright.config.js) against a
   # real running container — the same image users actually deploy, not a

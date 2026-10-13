@@ -5,6 +5,9 @@
 window.HOPREACH_CONFIG = {
   siteName: "ScotMesh Repeater Coverage",
   siteSubtitle: "MeshCore repeater map, refreshed daily",
+  // site.logo / site.home_url — see public/site-brand.js.
+  logoUrl: "",
+  homeUrl: "",
   mapCenter: [56.8, -4.2],
   mapZoom: 6,
   dataUrl: "data/repeaters.geojson",

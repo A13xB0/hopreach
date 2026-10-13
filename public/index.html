@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ScotMesh Repeater Coverage</title>
+<meta name="generator" content="HopReach">
+<title>HopReach Coverage</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
@@ -17,14 +18,21 @@
 <link rel="stylesheet" href="style-simulator.css">
 <link rel="stylesheet" href="style-leaflet.css">
 <link rel="stylesheet" href="style-mobile.css">
+<!-- The deployment's theme (site.theme_css in config.yaml, copied here at
+     container start). LAST on purpose: it only redefines the tokens at the
+     top of style.css, and has to win over every sheet above. -->
+<link rel="stylesheet" href="site-theme.css">
 </head>
 <body>
 <div id="app">
   <header>
-    <div>
-      <h1 id="site-title">ScotMesh Repeater Coverage</h1>
-      <span class="subtitle" id="site-subtitle">MeshCore repeater map, refreshed daily</span>
-    </div>
+    <a class="site-brand" id="site-brand">
+      <img class="site-logo" id="site-logo" alt="" hidden>
+      <div>
+        <h1 id="site-title">HopReach Coverage</h1>
+        <span class="subtitle" id="site-subtitle">MeshCore repeater map, refreshed daily</span>
+      </div>
+    </a>
     <!-- The status words are wrapped so a phone header can drop to just
          "●43 ●19 ●11" (dot + count) without losing them for screen
          readers — see the .stat-word rule in style.css's mobile block. -->
@@ -883,6 +891,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="config.js"></script>
+<script src="site-brand.js"></script>
 <script src="carto-tiles.js"></script>
 <script src="wasm_exec.js"></script>
 <script src="wasm-bridge.js"></script>
