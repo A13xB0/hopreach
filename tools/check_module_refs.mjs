@@ -35,7 +35,7 @@ const JS_GLOBALS = new Set([
 const PAGE_GLOBALS = new Set([
   "L", "MeshApi", "MeshFrame", "SimTopology", "HopReachEvidence", "HopReachPlanner",
   "MCCoverageMap", "HOPREACH_CONFIG", "Go", "meshsim",
-  "MeshSim", "Propagation", "Terrain",
+  "MeshSim", "Propagation", "Terrain", "HopReachCartoTiles", "HopReachBrand",
 ]);
 
 const KNOWN = new Set([...BROWSER_GLOBALS, ...JS_GLOBALS, ...PAGE_GLOBALS]);

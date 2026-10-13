@@ -223,6 +223,53 @@ Scotland is the built-in default, but nothing is hard-wired to it. Point
 county, a custom shape you drew — and that becomes the area of interest.
 See [Region](docs/TECHNICAL.md#region-not-just-scotland).
 
+## Make it look like your site
+
+Every colour, font and header style the page chrome uses is a CSS variable,
+declared at the top of [`public/style.css`](public/style.css). A theme is
+just a stylesheet that redefines the ones you want — nothing to rebuild:
+
+```css
+/* theme.css */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap");
+:root {
+  --bg: #111827;
+  --card-bg: #1F2937;
+  --border: #374151;
+  --accent: #0D9488;
+  --header-bg: #111827;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --logo-height: 36px;
+}
+```
+
+Mount it, plus a logo if you want one, and point `config.yaml` at them:
+
+```yaml
+site:
+  theme_css: /config/theme.css
+  logo: /config/logo.svg              # or an https:// URL
+  home_url: https://your-network.example/   # logo and title link back here
+```
+
+The theme loads after every other stylesheet, on both the map and the
+analytics page. Repeater status colours and the other data colours are
+deliberately not themeable — the map draws them from JS, and the legend
+has to keep matching it. A missing theme or logo file is logged at startup
+and the site comes up with the built-in look rather than not at all.
+
+## Finding other HopReach maps
+
+Every instance identifies itself, so you can find other deployments:
+
+- **`/.well-known/hopreach.json`** on any instance says what it is — name,
+  version, backend, map centre:
+  `curl https://some-map.example/.well-known/hopreach.json`
+- **Search engines** index the page's `<meta name="generator"
+  content="HopReach">` tag, so source-searching services such as
+  [PublicWWW](https://publicwww.com/) find it directly, and the map's
+  attribution carries a "HopReach on GitHub" link.
+
 ## Want it faster?
 
 Coverage computation is the expensive part. With a compatible GPU it's

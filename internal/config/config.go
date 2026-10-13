@@ -63,6 +63,17 @@ type SiteConfig struct {
 	Subtitle      string  `yaml:"subtitle"`
 	ActiveHours   float64 `yaml:"active_hours"`
 	DegradedHours float64 `yaml:"degraded_hours"`
+
+	// ThemeCSS is a local CSS file that redefines the theme tokens at the
+	// top of public/style.css. Copied to site-theme.css, which every page
+	// loads last. Empty: the built-in look.
+	ThemeCSS string `yaml:"theme_css"`
+	// Logo is shown in the header: a local image file (copied into the
+	// site) or an http(s) URL. Empty: no logo.
+	Logo string `yaml:"logo"`
+	// HomeURL makes the header's logo and title a link back to the
+	// deployment's own website. Empty: not a link.
+	HomeURL string `yaml:"home_url"`
 }
 
 // MapConfig is the frontend's initial map view.

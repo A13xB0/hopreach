@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="HopReach">
 <title>HopReach Analytics</title>
 <!-- The six sheets that used to be style.css, in the order index.html
      loads them. This page has no simulator, but it loads that sheet too so
@@ -15,14 +16,21 @@
 <link rel="stylesheet" href="style-leaflet.css">
 <link rel="stylesheet" href="style-mobile.css">
 <link rel="stylesheet" href="analytics.css">
+<!-- The deployment's theme (site.theme_css in config.yaml, copied here at
+     container start). LAST on purpose: it only redefines the tokens at the
+     top of style.css, and has to win over every sheet above. -->
+<link rel="stylesheet" href="site-theme.css">
 </head>
 <body>
 <div id="app">
   <header>
-    <div>
-      <h1>HopReach Analytics</h1>
-      <span class="subtitle">Coverage-run history and infrastructure stats &mdash; no visitor data of any kind</span>
-    </div>
+    <a class="site-brand" id="site-brand">
+      <img class="site-logo" id="site-logo" alt="" hidden>
+      <div>
+        <h1>HopReach Analytics</h1>
+        <span class="subtitle">Coverage-run history and infrastructure stats &mdash; no visitor data of any kind</span>
+      </div>
+    </a>
     <div id="an-top-stats"></div>
   </header>
 
@@ -58,6 +66,9 @@
   <a id="an-back" href="index.html">&larr; Back to the map</a>
 </div>
 
+<script src="config.js"></script>
+<script src="site-brand.js"></script>
+<script>window.HopReachBrand.applyBrand(document, window.HOPREACH_CONFIG);</script>
 <script src="analytics.js"></script>
 </body>
 </html>

@@ -16,7 +16,7 @@
   border-radius: 8px;
   margin-bottom: 0.5rem;
   overflow: hidden;
-  background: rgba(255,255,255,0.02);
+  background: color-mix(in srgb, var(--overlay-ink) 2%, transparent);
 }
 .sim-acc-head {
   display: flex;
@@ -50,7 +50,7 @@
 .sim-rail {
   display: flex;
   align-items: center;
-  background: rgba(255,255,255,0.03);
+  background: color-mix(in srgb, var(--overlay-ink) 3%, transparent);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.5rem 0.6rem;
@@ -96,7 +96,7 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.15rem;
-  background: rgba(255,255,255,0.03);
+  background: color-mix(in srgb, var(--overlay-ink) 3%, transparent);
 }
 .sim-tier-seg button {
   background: none;
@@ -109,7 +109,7 @@
   border-radius: 999px;
   cursor: pointer;
 }
-.sim-tier-seg button.on { background: var(--accent); color: #fff; }
+.sim-tier-seg button.on { background: var(--accent); color: var(--on-accent); }
 
 /* Hidden, not removed — see setSimTier in simulator.js. */
 .sim-advanced-only { display: none; }
@@ -203,7 +203,7 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  background: rgba(255,255,255,0.04);
+  background: color-mix(in srgb, var(--overlay-ink) 4%, transparent);
   border-radius: 6px;
   padding: 0.3rem 0.5rem;
   font-size: 0.75rem;
@@ -234,7 +234,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  background: rgba(255,255,255,0.04);
+  background: color-mix(in srgb, var(--overlay-ink) 4%, transparent);
   border-radius: 6px;
   padding: 0.3rem 0.6rem;
   min-width: 4.5rem;
@@ -268,7 +268,7 @@
   border: 1px solid transparent;
 }
 .plan-connect-option:hover {
-  background: rgba(255,255,255,0.08);
+  background: color-mix(in srgb, var(--overlay-ink) 8%, transparent);
 }
 .plan-connect-option.selected {
   border-color: #4ade80;
@@ -289,7 +289,7 @@
 
 #plan-share-result {
   font-size: 0.72rem;
-  background: rgba(255,255,255,0.05);
+  background: color-mix(in srgb, var(--overlay-ink) 5%, transparent);
   border-radius: 6px;
   padding: 0.4rem 0.5rem;
   margin-bottom: 0.6rem;
@@ -304,7 +304,7 @@
   border-radius: 50%;
   background: #a855f7;
   border: 2px solid #fff;
-  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--shadow-ink) 60%, transparent);
 }
 
 .companion-pin-dot {
@@ -314,7 +314,7 @@
   transform: rotate(-45deg);
   background: #f97316;
   border: 2px solid #fff;
-  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--shadow-ink) 60%, transparent);
 }
 
 /* A personal, local-only repositioning of a real repeater — distinct from
@@ -327,7 +327,7 @@
   border-radius: 3px;
   background: #f59e0b;
   border: 2px solid #fff;
-  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--shadow-ink) 60%, transparent);
 }
 
 /* --- neighbours --- */
@@ -354,7 +354,7 @@
   padding: 0.5rem 0.65rem;
   font-size: 0.72rem;
   max-width: 240px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--shadow-ink) 50%, transparent);
 }
 .neighbor-tooltip-title { font-weight: 700; margin-bottom: 0.1rem; }
 .neighbor-tooltip-sub { color: var(--text-muted); font-size: 0.68rem; margin-bottom: 0.35rem; }
