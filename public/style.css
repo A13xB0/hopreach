@@ -82,9 +82,9 @@ header h1 {
 .site-brand[href]:hover h1 { text-decoration: underline; }
 
 header .subtitle {
+  display: block;
   color: var(--text-muted);
   font-size: 0.85rem;
-  margin-left: 0.5rem;
 }
 
 #stats {
@@ -439,6 +439,20 @@ header .subtitle {
 }
 .map-display-control input[type="checkbox"] {
   accent-color: var(--accent);
+}
+
+/* The boxes down the map's right edge share one minimum width, so their
+   left edges line up instead of stepping in and out with each box's own
+   content. 220px is the legend's own max-width and fits the widest of
+   them expanded (Map display). Scoped to .leaflet-right: on a phone these
+   same controls are moved into the Map options sheet, which lays them out
+   itself. */
+.leaflet-right .map-display-control,
+.leaflet-right .neighbor-window-control,
+.leaflet-right .position-mode-control,
+.leaflet-right .scope-filter-control,
+.leaflet-right .legend {
+  min-width: 220px;
 }
 
 /* Shared collapsible-header pattern — see app.js's window.HopReachMapControls. */
