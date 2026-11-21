@@ -14,7 +14,8 @@ importScripts("wasm_exec.js", "wasm-bridge.js", "terrain.js", "propagation.js", 
 // that: at DEM_ZOOM≈11 a single 100km-radius site needs 250+ elevation
 // tiles just to start. Cap the preview's search radius and use a coarser
 // zoom — plenty to judge "does this fill the gap", not meant to reproduce
-// the full map's extreme-range hilltop cases.
+// the full map's extreme-range hilltop cases. A one-off request (the
+// single-repeater view) can pass maxRangeKm to take the full range instead.
 const PREVIEW_MAX_RANGE_KM = 35;
 const PREVIEW_ZOOM_CAP = 10;
 const MAX_NEIGHBORS_PER_SITE = 8;

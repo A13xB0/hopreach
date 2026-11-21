@@ -489,7 +489,7 @@
     ctx.putImageData(imgData, 0, 0);
 
     const llBounds = [[bounds.south, bounds.west], [bounds.north, bounds.east]];
-    S.previewOverlay = L.imageOverlay(canvas.toDataURL("image/png"), llBounds, { interactive: false }).addTo(map);
+    S.previewOverlay = L.imageOverlay(canvas.toDataURL("image/png"), llBounds, { interactive: false, className: "plan-preview-coverage" }).addTo(map);
     layersControl.addOverlay(S.previewOverlay, "Planned coverage (preview)");
     syncCoverageToggles();
   }

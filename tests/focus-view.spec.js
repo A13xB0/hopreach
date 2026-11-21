@@ -35,7 +35,7 @@ test("a repeater's coverage shows on its own, and Show all puts the map back", a
 
   await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
   const bar = page.locator(".focus-bar");
-  await expect(bar).toContainText(`Estimated coverage: ${name} only`);
+  await expect(bar).toContainText(`Preview estimate: ${name} only`);
   await expect(container).toHaveClass(/focus-active/);
 
   await expect(bar).toHaveClass(/done/, { timeout: 180_000 });
@@ -45,6 +45,11 @@ test("a repeater's coverage shows on its own, and Show all puts the map back", a
   const shown = await page.$$eval(".leaflet-overlay-pane img.leaflet-image-layer", (imgs) =>
     imgs.filter((i) => getComputedStyle(i).visibility !== "hidden").length);
   expect(shown).toBe(0);
+
+  // A Map detail change that leaves the marker where it is keeps the result.
+  await page.evaluate(() => document.getElementById("position-mode-select").dispatchEvent(new Event("change", { bubbles: true })));
+  await expect(bar).toHaveClass(/done/);
+  await expect(page.locator(".leaflet-focusCoverage-pane img")).toHaveCount(1);
 
   await page.click(".focus-bar-close");
   await expect(bar).toHaveCount(0);
@@ -68,12 +73,14 @@ test("Esc ends the view, but not while typing or under an open popup", async ({ 
   await page.keyboard.press("Escape");
   await expect(bar).toBeVisible();
 
+  // With a popup open and the map focused (as after clicking a marker), the
+  // first Esc is Leaflet's, closing the popup; the next one ends the view.
   await page.evaluate(() => document.getElementById("focus-test-input").remove());
   await openFirstPopup(page);
+  await page.locator(".leaflet-container").focus();
   await page.keyboard.press("Escape");
+  await expect(page.locator(".leaflet-popup")).toHaveCount(0);
   await expect(bar).toBeVisible();
-
-  await page.evaluate(() => window.MCCoverageMap.map.closePopup());
   await page.keyboard.press("Escape");
   await expect(bar).toHaveCount(0);
 });
