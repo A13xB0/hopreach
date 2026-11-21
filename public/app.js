@@ -517,6 +517,15 @@
     }
   }
 
+  // Where a repeater is drawn in the current map mode, so the single-repeater
+  // view (focus-view.js) computes from the same point as its marker.
+  function repeaterLatLng(pubkey) {
+    const f = S.currentGeojson && S.currentGeojson.features.find((x) => x.properties.public_key === pubkey);
+    if (!f) return null;
+    const [lon, lat] = f.geometry.coordinates;
+    return displayedLatLng(f.properties, L.latLng(lat, lon));
+  }
+
   function setClusteringDisabled(disabled) {
     S.clusteringDisabled = disabled;
     renderFilteredRepeaters(false); // rebuild in the new mode, keeping the current view
@@ -768,6 +777,7 @@
   }
 
   function applySimulateDeclutter(on) {
+    map.fire("simulatedeclutter", { on }); // focus-view.js steps aside for Simulate
     if (on) {
       if (S.simDeclutterSnapshot) return; // already applied — don't overwrite the real snapshot
       S.simDeclutterSnapshot = {
@@ -803,6 +813,7 @@
     setClusteringDisabled,
     applySimulateDeclutter,
     setCoverageVisible,
+    repeaterLatLng,
     // coverageLayer is reassigned on every recompute, so a live check
     // rather than a cached reference — a stale boolean here would leave
     // the Plan panel's own checkbox out of sync after a background refresh.

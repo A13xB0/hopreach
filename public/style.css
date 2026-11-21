@@ -303,6 +303,8 @@ header .subtitle {
 .popup-focus:hover { border-color: var(--accent); }
 
 /* One repeater's coverage (focus-view.js): whose it is, and the way back. */
+/* Every other coverage image hides while it shows; their layers are untouched. */
+.focus-active .leaflet-overlay-pane img.leaflet-image-layer { visibility: hidden; }
 .focus-bar {
   position: absolute;
   top: 10px;

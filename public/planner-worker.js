@@ -24,8 +24,15 @@ self.onmessage = async (e) => {
   // propagation/demgrid and calls registerMeshsim for the simulator), so
   // this is one load — connect-repeaters checks its finished route with
   // the simulator, see checkRoute.
-  await Propagation.ready; // wasm/main.go's exports must be registered before any handler below touches them
-  await MeshSim.ready;
+  try {
+    await Propagation.ready; // wasm/main.go's exports must be registered before any handler below touches them
+    await MeshSim.ready;
+  } catch (err) {
+    // A rejection here never reaches the page's Worker.onerror, so say so.
+    const { generation, kind } = e.data;
+    self.postMessage({ generation, kind, type: "error", message: `Could not load the propagation engine: ${err.message || err}` });
+    return;
+  }
   if (e.data.kind === "connect") return handleConnect(e.data);
   if (e.data.kind === "area-coverage") return handleAreaCoverage(e.data);
   return handlePreview(e.data);

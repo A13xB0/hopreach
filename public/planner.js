@@ -485,22 +485,7 @@
     // Blue -> purple, distinct from the real coverage map's orange->green,
     // so "existing" and "proposed" read as different things when both are
     // shown at once.
-    const blue = [56, 189, 248];
-    const purple = [168, 85, 247];
-    for (let i = 0; i < margins.length; i++) {
-      const m = margins[i];
-      const p = i * 4;
-      if (Number.isNaN(m)) {
-        imgData.data[p + 3] = 0;
-        continue;
-      }
-      let t = m / marginGreenDb;
-      t = t < 0 ? 0 : t > 1 ? 1 : t;
-      imgData.data[p] = blue[0] + t * (purple[0] - blue[0]);
-      imgData.data[p + 1] = blue[1] + t * (purple[1] - blue[1]);
-      imgData.data[p + 2] = blue[2] + t * (purple[2] - blue[2]);
-      imgData.data[p + 3] = 190;
-    }
+    window.HopReachRamp.paintMargins(imgData.data, margins, marginGreenDb, 190, [56, 189, 248], [168, 85, 247]);
     ctx.putImageData(imgData, 0, 0);
 
     const llBounds = [[bounds.south, bounds.west], [bounds.north, bounds.east]];
