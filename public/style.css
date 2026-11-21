@@ -301,6 +301,7 @@ header .subtitle {
   cursor: pointer;
 }
 .popup-focus:hover { border-color: var(--accent); }
+#map-wrap.sim-open .popup-focus { display: none; }
 
 /* One repeater's coverage (focus-view.js): whose it is, and the way back. */
 /* Every other coverage image hides while it shows; their layers are untouched. */

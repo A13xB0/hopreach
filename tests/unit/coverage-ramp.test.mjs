@@ -21,3 +21,9 @@ test("paintMargins clamps outside the range and leaves NaN transparent", () => {
   assert.deepEqual([...rgba.slice(4, 8)], [249, 115, 22, 190]);
   assert.deepEqual([...rgba.slice(8, 12)], [34, 197, 94, 190]);
 });
+
+test("paintMargins truncates, as Go's uint8() does on the server", () => {
+  const rgba = new Uint8ClampedArray(4);
+  R.paintMargins(rgba, new Float32Array([9]), 15, 190, [0, 0, 0], [1, 1, 1]); // 0.6 each
+  assert.deepEqual([...rgba], [0, 0, 0, 190]);
+});

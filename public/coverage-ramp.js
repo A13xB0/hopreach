@@ -23,9 +23,10 @@
       }
       let t = m / marginGreenDb;
       t = t < 0 ? 0 : t > 1 ? 1 : t;
-      rgba[p] = from[0] + t * (to[0] - from[0]);
-      rgba[p + 1] = from[1] + t * (to[1] - from[1]);
-      rgba[p + 2] = from[2] + t * (to[2] - from[2]);
+      // Truncated, as Go's uint8() does in marginsToImage.
+      rgba[p] = Math.floor(from[0] + t * (to[0] - from[0]));
+      rgba[p + 1] = Math.floor(from[1] + t * (to[1] - from[1]));
+      rgba[p + 2] = Math.floor(from[2] + t * (to[2] - from[2]));
       rgba[p + 3] = alpha;
     }
     return rgba;

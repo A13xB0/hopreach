@@ -41,6 +41,7 @@
     if (!S.bar) return;
     S.bar.querySelector(".focus-bar-status").textContent = text;
     S.bar.classList.toggle("done", !!done);
+    S.bar.classList.remove("ok"); // set by render() for a drawn result only
   }
 
   // Stops a job still running; an idle worker is kept, with its terrain cache,
@@ -69,6 +70,7 @@
     w.onerror = (e) => {
       if (w !== S.worker) return;
       e.preventDefault();
+      w.terminate();
       S.worker = null;
       fail(e.message || "the worker failed to load");
     };
@@ -125,9 +127,11 @@
       pane: "focusCoverage",
     }).addTo(map);
     setStatus("computed in your browser, at preview detail", true);
+    S.bar.classList.add("ok");
   }
 
   function start(props) {
+    if (document.getElementById("map-wrap").classList.contains("sim-open")) return;
     if (S.bar) S.bar.remove();
     clearOverlay();
     S.pubkey = props.public_key;
@@ -176,9 +180,10 @@
     const props = S.marker && S.marker.feature && S.marker.feature.properties;
     if (props && props.public_key) start(props);
   });
-  // A new map mode may move the marker; compute() skips it if it didn't.
-  document.addEventListener("change", (e) => {
-    if (e.target.id === "position-mode-select" && S.pubkey) compute();
+  // Markers are redrawn on a Map detail change or a data reload, and may have
+  // moved (or gone); compute() does nothing if the point is the same.
+  map.on("repeatersrendered", () => {
+    if (S.pubkey) compute();
   });
   // Capture phase: Leaflet closes a popup on Esc before a bubbling listener
   // could see that one was open.

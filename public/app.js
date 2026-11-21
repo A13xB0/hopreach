@@ -515,6 +515,7 @@
     if (typeof window.onRepeatersLoaded === "function") {
       window.onRepeatersLoaded(filtered, layer);
     }
+    map.fire("repeatersrendered"); // focus-view.js re-checks its repeater's point
   }
 
   // Where a repeater is drawn in the current map mode, so the single-repeater

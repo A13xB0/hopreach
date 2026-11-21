@@ -3,8 +3,13 @@ const { test, expect } = require("@playwright/test");
 const { gotoReady } = require("./helpers");
 
 // Needs real repeater data and terrain tiles: skips when there are none.
+// The first progress poll (~2s in) reloads the data and redraws the markers,
+// closing any popup, so wait for it to settle before opening one.
 test.beforeEach(async ({ page }) => {
+  const firstPoll = page.waitForResponse((r) => r.url().includes("progress.json"));
   await gotoReady(page);
+  await firstPoll;
+  await page.waitForLoadState("networkidle");
 });
 
 // Opens the first repeater's popup with clustering off, so its marker is on
@@ -85,12 +90,18 @@ test("Esc ends the view, but not while typing or under an open popup", async ({ 
   await expect(bar).toHaveCount(0);
 });
 
-test("Simulate ends the view", async ({ page }) => {
+test("Simulate ends the view, and it can't start while Simulate is open", async ({ page }) => {
   const name = await openFirstPopup(page);
   test.skip(!name, "no repeaters");
   await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
   await expect(page.locator(".focus-bar")).toBeVisible();
-  await page.evaluate(() => window.MCCoverageMap.applySimulateDeclutter(true));
+  await page.click("#sim-toggle");
   await expect(page.locator(".focus-bar")).toHaveCount(0);
   await expect(page.locator(".leaflet-container")).not.toHaveClass(/focus-active/);
+
+  await openFirstPopup(page);
+  const button = page.locator(".popup-focus").last(); // the previous popup may still be fading out
+  await expect(button).toBeHidden();
+  await button.dispatchEvent("click");
+  await expect(page.locator(".focus-bar")).toHaveCount(0);
 });
