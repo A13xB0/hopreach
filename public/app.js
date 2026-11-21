@@ -381,7 +381,7 @@
       ${scopeRowsHtml(props)}
       <div class="popup-row"><span>Key</span><span>${escapeHtml((props.public_key || "").slice(0, 12))}</span></div>
       ${calibrationRowHtml(props)}
-      <button type="button" class="popup-focus">Show only this repeater's coverage</button>
+      <button type="button" class="popup-focus" data-pubkey="${escapeHtml(props.public_key || "")}" data-name="${escapeHtml(props.name || "")}">Show only this repeater's coverage</button>
     `;
   }
 
@@ -519,10 +519,11 @@
   }
 
   // Where a repeater is drawn in the current map mode, so the single-repeater
-  // view (focus-view.js) computes from the same point as its marker.
+  // view (focus-view.js) computes from the same point as its marker; null when
+  // it isn't drawn (gone, or hidden by the scope filter).
   function repeaterLatLng(pubkey) {
     const f = S.currentGeojson && S.currentGeojson.features.find((x) => x.properties.public_key === pubkey);
-    if (!f) return null;
+    if (!f || !matchesScopeFilter(f.properties)) return null;
     const [lon, lat] = f.geometry.coordinates;
     return displayedLatLng(f.properties, L.latLng(lat, lon));
   }

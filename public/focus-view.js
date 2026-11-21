@@ -20,7 +20,7 @@
   // Just under the overlay pane, which also holds the repeater markers (SVG).
   map.createPane("focusCoverage").style.zIndex = 399;
 
-  const S = { pubkey: null, name: "", ll: null, worker: null, busy: false, job: 0, overlay: null, bar: null, marker: null, popupOpen: false };
+  const S = { pubkey: null, name: "", ll: null, worker: null, busy: false, failed: false, job: 0, overlay: null, bar: null, popupOpen: false };
 
   function buildBar(name) {
     const bar = L.DomUtil.create("div", "focus-bar", map.getContainer());
@@ -44,8 +44,8 @@
     S.bar.classList.remove("ok"); // set by render() for a drawn result only
   }
 
-  // Stops a job still running; an idle worker is kept, with its terrain cache,
-  // for the next repeater.
+  // Stops a job still running; while the view is open an idle worker is kept,
+  // with its terrain cache, for the next repeater.
   function cancelJob() {
     if (S.worker && S.busy) {
       S.worker.terminate();
@@ -61,6 +61,7 @@
 
   function fail(message) {
     S.busy = false;
+    S.failed = true;
     setStatus(`Could not compute: ${message}`);
   }
 
@@ -91,15 +92,17 @@
   }
 
   // Computes the repeater at the point its marker is drawn now. Nothing to do
-  // when that point hasn't moved and its result is showing or on its way.
+  // when that point hasn't moved and its result (or failure) is already in or
+  // on its way: a redraw doesn't retry a failed run.
   function compute() {
     const ll = MC.repeaterLatLng(S.pubkey);
     if (!ll) return stop();
-    if (S.ll && S.ll.equals(ll) && (S.overlay || S.busy)) return;
+    if (S.ll && S.ll.equals(ll) && (S.overlay || S.busy || S.failed)) return;
     cancelJob();
     clearOverlay(); // never leave the old point's coverage up
     S.ll = ll;
     S.busy = true;
+    S.failed = false;
     setStatus("Loading terrain…");
     ensureWorker().postMessage({
       generation: ++S.job,
@@ -130,12 +133,12 @@
     S.bar.classList.add("ok");
   }
 
-  function start(props) {
+  function start(pubkey, name) {
     if (document.getElementById("map-wrap").classList.contains("sim-open")) return;
     if (S.bar) S.bar.remove();
     clearOverlay();
-    S.pubkey = props.public_key;
-    S.name = props.name || "Repeater";
+    S.pubkey = pubkey;
+    S.name = name || "Repeater";
     S.ll = null;
     map.closePopup();
     map.getContainer().classList.add("focus-active");
@@ -145,7 +148,9 @@
 
   function stop() {
     if (!S.pubkey) return;
-    cancelJob();
+    if (S.worker) S.worker.terminate(); // nothing held once the view is gone
+    S.worker = null;
+    S.busy = false;
     clearOverlay();
     if (S.bar) S.bar.remove();
     S.bar = null;
@@ -165,9 +170,8 @@
     return !(backdrop && !backdrop.classList.contains("hidden"));
   }
 
-  map.on("popupopen", (e) => {
+  map.on("popupopen", () => {
     S.popupOpen = true;
-    S.marker = e.popup._source;
   });
   map.on("popupclose", () => {
     S.popupOpen = false;
@@ -176,9 +180,8 @@
     if (e.on) stop();
   });
   map.getContainer().addEventListener("click", (e) => {
-    if (!e.target.closest(".popup-focus")) return;
-    const props = S.marker && S.marker.feature && S.marker.feature.properties;
-    if (props && props.public_key) start(props);
+    const button = e.target.closest(".popup-focus");
+    if (button && button.dataset.pubkey) start(button.dataset.pubkey, button.dataset.name);
   });
   // Markers are redrawn on a Map detail change or a data reload, and may have
   // moved (or gone); compute() does nothing if the point is the same.

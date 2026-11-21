@@ -43,8 +43,10 @@ test("a repeater's coverage shows on its own, and Show all puts the map back", a
   await expect(bar).toContainText(`Preview estimate: ${name} only`);
   await expect(container).toHaveClass(/focus-active/);
 
-  await expect(bar).toHaveClass(/done/, { timeout: 180_000 });
-  await expect(bar).not.toContainText("Could not compute");
+  // Finished either way, then it must have drawn (a failure shows its reason here).
+  const status = bar.locator(".focus-bar-status");
+  await expect(status).not.toHaveText(/^(Loading|Computing)/, { timeout: 180_000 });
+  await expect(status).toHaveText("computed in your browser, at preview detail");
   await expect(page.locator(".leaflet-focusCoverage-pane img")).toHaveCount(1);
   // Every other coverage image (main, region scope, planner preview) is hidden.
   const shown = await page.$$eval(".leaflet-overlay-pane img.leaflet-image-layer", (imgs) =>
@@ -52,8 +54,11 @@ test("a repeater's coverage shows on its own, and Show all puts the map back", a
   expect(shown).toBe(0);
 
   // A Map detail change that leaves the marker where it is keeps the result.
-  await page.evaluate(() => document.getElementById("position-mode-select").dispatchEvent(new Event("change", { bubbles: true })));
-  await expect(bar).toHaveClass(/done/);
+  await page.evaluate(() => {
+    const select = document.getElementById("position-mode-select");
+    if (select) select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(bar).toHaveClass(/ok/);
   await expect(page.locator(".leaflet-focusCoverage-pane img")).toHaveCount(1);
 
   await page.click(".focus-bar-close");
