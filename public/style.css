@@ -652,7 +652,8 @@ header .subtitle {
    scaling instead of the browser's default smooth (bilinear) upscaling,
    so zooming in reveals the raster's real per-pixel detail as crisp
    squares rather than blurring it into a soft gradient. */
-.coverage-crisp {
+.coverage-crisp,
+.focus-coverage {
   image-rendering: pixelated;
   image-rendering: -moz-crisp-edges;
   image-rendering: crisp-edges;

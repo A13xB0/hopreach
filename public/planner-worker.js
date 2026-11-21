@@ -153,6 +153,7 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
         marginGreenDb: propagation.marginGreenDb,
         margins: margins.buffer,
         neighbors,
+        failedTiles: grid.failedTiles,
       },
       [margins.buffer]
     );

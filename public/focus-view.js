@@ -124,17 +124,29 @@
     clearOverlay();
     const { imageWidth: w, imageHeight: h, bounds: b } = msg;
     const rgba = Ramp.paintMargins(new Uint8ClampedArray(w * h * 4), new Float32Array(msg.margins), msg.marginGreenDb, 190, ...Ramp.SERVER_RAMP);
+    const img = new ImageData(rgba, w, h);
     const layers = Ramp.latitudeBands(h, b.north, b.south, BANDS).map((band) => {
       const canvas = document.createElement("canvas");
       canvas.width = w;
       canvas.height = band.y1 - band.y0;
-      canvas.getContext("2d").putImageData(new ImageData(rgba.slice(band.y0 * w * 4, band.y1 * w * 4), w, canvas.height), 0, 0);
-      return L.imageOverlay(canvas.toDataURL("image/png"), [[band.south, b.west], [band.north, b.east]], { interactive: false, pane: "focusCoverage" });
+      canvas.getContext("2d").putImageData(img, 0, -band.y0, 0, band.y0, w, canvas.height);
+      // Crisp like the server's tiles, which also keeps band edges from blending.
+      return L.imageOverlay(canvas.toDataURL("image/png"), [[band.south, b.west], [band.north, b.east]], {
+        interactive: false,
+        pane: "focusCoverage",
+        className: "focus-coverage",
+      });
     });
     S.overlay = L.layerGroup(layers).addTo(map);
+    if (msg.failedTiles > 0) {
+      // Failed tiles read as sea level, so say so rather than look complete.
+      setStatus(`${msg.failedTiles} terrain tile(s) failed to load: parts may be wrong`, true);
+      return;
+    }
     setStatus("computed in your browser, at preview detail", true);
     S.bar.classList.add("ok");
   }
+
 
   function start(pubkey, name) {
     if (document.getElementById("map-wrap").classList.contains("sim-open")) return;
@@ -162,15 +174,13 @@
     map.getContainer().classList.remove("focus-active");
   }
 
-  // Esc ends the view only when nothing else wants it: not while typing, not
-  // while a popup Leaflet will close (the map has focus), not under an open
-  // simulator modal.
+  // Esc ends the view only when nothing else wants it: not while typing, and
+  // not while a popup Leaflet will close (the map has focus). Simulator modals
+  // can't be open: Simulate ends the view.
   function escapeIsOurs(e) {
     if (!S.pubkey) return false;
     if (S.popupOpen && map.getContainer().contains(document.activeElement)) return false;
-    if (e.target.closest && e.target.closest("input, textarea, select, [contenteditable]")) return false;
-    const backdrop = document.getElementById("sim-modal-backdrop");
-    return !(backdrop && !backdrop.classList.contains("hidden"));
+    return !(e.target.closest && e.target.closest("input, textarea, select, [contenteditable]"));
   }
 
   map.on("popupopen", () => {

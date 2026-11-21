@@ -110,3 +110,17 @@ test("Simulate ends the view, and it can't start while Simulate is open", async 
   await button.dispatchEvent("click");
   await expect(page.locator(".focus-bar")).toHaveCount(0);
 });
+
+test("terrain tiles that fail to load are reported, not drawn as complete", async ({ page }) => {
+  // Fail every other tile column with a server error (not a 404, which is sea).
+  await page.route("**/dem-tiles/**", (route) => {
+    const x = Number(route.request().url().split("/").slice(-2)[0]);
+    return x % 2 ? route.fulfill({ status: 500 }) : route.continue();
+  });
+  const name = await openFirstPopup(page);
+  test.skip(!name, "no repeaters");
+  await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
+  const status = page.locator(".focus-bar-status");
+  await expect(status).toContainText("terrain tile(s) failed to load", { timeout: 180_000 });
+  await expect(page.locator(".focus-bar")).not.toHaveClass(/ok/);
+});
