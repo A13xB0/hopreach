@@ -42,7 +42,7 @@ RUN GOOS=js GOARCH=wasm go build -o /out/hopreach.wasm ./wasm \
 # `devices:` block) — otherwise gpu.mode=auto's probe simply finds nothing
 # and falls back to CPU, same as always. They're a modest image size cost
 # either way, not a functional requirement.
-FROM nginx:bookworm
+FROM nginx:1.30.7
 RUN apt-get update \
   && apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers cron curl \
   && rm -rf /var/lib/apt/lists/*
