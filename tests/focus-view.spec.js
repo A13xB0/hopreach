@@ -1,0 +1,134 @@
+// @ts-check
+const { test, expect } = require("@playwright/test");
+const { gotoReady } = require("./helpers");
+
+// Needs real repeater data and terrain tiles: skips when there are none.
+// The first progress poll (~2s in) reloads the data and redraws the markers,
+// closing any popup, so wait for it to settle before opening one.
+test.beforeEach(async ({ page }) => {
+  const firstPoll = page.waitForResponse((r) => r.url().includes("progress.json"));
+  await gotoReady(page);
+  await firstPoll;
+  await page.waitForLoadState("networkidle");
+});
+
+// Opens the first repeater's popup with clustering off, so its marker is on
+// the map; returns its name, or null when there are no repeaters.
+async function openFirstPopup(page) {
+  return page.evaluate(async () => {
+    const MC = window.MCCoverageMap;
+    for (let i = 0; i < 100 && !MC.repeaterLatLng; i++) await new Promise((r) => setTimeout(r, 100));
+    MC.setClusteringDisabled(true);
+    let marker = null;
+    for (let i = 0; i < 100 && !marker; i++) {
+      MC.map.eachLayer((l) => {
+        if (!marker && l.feature && l.feature.properties && l.feature.properties.public_key) marker = l;
+      });
+      if (!marker) await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!marker) return null;
+    MC.map.setView(marker.getLatLng(), 9, { animate: false });
+    marker.openPopup();
+    return marker.feature.properties.name || "Repeater";
+  });
+}
+
+test("a repeater's coverage shows on its own, and Show all puts the map back", async ({ page }) => {
+  test.setTimeout(240_000); // one full computation, slower on CI runners
+  const name = await openFirstPopup(page);
+  test.skip(!name, "no repeaters");
+  const container = page.locator(".leaflet-container");
+
+  await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
+  const bar = page.locator(".focus-bar");
+  await expect(bar).toContainText(`Preview estimate: ${name} only`);
+  await expect(container).toHaveClass(/focus-active/);
+
+  // Finished either way, then it must have drawn (a failure shows its reason here).
+  const status = bar.locator(".focus-bar-status");
+  await expect(status).not.toHaveText(/^(Loading|Computing)/, { timeout: 180_000 });
+  await expect(status).toHaveText("computed in your browser, at preview detail");
+  await expect(page.locator(".leaflet-focusCoverage-pane img")).not.toHaveCount(0);
+  // Every other coverage image (main, region scope, planner preview) is hidden.
+  const shown = await page.$$eval(".leaflet-overlay-pane img.leaflet-image-layer", (imgs) =>
+    imgs.filter((i) => getComputedStyle(i).visibility !== "hidden").length);
+  expect(shown).toBe(0);
+
+  // A Map detail change that leaves the marker where it is keeps the result.
+  await page.evaluate(() => {
+    const select = document.getElementById("position-mode-select");
+    if (select) select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(bar).toHaveClass(/ok/);
+  await expect(page.locator(".leaflet-focusCoverage-pane img")).not.toHaveCount(0);
+
+  await page.click(".focus-bar-close");
+  await expect(bar).toHaveCount(0);
+  await expect(container).not.toHaveClass(/focus-active/);
+  await expect(page.locator(".leaflet-focusCoverage-pane img")).toHaveCount(0);
+});
+
+test("Esc ends the view, but not while typing or under an open popup", async ({ page }) => {
+  const name = await openFirstPopup(page);
+  test.skip(!name, "no repeaters");
+  await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
+  const bar = page.locator(".focus-bar");
+  await expect(bar).toBeVisible();
+
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.id = "focus-test-input";
+    document.body.append(input);
+    input.focus();
+  });
+  await page.keyboard.press("Escape");
+  await expect(bar).toBeVisible();
+
+  // With a popup open and the map focused (as after clicking a marker), the
+  // first Esc is Leaflet's, closing the popup; the next one ends the view.
+  await page.evaluate(() => document.getElementById("focus-test-input").remove());
+  await openFirstPopup(page);
+  await page.locator(".leaflet-container").focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".leaflet-popup")).toHaveCount(0);
+  await expect(bar).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(bar).toHaveCount(0);
+});
+
+test("Simulate ends the view, and it can't start while Simulate is open", async ({ page }) => {
+  const name = await openFirstPopup(page);
+  test.skip(!name, "no repeaters");
+  await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
+  await expect(page.locator(".focus-bar")).toBeVisible();
+  await page.click("#sim-toggle");
+  await expect(page.locator(".focus-bar")).toHaveCount(0);
+  await expect(page.locator(".leaflet-container")).not.toHaveClass(/focus-active/);
+
+  await openFirstPopup(page);
+  const button = page.locator(".popup-focus").last(); // the previous popup may still be fading out
+  await expect(button).toBeHidden();
+  await button.dispatchEvent("click");
+  await expect(page.locator(".focus-bar")).toHaveCount(0);
+});
+
+test("terrain tiles that fail to load are reported, not drawn as complete", async ({ page }) => {
+  test.setTimeout(300_000); // two full computations
+  // Fail every other tile column with a server error (not a 404, which is sea).
+  await page.route("**/dem-tiles/**", (route) => {
+    const x = Number(route.request().url().split("/").slice(-2)[0]);
+    return x % 2 ? route.fulfill({ status: 500 }) : route.continue();
+  });
+  const name = await openFirstPopup(page);
+  test.skip(!name, "no repeaters");
+  await page.locator(".popup-focus").dispatchEvent("click"); // the popup may still be panning into view
+  const status = page.locator(".focus-bar-status");
+  await expect(status).toContainText("terrain tile(s) failed to load", { timeout: 180_000 });
+  await expect(page.locator(".focus-bar")).not.toHaveClass(/ok/);
+
+  // Once the tiles are back, the same button retries.
+  await page.unroute("**/dem-tiles/**");
+  await openFirstPopup(page);
+  await page.locator(".popup-focus").last().dispatchEvent("click");
+  await expect(status).toHaveText("computed in your browser, at preview detail", { timeout: 180_000 });
+});

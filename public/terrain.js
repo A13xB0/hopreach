@@ -63,7 +63,7 @@
 
     const url = `${tileURLBase}/${z}/${x}/${y}.png`;
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`tile fetch failed: ${url}: HTTP ${resp.status}`);
+    if (!resp.ok) throw Object.assign(new Error(`tile fetch failed: ${url}: HTTP ${resp.status}`), { status: resp.status });
     const blob = await resp.blob();
     const elevBytes = await decodeTerrariumBlob(blob);
 
@@ -105,6 +105,9 @@
     // 0m elevation, matching demgrid.Load's graceful degradation for tiles
     // that fail to fetch (e.g. open ocean).
     const mosaic = new Uint8Array(width * height * 4);
+    // A 404 is a tile that doesn't exist (open ocean); anything else is one
+    // that should have loaded and didn't, which callers can report.
+    let failedTiles = 0;
 
     const jobs = [];
     for (let ty = minTileY; ty <= maxTileY; ty++) {
@@ -124,6 +127,7 @@
               // Missing tile (e.g. open ocean) — leave as zero elevation,
               // same graceful-degradation approach as demgrid.Load.
               console.warn(err.message || err);
+              if (!(err && err.status === 404)) failedTiles++;
             })
         );
       }
@@ -134,6 +138,7 @@
     const handle = self.__hopreachWasm.createGrid(zoom, minTileX, minTileY, tilesWide, tilesHigh, mosaic);
     const grid = {
       __handle: handle,
+      failedTiles,
       at(lat, lon) {
         return self.__hopreachWasm.gridAt(handle, lat, lon);
       },

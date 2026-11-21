@@ -381,6 +381,7 @@
       ${scopeRowsHtml(props)}
       <div class="popup-row"><span>Key</span><span>${escapeHtml((props.public_key || "").slice(0, 12))}</span></div>
       ${calibrationRowHtml(props)}
+      ${props.public_key ? `<button type="button" class="popup-focus" data-pubkey="${escapeHtml(props.public_key)}" data-name="${escapeHtml(props.name || "")}">Show only this repeater's coverage</button>` : ""}
     `;
   }
 
@@ -488,9 +489,10 @@
       map.removeLayer(S.clusters);
     }
     S.clusters = S.clusteringDisabled ? L.featureGroup() : L.markerClusterGroup({ maxClusterRadius: 45 });
+    S.drawnAt = new Map(); // public_key -> where its marker is drawn (repeaterLatLng)
     const layer = L.geoJSON(filtered, {
       pointToLayer: (feature, latlng) =>
-        L.circleMarker(displayedLatLng(feature.properties, latlng), {
+        L.circleMarker(drawnAt(feature.properties, latlng), {
           radius: 7,
           fillColor: statusColor[feature.properties.status] || statusColor.silent,
           color: markerRing,
@@ -514,6 +516,20 @@
     if (typeof window.onRepeatersLoaded === "function") {
       window.onRepeatersLoaded(filtered, layer);
     }
+    map.fire("repeatersrendered"); // focus-view.js re-checks its repeater's point
+  }
+
+  function drawnAt(props, latlng) {
+    const ll = displayedLatLng(props, latlng);
+    if (props.public_key) S.drawnAt.set(props.public_key, ll);
+    return ll;
+  }
+
+  // Where a repeater's marker is drawn right now, recorded as it is drawn, so
+  // the single-repeater view (focus-view.js) computes from that exact point;
+  // null when it isn't drawn (gone, or hidden by the scope filter).
+  function repeaterLatLng(pubkey) {
+    return (S.drawnAt && S.drawnAt.get(pubkey)) || null;
   }
 
   function setClusteringDisabled(disabled) {
@@ -767,6 +783,7 @@
   }
 
   function applySimulateDeclutter(on) {
+    map.fire("simulatedeclutter", { on }); // focus-view.js steps aside for Simulate
     if (on) {
       if (S.simDeclutterSnapshot) return; // already applied — don't overwrite the real snapshot
       S.simDeclutterSnapshot = {
@@ -802,6 +819,7 @@
     setClusteringDisabled,
     applySimulateDeclutter,
     setCoverageVisible,
+    repeaterLatLng,
     // coverageLayer is reassigned on every recompute, so a live check
     // rather than a cached reference — a stale boolean here would leave
     // the Plan panel's own checkbox out of sync after a background refresh.

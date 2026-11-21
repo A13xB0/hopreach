@@ -14,7 +14,8 @@ importScripts("wasm_exec.js", "wasm-bridge.js", "terrain.js", "propagation.js", 
 // that: at DEM_ZOOM≈11 a single 100km-radius site needs 250+ elevation
 // tiles just to start. Cap the preview's search radius and use a coarser
 // zoom — plenty to judge "does this fill the gap", not meant to reproduce
-// the full map's extreme-range hilltop cases.
+// the full map's extreme-range hilltop cases. A one-off request (the
+// single-repeater view) can pass maxRangeKm to take the full range instead.
 const PREVIEW_MAX_RANGE_KM = 35;
 const PREVIEW_ZOOM_CAP = 10;
 const MAX_NEIGHBORS_PER_SITE = 8;
@@ -24,14 +25,21 @@ self.onmessage = async (e) => {
   // propagation/demgrid and calls registerMeshsim for the simulator), so
   // this is one load — connect-repeaters checks its finished route with
   // the simulator, see checkRoute.
-  await Propagation.ready; // wasm/main.go's exports must be registered before any handler below touches them
-  await MeshSim.ready;
+  try {
+    await Propagation.ready; // wasm/main.go's exports must be registered before any handler below touches them
+    await MeshSim.ready;
+  } catch (err) {
+    // A rejection here never reaches the page's Worker.onerror, so say so.
+    const { generation, kind } = e.data;
+    self.postMessage({ generation, kind, type: "error", message: `Could not load the propagation engine: ${err.message || err}` });
+    return;
+  }
   if (e.data.kind === "connect") return handleConnect(e.data);
   if (e.data.kind === "area-coverage") return handleAreaCoverage(e.data);
   return handlePreview(e.data);
 };
 
-async function handlePreview({ generation, sites, realRepeaters, config, imageWidth }) {
+async function handlePreview({ generation, sites, realRepeaters, config, imageWidth, maxRangeKm }) {
 
   if (!sites || sites.length === 0) {
     self.postMessage({ generation, type: "result", empty: true });
@@ -40,7 +48,10 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
 
   try {
     const propagation = config.propagation;
-    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), PREVIEW_MAX_RANGE_KM);
+    // maxRangeKm: the single-repeater view (focus-view.js) asks for the link
+    // budget (up to its own cap), as the server map uses, not the planner's.
+    const budgetKm = Propagation.linkBudgetMaxRangeKm(propagation);
+    const rangeKm = Math.min(budgetKm, maxRangeKm || PREVIEW_MAX_RANGE_KM);
     const zoom = Math.min(config.demZoom, PREVIEW_ZOOM_CAP);
 
     const kmPerDegLat = 110.574;
@@ -143,6 +154,8 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
         marginGreenDb: propagation.marginGreenDb,
         margins: margins.buffer,
         neighbors,
+        failedTiles: grid.failedTiles,
+        rangeCappedKm: rangeKm < budgetKm ? rangeKm : null, // searched less far than the link budget reaches
       },
       [margins.buffer]
     );

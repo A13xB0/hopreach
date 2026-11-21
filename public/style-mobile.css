@@ -334,4 +334,20 @@
   #map-wrap.sim-open #companion-pin-hint {
     display: none;
   }
+
+  /* --- single-repeater coverage bar: beside the zoom buttons, not over them */
+  .focus-bar {
+    left: 56px;
+    right: 10px;
+    transform: none;
+    max-width: none;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    padding: 0.35rem 0.4rem 0.35rem 0.6rem;
+    font-size: 0.72rem;
+  }
+  .focus-bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-bar-status { flex-shrink: 0; }
+  .focus-bar.ok .focus-bar-status { display: none; } /* "Preview estimate" says it; failures stay shown */
+  .focus-bar-close { flex-shrink: 0; }
 }

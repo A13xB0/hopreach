@@ -20,7 +20,7 @@ const BROWSER_GLOBALS = new Set([
   "performance", "crypto", "structuredClone", "getComputedStyle", "DOMParser",
   "Worker", "Image", "matchMedia", "history", "screen", "AbortController",
   "ResizeObserver", "MutationObserver", "URLSearchParams", "WebAssembly",
-  "createImageBitmap", "OffscreenCanvas", "FinalizationRegistry", "importScripts",
+  "createImageBitmap", "OffscreenCanvas", "FinalizationRegistry", "importScripts", "ImageData",
 ]);
 const JS_GLOBALS = new Set([
   "Object", "Array", "String", "Number", "Boolean", "Math", "JSON", "Date", "RegExp",
@@ -29,13 +29,13 @@ const JS_GLOBALS = new Set([
   "parseFloat", "encodeURIComponent", "decodeURIComponent", "globalThis",
   "Uint8Array", "Uint32Array", "Int32Array", "Float64Array", "DataView", "ArrayBuffer",
   "BigInt", "Proxy", "Reflect", "Intl", "module", "require", "exports", "arguments",
-  "Float32Array", "Float32Array", "Int8Array", "Uint16Array",
+  "Float32Array", "Float32Array", "Int8Array", "Uint16Array", "Uint8ClampedArray",
 ]);
 // Third-party and cross-module surfaces these pages genuinely load first.
 const PAGE_GLOBALS = new Set([
   "L", "MeshApi", "MeshFrame", "SimTopology", "HopReachEvidence", "HopReachPlanner",
   "MCCoverageMap", "HOPREACH_CONFIG", "Go", "meshsim",
-  "MeshSim", "Propagation", "Terrain", "HopReachCartoTiles", "HopReachBrand",
+  "MeshSim", "Propagation", "Terrain", "HopReachCartoTiles", "HopReachBrand", "HopReachRamp",
 ]);
 
 const KNOWN = new Set([...BROWSER_GLOBALS, ...JS_GLOBALS, ...PAGE_GLOBALS]);
