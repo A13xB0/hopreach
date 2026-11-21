@@ -381,6 +381,7 @@
       ${scopeRowsHtml(props)}
       <div class="popup-row"><span>Key</span><span>${escapeHtml((props.public_key || "").slice(0, 12))}</span></div>
       ${calibrationRowHtml(props)}
+      <button type="button" class="popup-focus">Show only this repeater's coverage</button>
     `;
   }
 

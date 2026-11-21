@@ -31,7 +31,7 @@ self.onmessage = async (e) => {
   return handlePreview(e.data);
 };
 
-async function handlePreview({ generation, sites, realRepeaters, config, imageWidth }) {
+async function handlePreview({ generation, sites, realRepeaters, config, imageWidth, maxRangeKm }) {
 
   if (!sites || sites.length === 0) {
     self.postMessage({ generation, type: "result", empty: true });
@@ -40,7 +40,9 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
 
   try {
     const propagation = config.propagation;
-    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), PREVIEW_MAX_RANGE_KM);
+    // maxRangeKm: the single-repeater view (focus-view.js) asks for the full
+    // link budget, as the server map uses, not the planner's cap.
+    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), maxRangeKm || PREVIEW_MAX_RANGE_KM);
     const zoom = Math.min(config.demZoom, PREVIEW_ZOOM_CAP);
 
     const kmPerDegLat = 110.574;

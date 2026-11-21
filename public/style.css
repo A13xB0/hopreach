@@ -288,6 +288,53 @@ header .subtitle {
   justify-content: space-between;
   gap: 1rem;
 }
+.popup-focus {
+  margin-top: 0.5rem;
+  width: 100%;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.popup-focus:hover { border-color: var(--accent); }
+
+/* One repeater's coverage (focus-view.js): whose it is, and the way back. */
+.focus-bar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem 0.75rem;
+  max-width: calc(100% - 32px);
+  padding: 0.45rem 0.6rem 0.45rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 0.8rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.focus-bar-status { color: var(--text-muted); font-size: 0.72rem; }
+.focus-bar-close {
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  border: 0;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+
 .popup-hint {
   margin-top: 0.35rem;
   font-size: 0.68rem;
