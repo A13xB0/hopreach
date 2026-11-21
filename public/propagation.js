@@ -32,13 +32,21 @@
   // object (keyed by reference identity) rather than re-marshaling all 10
   // fields across the JS/Wasm boundary on every single call in a hot search
   // loop — every call site already reuses the same params object across a
-  // whole computation.
+  // whole computation. Each worker message brings a fresh clone of the same
+  // params, so a miss falls back to the contents: equal params share one Go
+  // handle instead of leaking a new one per job.
   const paramsHandles = new WeakMap();
+  const handlesByContent = new Map();
 
   function handleFor(p) {
     let h = paramsHandles.get(p);
     if (h === undefined) {
-      h = self.__hopreachWasm.createParams(p);
+      const key = JSON.stringify(p);
+      h = handlesByContent.get(key);
+      if (h === undefined) {
+        h = self.__hopreachWasm.createParams(p);
+        handlesByContent.set(key, h);
+      }
       paramsHandles.set(p, h);
     }
     return h;

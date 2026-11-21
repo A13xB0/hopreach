@@ -17,6 +17,9 @@
   const Ramp = window.HopReachRamp;
   const FOCUS_WIDTH = 480;
   const BANDS = 8; // see HopReachRamp.latitudeBands
+  // The full link budget, as the server map uses, but never more than this:
+  // with max_range_km unset the raw budget can reach hundreds of km.
+  const FOCUS_MAX_RANGE_KM = 150;
 
   // Just under the overlay pane, which also holds the repeater markers (SVG).
   map.createPane("focusCoverage").style.zIndex = 399;
@@ -116,7 +119,7 @@
       realRepeaters: [],
       config: { demTileURLBase: cfg.demTileURLBase, demZoom: cfg.demZoom, propagation: cfg.propagation },
       imageWidth: FOCUS_WIDTH,
-      maxRangeKm: Infinity, // the full link budget, as the server map uses
+      maxRangeKm: FOCUS_MAX_RANGE_KM,
     });
   }
 
@@ -149,6 +152,7 @@
 
 
   function start(pubkey, name) {
+    if (pubkey === S.pubkey) return map.closePopup(); // already showing
     if (document.getElementById("map-wrap").classList.contains("sim-open")) return;
     if (S.bar) S.bar.remove();
     clearOverlay();
