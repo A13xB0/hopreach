@@ -79,7 +79,12 @@
       S.worker = null;
       fail(e.message || "the worker failed to load");
     };
-    w.onmessageerror = () => w === S.worker && fail("unreadable result");
+    w.onmessageerror = () => {
+      if (w !== S.worker || !S.busy) return;
+      w.terminate();
+      S.worker = null;
+      fail("unreadable result");
+    };
     w.onmessage = (e) => {
       const msg = e.data;
       if (w !== S.worker || msg.generation !== S.job) return;
