@@ -141,18 +141,22 @@
       });
     });
     S.overlay = L.layerGroup(layers).addTo(map);
+    // Say what makes the result partial rather than present it as complete:
+    // failed tiles read as sea level, and a capped search stops short.
+    const caveats = [];
     if (msg.failedTiles > 0) {
-      // Failed tiles read as sea level, so say so rather than look complete.
-      setStatus(`${msg.failedTiles} terrain tile(s) failed to load: parts may be wrong`, true);
-      return;
+      caveats.push(`${msg.failedTiles} terrain tile(s) failed to load: parts may be wrong`);
+      S.failed = true; // the button retries it
     }
+    if (msg.rangeCappedKm) caveats.push(`only searched to ${Math.round(msg.rangeCappedKm)} km`);
+    if (caveats.length) return setStatus(caveats.join("; "), true);
     setStatus("computed in your browser, at preview detail", true);
     S.bar.classList.add("ok");
   }
 
 
   function start(pubkey, name) {
-    if (pubkey === S.pubkey) return map.closePopup(); // already showing
+    if (pubkey === S.pubkey && !S.failed) return map.closePopup(); // already showing (a failure retries)
     if (document.getElementById("map-wrap").classList.contains("sim-open")) return;
     if (S.bar) S.bar.remove();
     clearOverlay();

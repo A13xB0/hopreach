@@ -112,6 +112,7 @@ test("Simulate ends the view, and it can't start while Simulate is open", async 
 });
 
 test("terrain tiles that fail to load are reported, not drawn as complete", async ({ page }) => {
+  test.setTimeout(300_000); // two full computations
   // Fail every other tile column with a server error (not a 404, which is sea).
   await page.route("**/dem-tiles/**", (route) => {
     const x = Number(route.request().url().split("/").slice(-2)[0]);
@@ -123,4 +124,10 @@ test("terrain tiles that fail to load are reported, not drawn as complete", asyn
   const status = page.locator(".focus-bar-status");
   await expect(status).toContainText("terrain tile(s) failed to load", { timeout: 180_000 });
   await expect(page.locator(".focus-bar")).not.toHaveClass(/ok/);
+
+  // Once the tiles are back, the same button retries.
+  await page.unroute("**/dem-tiles/**");
+  await openFirstPopup(page);
+  await page.locator(".popup-focus").last().dispatchEvent("click");
+  await expect(status).toHaveText("computed in your browser, at preview detail", { timeout: 180_000 });
 });

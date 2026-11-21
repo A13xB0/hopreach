@@ -489,9 +489,10 @@
       map.removeLayer(S.clusters);
     }
     S.clusters = S.clusteringDisabled ? L.featureGroup() : L.markerClusterGroup({ maxClusterRadius: 45 });
+    S.drawnAt = new Map(); // public_key -> where its marker is drawn (repeaterLatLng)
     const layer = L.geoJSON(filtered, {
       pointToLayer: (feature, latlng) =>
-        L.circleMarker(displayedLatLng(feature.properties, latlng), {
+        L.circleMarker(drawnAt(feature.properties, latlng), {
           radius: 7,
           fillColor: statusColor[feature.properties.status] || statusColor.silent,
           color: markerRing,
@@ -518,14 +519,17 @@
     map.fire("repeatersrendered"); // focus-view.js re-checks its repeater's point
   }
 
-  // Where a repeater is drawn in the current map mode, so the single-repeater
-  // view (focus-view.js) computes from the same point as its marker; null when
-  // it isn't drawn (gone, or hidden by the scope filter).
+  function drawnAt(props, latlng) {
+    const ll = displayedLatLng(props, latlng);
+    if (props.public_key) S.drawnAt.set(props.public_key, ll);
+    return ll;
+  }
+
+  // Where a repeater's marker is drawn right now, recorded as it is drawn, so
+  // the single-repeater view (focus-view.js) computes from that exact point;
+  // null when it isn't drawn (gone, or hidden by the scope filter).
   function repeaterLatLng(pubkey) {
-    const f = S.currentGeojson && S.currentGeojson.features.find((x) => x.properties.public_key === pubkey);
-    if (!f || !matchesScopeFilter(f.properties)) return null;
-    const [lon, lat] = f.geometry.coordinates;
-    return displayedLatLng(f.properties, L.latLng(lat, lon));
+    return (S.drawnAt && S.drawnAt.get(pubkey)) || null;
   }
 
   function setClusteringDisabled(disabled) {

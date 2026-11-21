@@ -48,9 +48,10 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
 
   try {
     const propagation = config.propagation;
-    // maxRangeKm: the single-repeater view (focus-view.js) asks for the full
-    // link budget, as the server map uses, not the planner's cap.
-    const rangeKm = Math.min(Propagation.linkBudgetMaxRangeKm(propagation), maxRangeKm || PREVIEW_MAX_RANGE_KM);
+    // maxRangeKm: the single-repeater view (focus-view.js) asks for the link
+    // budget (up to its own cap), as the server map uses, not the planner's.
+    const budgetKm = Propagation.linkBudgetMaxRangeKm(propagation);
+    const rangeKm = Math.min(budgetKm, maxRangeKm || PREVIEW_MAX_RANGE_KM);
     const zoom = Math.min(config.demZoom, PREVIEW_ZOOM_CAP);
 
     const kmPerDegLat = 110.574;
@@ -154,6 +155,7 @@ async function handlePreview({ generation, sites, realRepeaters, config, imageWi
         margins: margins.buffer,
         neighbors,
         failedTiles: grid.failedTiles,
+        rangeCappedKm: rangeKm < budgetKm ? rangeKm : null, // searched less far than the link budget reaches
       },
       [margins.buffer]
     );
