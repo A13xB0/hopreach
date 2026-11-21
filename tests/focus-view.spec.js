@@ -34,6 +34,7 @@ async function openFirstPopup(page) {
 }
 
 test("a repeater's coverage shows on its own, and Show all puts the map back", async ({ page }) => {
+  test.setTimeout(240_000); // one full computation, slower on CI runners
   const name = await openFirstPopup(page);
   test.skip(!name, "no repeaters");
   const container = page.locator(".leaflet-container");
