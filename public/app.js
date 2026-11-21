@@ -381,7 +381,7 @@
       ${scopeRowsHtml(props)}
       <div class="popup-row"><span>Key</span><span>${escapeHtml((props.public_key || "").slice(0, 12))}</span></div>
       ${calibrationRowHtml(props)}
-      <button type="button" class="popup-focus" data-pubkey="${escapeHtml(props.public_key || "")}" data-name="${escapeHtml(props.name || "")}">Show only this repeater's coverage</button>
+      ${props.public_key ? `<button type="button" class="popup-focus" data-pubkey="${escapeHtml(props.public_key)}" data-name="${escapeHtml(props.name || "")}">Show only this repeater's coverage</button>` : ""}
     `;
   }
 

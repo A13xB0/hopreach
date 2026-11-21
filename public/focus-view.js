@@ -16,6 +16,7 @@
   const cfg = window.HOPREACH_CONFIG;
   const Ramp = window.HopReachRamp;
   const FOCUS_WIDTH = 480;
+  const BANDS = 8; // see HopReachRamp.latitudeBands
 
   // Just under the overlay pane, which also holds the repeater markers (SVG).
   map.createPane("focusCoverage").style.zIndex = 399;
@@ -81,7 +82,12 @@
       if (w !== S.worker || msg.generation !== S.job) return;
       if (msg.type === "progress") setStatus(`Computing… ${Math.round((100 * msg.done) / msg.total)}%`);
       else if (msg.type === "status") setStatus(msg.message);
-      else if (msg.type === "error") fail(msg.message);
+      else if (msg.type === "error") {
+        // Its engine may never have loaded; the next job starts a fresh one.
+        w.terminate();
+        S.worker = null;
+        fail(msg.message);
+      }
       else if (msg.type === "result") {
         S.busy = false;
         render(msg);
@@ -116,19 +122,16 @@
 
   function render(msg) {
     clearOverlay();
-    if (msg.empty) return setStatus("No coverage computed", true);
-    const canvas = document.createElement("canvas");
-    canvas.width = msg.imageWidth;
-    canvas.height = msg.imageHeight;
-    const ctx = canvas.getContext("2d");
-    const img = ctx.createImageData(msg.imageWidth, msg.imageHeight);
-    Ramp.paintMargins(img.data, new Float32Array(msg.margins), msg.marginGreenDb, 190, ...Ramp.SERVER_RAMP);
-    ctx.putImageData(img, 0, 0);
-    const b = msg.bounds;
-    S.overlay = L.imageOverlay(canvas.toDataURL("image/png"), [[b.south, b.west], [b.north, b.east]], {
-      interactive: false,
-      pane: "focusCoverage",
-    }).addTo(map);
+    const { imageWidth: w, imageHeight: h, bounds: b } = msg;
+    const rgba = Ramp.paintMargins(new Uint8ClampedArray(w * h * 4), new Float32Array(msg.margins), msg.marginGreenDb, 190, ...Ramp.SERVER_RAMP);
+    const layers = Ramp.latitudeBands(h, b.north, b.south, BANDS).map((band) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = band.y1 - band.y0;
+      canvas.getContext("2d").putImageData(new ImageData(rgba.slice(band.y0 * w * 4, band.y1 * w * 4), w, canvas.height), 0, 0);
+      return L.imageOverlay(canvas.toDataURL("image/png"), [[band.south, b.west], [band.north, b.east]], { interactive: false, pane: "focusCoverage" });
+    });
+    S.overlay = L.layerGroup(layers).addTo(map);
     setStatus("computed in your browser, at preview detail", true);
     S.bar.classList.add("ok");
   }

@@ -27,3 +27,15 @@ test("paintMargins truncates, as Go's uint8() does on the server", () => {
   R.paintMargins(rgba, new Float32Array([9]), 15, 190, [0, 0, 0], [1, 1, 1]); // 0.6 each
   assert.deepEqual([...rgba], [0, 0, 0, 190]);
 });
+
+test("latitudeBands splits rows into contiguous bands with matching edges", () => {
+  const bands = R.latitudeBands(10, 57, 55, 4);
+  assert.deepEqual(bands.map((b) => [b.y0, b.y1]), [[0, 3], [3, 5], [5, 8], [8, 10]]);
+  assert.equal(bands[0].north, 57);
+  assert.equal(bands[3].south, 55);
+  for (let i = 1; i < bands.length; i++) assert.equal(bands[i].north, bands[i - 1].south);
+});
+
+test("latitudeBands never makes an empty band", () => {
+  assert.equal(R.latitudeBands(3, 57, 55, 8).length, 3);
+});

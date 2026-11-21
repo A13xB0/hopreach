@@ -47,7 +47,7 @@ test("a repeater's coverage shows on its own, and Show all puts the map back", a
   const status = bar.locator(".focus-bar-status");
   await expect(status).not.toHaveText(/^(Loading|Computing)/, { timeout: 180_000 });
   await expect(status).toHaveText("computed in your browser, at preview detail");
-  await expect(page.locator(".leaflet-focusCoverage-pane img")).toHaveCount(1);
+  await expect(page.locator(".leaflet-focusCoverage-pane img")).not.toHaveCount(0);
   // Every other coverage image (main, region scope, planner preview) is hidden.
   const shown = await page.$$eval(".leaflet-overlay-pane img.leaflet-image-layer", (imgs) =>
     imgs.filter((i) => getComputedStyle(i).visibility !== "hidden").length);
@@ -59,7 +59,7 @@ test("a repeater's coverage shows on its own, and Show all puts the map back", a
     if (select) select.dispatchEvent(new Event("change", { bubbles: true }));
   });
   await expect(bar).toHaveClass(/ok/);
-  await expect(page.locator(".leaflet-focusCoverage-pane img")).toHaveCount(1);
+  await expect(page.locator(".leaflet-focusCoverage-pane img")).not.toHaveCount(0);
 
   await page.click(".focus-bar-close");
   await expect(bar).toHaveCount(0);

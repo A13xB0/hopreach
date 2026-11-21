@@ -1,5 +1,6 @@
-// Coverage margins (dB) into RGBA pixels, shared by every raster the browser
-// paints itself: the planner's preview and the single-repeater view.
+// Coverage rasters the browser paints itself (the planner's preview and the
+// single-repeater view): margins (dB) into RGBA pixels, and how to lay them
+// on the map.
 (function (root, factory) {
   const api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
@@ -32,5 +33,19 @@
     return rgba;
   }
 
-  return { SERVER_RAMP, paintMargins };
+  // Rows are spaced evenly in latitude, but Leaflet stretches an image evenly
+  // in Web Mercator. Over ±0.9° at 56°N that puts coverage ~1.2 km off; drawn
+  // as n bands it's ~20 m at 8. Returns each band's rows [y0, y1) and edges.
+  function latitudeBands(height, north, south, n) {
+    const bands = [];
+    for (let i = 0; i < n; i++) {
+      const y0 = Math.round((i * height) / n);
+      const y1 = Math.round(((i + 1) * height) / n);
+      if (y1 <= y0) continue;
+      bands.push({ y0, y1, north: north - (y0 / height) * (north - south), south: north - (y1 / height) * (north - south) });
+    }
+    return bands;
+  }
+
+  return { SERVER_RAMP, paintMargins, latitudeBands };
 });
